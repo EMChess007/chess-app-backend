@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OpponentType {
+  bot
+  human
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  games           Game[]
+  puzzleProgress  PuzzleProgress[]
+
+  @@map("users")
+}
+
+model Game {
+  id           String       @id @default(uuid())
+  userId       String       @map("user_id")
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opponentType OpponentType @map("opponent_type")
+  opponentElo  Int?         @map("opponent_elo")
+  result       String
+  pgn          String
+  timeControl  String       @map("time_control")
+  isChess960   Boolean      @default(false) @map("is_chess960")
+  playedAt     DateTime     @default(now()) @map("played_at")
+
+  @@index([userId])
+  @@map("games")
+}
+
+model PuzzleProgress {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  puzzleDate  String    @map("puzzle_date")
+  solved      Boolean   @default(false)
+  completedAt DateTime? @map("completed_at")
+
+  @@unique([userId, puzzleDate])
+  @@map("puzzle_progress")
+}

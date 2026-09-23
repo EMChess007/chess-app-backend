@@ -2,7 +2,18 @@ import type { Server, Socket } from 'socket.io';
 import { verifyToken } from '../lib/jwt.js';
 import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
-import type { Ack, JoinQueuePayload, MakeMovePayload, MatchFoundPayload, RejoinGamePayload, TimeControl } from './types.js';
+import type {
+  Ack,
+  JoinQueuePayload,
+  MakeMovePayload,
+  MatchFoundPayload,
+  OfferDrawPayload,
+  RejoinGamePayload,
+  ResignPayload,
+  RespondDrawPayload,
+  SendChatPayload,
+  TimeControl,
+} from './types.js';
 
 /** Optional: a logged-in user can pass their existing JWT via `socket.handshake.auth.token` to
  * be identified by userId (for future rating/history use); guests simply omit it and play
@@ -38,7 +49,7 @@ export function registerSocketHandlers(io: Server): void {
 
     socket.on('join_queue', (payload: JoinQueuePayload, ack?: (res: Ack) => void) => {
       if (!isValidTimeControl(payload?.timeControl)) {
-        ack?.({ ok: false, error: 'Μη έγκυρο time control.' });
+        ack?.({ ok: false, error: 'Invalid time control.' });
         return;
       }
 
@@ -55,7 +66,7 @@ export function registerSocketHandlers(io: Server): void {
       ack?.({ ok: true });
       if (!opponent) return;
 
-      // Coin flip for colors, per "τυχαία ή εναλλάξ" — a simple 50/50 is enough for now.
+      // Coin flip for colors, per "random or alternating" — a simple 50/50 is enough for now.
       const entryIsWhite = Math.random() < 0.5;
       const whiteEntry = entryIsWhite ? entry : opponent;
       const blackEntry = entryIsWhite ? opponent : entry;
@@ -106,6 +117,22 @@ export function registerSocketHandlers(io: Server): void {
     socket.on('rejoin_game', (payload: RejoinGamePayload, ack?: (res: Ack) => void) => {
       const result = rooms.rejoin(socket.id, payload);
       ack?.(result);
+    });
+
+    socket.on('resign', (payload: ResignPayload, ack?: (res: Ack) => void) => {
+      ack?.(rooms.resign(socket.id, payload?.roomId));
+    });
+
+    socket.on('offer_draw', (payload: OfferDrawPayload, ack?: (res: Ack) => void) => {
+      ack?.(rooms.offerDraw(socket.id, payload?.roomId));
+    });
+
+    socket.on('respond_draw', (payload: RespondDrawPayload, ack?: (res: Ack) => void) => {
+      ack?.(rooms.respondToDraw(socket.id, payload?.roomId, Boolean(payload?.accept)));
+    });
+
+    socket.on('send_chat', (payload: SendChatPayload, ack?: (res: Ack) => void) => {
+      ack?.(rooms.sendChatMessage(socket.id, payload?.roomId, typeof payload?.text === 'string' ? payload.text : ''));
     });
 
     socket.on('disconnect', () => {

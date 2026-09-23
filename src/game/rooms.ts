@@ -4,6 +4,8 @@ import { generateChess960Position } from './chess960.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
 import type {
   Ack,
+  ChatMessagePayload,
+  DrawOfferedPayload,
   GameOverPayload,
   GameOverReason,
   MakeMovePayload,
@@ -17,6 +19,12 @@ import type {
  * on abandonment — independent of (and in addition to) the normal clock/timeout mechanism, so
  * a disconnect with minutes still on the clock doesn't force the opponent to wait that long. */
 const ABANDONMENT_GRACE_MS = 45_000;
+
+/** Minimum time a player must wait after a draw offer (whether accepted, declined, or still
+ * unanswered) before sending another one — the simplest possible spam guard, per-player. */
+const DRAW_OFFER_COOLDOWN_MS = 30_000;
+
+const CHAT_MAX_LENGTH = 500;
 
 interface PlayerSlot {
   socketId: string | null;
@@ -43,6 +51,11 @@ interface Room {
   clockTimer: NodeJS.Timeout | null;
   players: Record<PieceColor, PlayerSlot>;
   status: 'active' | 'finished';
+  /** The color that currently has an outstanding, unanswered draw offer, if any — at most one
+   * offer may be pending at a time (see offerDraw). */
+  pendingDrawOfferBy: PieceColor | null;
+  /** Server timestamp of each color's most recent draw offer, for the cooldown in offerDraw. */
+  lastDrawOfferAt: Partial<Record<PieceColor, number>>;
 }
 
 export interface CreateRoomParams {
@@ -62,7 +75,7 @@ export interface CreateRoomResult {
 }
 
 function initialClockMs(timeControl: TimeControl): number {
-  // A non-positive initialSeconds means "no clock" (matches the mobile app's "Χωρίς χρόνο"
+  // A non-positive initialSeconds means "no clock" (matches the mobile app's "No time limit"
   // time control) — represented as a very large remaining time rather than 0, and the timeout
   // timer is never scheduled for it (see scheduleTimeout), so it's effectively never checked.
   return timeControl.initialSeconds > 0 ? timeControl.initialSeconds * 1000 : Number.MAX_SAFE_INTEGER;
@@ -103,6 +116,8 @@ export class RoomManager {
         b: { socketId: params.black.socketId, userId: params.black.userId, playerToken: blackPlayerToken, disconnectedAt: null, abandonTimer: null },
       },
       status: 'active',
+      pendingDrawOfferBy: null,
+      lastDrawOfferAt: {},
     };
 
     this.rooms.set(id, room);
@@ -120,21 +135,21 @@ export class RoomManager {
   applyMove(socketId: string, payload: MakeMovePayload): Ack<{ fen: string; san: string; turn: PieceColor; whiteMs: number; blackMs: number }> {
     const location = this.socketToRoom.get(socketId);
     if (!location || location.roomId !== payload.roomId) {
-      return { ok: false, error: 'Δεν βρέθηκε ενεργό παιχνίδι για αυτή τη σύνδεση.' };
+      return { ok: false, error: 'No active game found for this connection.' };
     }
     const room = this.rooms.get(location.roomId);
     if (!room || room.status !== 'active') {
-      return { ok: false, error: 'Το παιχνίδι δεν είναι πια ενεργό.' };
+      return { ok: false, error: 'The game is no longer active.' };
     }
 
     const mover = location.color;
     if (room.engine.getTurn() !== mover) {
-      return { ok: false, error: 'Δεν είναι η σειρά σου.' };
+      return { ok: false, error: "It's not your turn." };
     }
 
     const result = room.engine.move(payload.from, payload.to, payload.promotion);
     if (!result) {
-      return { ok: false, error: 'Μη έγκυρη κίνηση.' };
+      return { ok: false, error: 'Invalid move.' };
     }
 
     const now = Date.now();
@@ -181,14 +196,14 @@ export class RoomManager {
   rejoin(socketId: string, payload: RejoinGamePayload): Ack<{ state: RejoinStatePayload }> {
     const room = this.rooms.get(payload.roomId);
     if (!room || room.status !== 'active') {
-      return { ok: false, error: 'Το παιχνίδι δεν βρέθηκε ή έχει ήδη τελειώσει.' };
+      return { ok: false, error: 'The game was not found or has already ended.' };
     }
 
     let color: PieceColor | null = null;
     if (room.players.w.playerToken === payload.playerToken) color = 'w';
     else if (room.players.b.playerToken === payload.playerToken) color = 'b';
     if (!color) {
-      return { ok: false, error: 'Μη έγκυρο playerToken.' };
+      return { ok: false, error: 'Invalid playerToken.' };
     }
 
     const slot = room.players[color];
@@ -220,6 +235,108 @@ export class RoomManager {
         opponentConnected: opponentSlot.socketId !== null,
       },
     };
+  }
+
+  /** Resolves `socketId` to its active room + seat color, or null if it isn't currently seated
+   * in a still-active game — the shared guard every action below (resign, draw, chat) needs. */
+  private locateActiveRoom(socketId: string): { room: Room; color: PieceColor } | null {
+    const location = this.socketToRoom.get(socketId);
+    if (!location) return null;
+    const room = this.rooms.get(location.roomId);
+    if (!room || room.status !== 'active') return null;
+    return { room, color: location.color };
+  }
+
+  resign(socketId: string, roomId: string): Ack {
+    const located = this.locateActiveRoom(socketId);
+    if (!located || located.room.id !== roomId) {
+      return { ok: false, error: 'No active game found for this connection.' };
+    }
+    const { room, color } = located;
+    const winner: PieceColor = color === 'w' ? 'b' : 'w';
+    this.endGame(room, 'resignation', winner);
+    return { ok: true };
+  }
+
+  /** Sends a draw offer to the opponent. Guards against spam with a simple per-player cooldown
+   * and by only ever allowing one outstanding offer in a room at a time. */
+  offerDraw(socketId: string, roomId: string): Ack {
+    const located = this.locateActiveRoom(socketId);
+    if (!located || located.room.id !== roomId) {
+      return { ok: false, error: 'No active game found for this connection.' };
+    }
+    const { room, color } = located;
+
+    if (room.pendingDrawOfferBy) {
+      return { ok: false, error: 'A draw offer is already pending.' };
+    }
+    const lastOfferAt = room.lastDrawOfferAt[color];
+    if (lastOfferAt !== undefined && Date.now() - lastOfferAt < DRAW_OFFER_COOLDOWN_MS) {
+      const waitSeconds = Math.ceil((DRAW_OFFER_COOLDOWN_MS - (Date.now() - lastOfferAt)) / 1000);
+      return { ok: false, error: `Please wait ${waitSeconds}s before offering another draw.` };
+    }
+
+    room.pendingDrawOfferBy = color;
+    room.lastDrawOfferAt[color] = Date.now();
+
+    const opponentColor: PieceColor = color === 'w' ? 'b' : 'w';
+    const opponentSlot = room.players[opponentColor];
+    if (opponentSlot.socketId) {
+      const payload: DrawOfferedPayload = { by: color };
+      this.io.to(opponentSlot.socketId).emit('draw_offered', payload);
+    }
+    return { ok: true };
+  }
+
+  /** The opponent's response to a pending draw offer — accepting ends the game as a draw;
+   * declining just clears the pending flag so a new offer can be made later (subject to the
+   * same cooldown as any other offer). */
+  respondToDraw(socketId: string, roomId: string, accept: boolean): Ack {
+    const located = this.locateActiveRoom(socketId);
+    if (!located || located.room.id !== roomId) {
+      return { ok: false, error: 'No active game found for this connection.' };
+    }
+    const { room, color } = located;
+
+    if (!room.pendingDrawOfferBy || room.pendingDrawOfferBy === color) {
+      return { ok: false, error: 'There is no draw offer waiting for your response.' };
+    }
+    const offeredBy = room.pendingDrawOfferBy;
+    room.pendingDrawOfferBy = null;
+
+    if (accept) {
+      this.endGame(room, 'draw', null);
+      return { ok: true };
+    }
+
+    const offererSlot = room.players[offeredBy];
+    if (offererSlot.socketId) {
+      this.io.to(offererSlot.socketId).emit('draw_declined', {});
+    }
+    return { ok: true };
+  }
+
+  /** Relays a chat message to the opponent — no history is kept server-side (nothing to persist
+   * or moderate beyond a length cap), it's a pure live relay for the lifetime of the room. */
+  sendChatMessage(socketId: string, roomId: string, text: string): Ack {
+    const located = this.locateActiveRoom(socketId);
+    if (!located || located.room.id !== roomId) {
+      return { ok: false, error: 'No active game found for this connection.' };
+    }
+    const { room, color } = located;
+
+    const trimmed = text.trim().slice(0, CHAT_MAX_LENGTH);
+    if (!trimmed) {
+      return { ok: false, error: 'Message is empty.' };
+    }
+
+    const opponentColor: PieceColor = color === 'w' ? 'b' : 'w';
+    const opponentSlot = room.players[opponentColor];
+    if (opponentSlot.socketId) {
+      const payload: ChatMessagePayload = { from: color, text: trimmed, sentAt: Date.now() };
+      this.io.to(opponentSlot.socketId).emit('chat_message', payload);
+    }
+    return { ok: true };
   }
 
   /** Called from the io-level 'disconnect' handler for every socket, regardless of whether it

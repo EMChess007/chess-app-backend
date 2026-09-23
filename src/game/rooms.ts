@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'socket.io';
+import { prisma } from '../lib/prisma.js';
 import { generateChess960Position } from './chess960.js';
+import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
 import type {
   Ack,
@@ -40,6 +42,9 @@ interface Room {
   initialFen: string;
   chess960: boolean;
   timeControl: TimeControl;
+  /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
+   * JoinQueuePayload.timeControlLabel. */
+  timeControlLabel: string;
   moves: AppliedMove[];
   whiteMs: number;
   blackMs: number;
@@ -62,7 +67,14 @@ export interface CreateRoomParams {
   white: { socketId: string; userId: string | null };
   black: { socketId: string; userId: string | null };
   timeControl: TimeControl;
+  timeControlLabel?: string;
   chess960: boolean;
+}
+
+function defaultTimeControlLabel(tc: TimeControl): string {
+  if (tc.initialSeconds <= 0) return 'No time limit';
+  const minutes = Math.round(tc.initialSeconds / 60);
+  return tc.incrementSeconds > 0 ? `${minutes} | ${tc.incrementSeconds}` : `${minutes} min`;
 }
 
 export interface CreateRoomResult {
@@ -106,6 +118,7 @@ export class RoomManager {
       initialFen,
       chess960: params.chess960,
       timeControl: params.timeControl,
+      timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
       whiteMs: ms,
       blackMs: ms,
@@ -397,6 +410,50 @@ export class RoomManager {
       }
     }
 
+    // Fire-and-forget: persistence is a best-effort side effect and must never delay or risk
+    // the game_over broadcast above, which already happened by this point.
+    this.persistGameResult(room, winner).catch((err) => {
+      console.error(`[rooms] failed to save online game history for room ${room.id}:`, err);
+    });
+
     this.rooms.delete(room.id);
+  }
+
+  /** Saves one Game row per logged-in player (guests, who have no userId, are skipped — there's
+   * no account to attach history to) so every online game — whatever it ended by — shows up in
+   * both players' history the same way a Local/Bot game does. Uses the exact same Game model,
+   * just with opponentType 'online' plus the two online-only fields (opponentUsername, color). */
+  private async persistGameResult(room: Room, winner: PieceColor | null): Promise<void> {
+    const userIds = (['w', 'b'] as const)
+      .map((c) => room.players[c].userId)
+      .filter((id): id is string => id !== null);
+    if (userIds.length === 0) return; // both players were guests — nothing to save
+
+    const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
+    const pgn = buildPgn(room.initialFen, room.moves, result);
+
+    const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
+    const usernameById = new Map(users.map((u) => [u.id, u.username]));
+
+    const rows = (['w', 'b'] as const)
+      .map((color) => {
+        const userId = room.players[color].userId;
+        if (!userId) return null;
+        const opponentColor: PieceColor = color === 'w' ? 'b' : 'w';
+        const opponentUserId = room.players[opponentColor].userId;
+        return {
+          userId,
+          opponentType: 'online' as const,
+          opponentUsername: opponentUserId ? (usernameById.get(opponentUserId) ?? null) : null,
+          color,
+          result,
+          pgn,
+          timeControl: room.timeControlLabel,
+          isChess960: room.chess960,
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
+
+    await prisma.$transaction(rows.map((data) => prisma.game.create({ data })));
   }
 }

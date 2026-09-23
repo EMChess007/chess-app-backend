@@ -57,6 +57,7 @@ export function registerSocketHandlers(io: Server): void {
         socketId: socket.id,
         userId,
         timeControl: payload.timeControl,
+        timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
         isChess960: Boolean(payload.isChess960),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
@@ -75,6 +76,7 @@ export function registerSocketHandlers(io: Server): void {
         white: { socketId: whiteEntry.socketId, userId: whiteEntry.userId },
         black: { socketId: blackEntry.socketId, userId: blackEntry.userId },
         timeControl: entry.timeControl,
+        timeControlLabel: entry.timeControlLabel ?? opponent.timeControlLabel,
         chess960: entry.isChess960,
       });
 

@@ -4,6 +4,7 @@ export interface QueueEntry {
   socketId: string;
   userId: string | null;
   timeControl: TimeControl;
+  timeControlLabel?: string;
   isChess960: boolean;
   /**
    * Accepted from the client but deliberately unused for pairing right now — matchmaking is

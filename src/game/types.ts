@@ -14,6 +14,11 @@ export type GameOverReason = 'checkmate' | 'stalemate' | 'draw' | 'timeout' | 'a
 export interface JoinQueuePayload {
   timeControl: TimeControl;
   isChess960?: boolean;
+  /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
+   * to the saved game history row so online games show the same labels Local/Bot games do,
+   * without duplicating the client's preset table server-side. Optional for backward
+   * compatibility; falls back to a generic computed label if omitted. */
+  timeControlLabel?: string;
   /** Accepted but not yet used for matching — see ROADMAP note in matchmaking.ts. */
   rating?: number;
 }

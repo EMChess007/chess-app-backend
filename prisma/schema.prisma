@@ -10,6 +10,7 @@ datasource db {
 enum OpponentType {
   bot
   human
+  online
 }
 
 model User {
@@ -29,13 +30,18 @@ model Game {
   id           String       @id @default(uuid())
   userId       String       @map("user_id")
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  opponentType OpponentType @map("opponent_type")
-  opponentElo  Int?         @map("opponent_elo")
-  result       String
-  pgn          String
-  timeControl  String       @map("time_control")
-  isChess960   Boolean      @default(false) @map("is_chess960")
-  playedAt     DateTime     @default(now()) @map("played_at")
+  opponentType     OpponentType @map("opponent_type")
+  opponentElo      Int?         @map("opponent_elo")
+  /// Display name of the human opponent — online games only; null for local/bot games.
+  opponentUsername String?      @map("opponent_username")
+  /// Which color this row's own user played — online games only, lets history show "You won"
+  /// instead of an ambiguous absolute "White won" (local/bot games have no fixed "you").
+  color            String?      @map("player_color")
+  result           String
+  pgn              String
+  timeControl      String       @map("time_control")
+  isChess960       Boolean      @default(false) @map("is_chess960")
+  playedAt         DateTime     @default(now()) @map("played_at")
 
   @@index([userId])
   @@map("games")

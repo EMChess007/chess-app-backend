@@ -1,9 +1,12 @@
 import type { Server, Socket } from 'socket.io';
 import { verifyToken } from '../lib/jwt.js';
+import { ChallengeManager } from './challenges.js';
 import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
 import type {
   Ack,
+  CreateChallengePayload,
+  JoinChallengePayload,
   JoinQueuePayload,
   MakeMovePayload,
   MatchFoundPayload,
@@ -39,9 +42,61 @@ function isValidTimeControl(value: unknown): value is TimeControl {
   );
 }
 
+interface PairableEntry {
+  socketId: string;
+  userId: string | null;
+  timeControl: TimeControl;
+  timeControlLabel?: string;
+  isChess960: boolean;
+}
+
 export function registerSocketHandlers(io: Server): void {
   const matchmaker = new Matchmaker();
   const rooms = new RoomManager(io);
+  const challenges = new ChallengeManager();
+
+  /** Creates a room for two already-paired entries (from the anonymous queue or a challenge code
+   * alike) and pushes `match_found` to both — the one piece of logic join_queue's pairing and
+   * join_challenge's pairing both need identically. */
+  function pairAndCreateRoom(a: PairableEntry, b: PairableEntry): void {
+    // Coin flip for colors, per "random or alternating" — a simple 50/50 is enough for now.
+    const aIsWhite = Math.random() < 0.5;
+    const whiteEntry = aIsWhite ? a : b;
+    const blackEntry = aIsWhite ? b : a;
+
+    const created = rooms.createRoom({
+      white: { socketId: whiteEntry.socketId, userId: whiteEntry.userId },
+      black: { socketId: blackEntry.socketId, userId: blackEntry.userId },
+      timeControl: a.timeControl,
+      timeControlLabel: a.timeControlLabel ?? b.timeControlLabel,
+      chess960: a.isChess960,
+    });
+
+    const basePayload = {
+      roomId: created.roomId,
+      timeControl: a.timeControl,
+      isChess960: a.isChess960,
+      fen: created.fen,
+      whiteMs: created.whiteMs,
+      blackMs: created.blackMs,
+    };
+    const whitePayload: MatchFoundPayload = {
+      ...basePayload,
+      color: 'w',
+      playerToken: created.whitePlayerToken,
+      opponent: { userId: blackEntry.userId },
+    };
+    const blackPayload: MatchFoundPayload = {
+      ...basePayload,
+      color: 'b',
+      playerToken: created.blackPlayerToken,
+      opponent: { userId: whiteEntry.userId },
+    };
+
+    io.to(whiteEntry.socketId).emit('match_found', whitePayload);
+    io.to(blackEntry.socketId).emit('match_found', blackPayload);
+    console.log(`[socket] match_found room=${created.roomId} white=${whiteEntry.socketId} black=${blackEntry.socketId}`);
+  }
 
   io.on('connection', (socket) => {
     const userId = extractUserId(socket);
@@ -66,48 +121,76 @@ export function registerSocketHandlers(io: Server): void {
       const opponent = matchmaker.join(entry);
       ack?.({ ok: true });
       if (!opponent) return;
-
-      // Coin flip for colors, per "random or alternating" — a simple 50/50 is enough for now.
-      const entryIsWhite = Math.random() < 0.5;
-      const whiteEntry = entryIsWhite ? entry : opponent;
-      const blackEntry = entryIsWhite ? opponent : entry;
-
-      const created = rooms.createRoom({
-        white: { socketId: whiteEntry.socketId, userId: whiteEntry.userId },
-        black: { socketId: blackEntry.socketId, userId: blackEntry.userId },
-        timeControl: entry.timeControl,
-        timeControlLabel: entry.timeControlLabel ?? opponent.timeControlLabel,
-        chess960: entry.isChess960,
-      });
-
-      const basePayload = {
-        roomId: created.roomId,
-        timeControl: entry.timeControl,
-        isChess960: entry.isChess960,
-        fen: created.fen,
-        whiteMs: created.whiteMs,
-        blackMs: created.blackMs,
-      };
-      const whitePayload: MatchFoundPayload = {
-        ...basePayload,
-        color: 'w',
-        playerToken: created.whitePlayerToken,
-        opponent: { userId: blackEntry.userId },
-      };
-      const blackPayload: MatchFoundPayload = {
-        ...basePayload,
-        color: 'b',
-        playerToken: created.blackPlayerToken,
-        opponent: { userId: whiteEntry.userId },
-      };
-
-      io.to(whiteEntry.socketId).emit('match_found', whitePayload);
-      io.to(blackEntry.socketId).emit('match_found', blackPayload);
-      console.log(`[socket] match_found room=${created.roomId} white=${whiteEntry.socketId} black=${blackEntry.socketId}`);
+      pairAndCreateRoom(entry, opponent);
     });
 
     socket.on('leave_queue', (_payload: unknown, ack?: (res: Ack) => void) => {
       matchmaker.leave(socket.id);
+      ack?.({ ok: true });
+    });
+
+    socket.on('create_challenge', (payload: CreateChallengePayload, ack?: (res: Ack<{ code: string }>) => void) => {
+      if (!isValidTimeControl(payload?.timeControl)) {
+        ack?.({ ok: false, error: 'Invalid time control.' });
+        return;
+      }
+      const challenge = challenges.create({
+        creatorSocketId: socket.id,
+        creatorUserId: userId,
+        timeControl: payload.timeControl,
+        timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
+        isChess960: Boolean(payload.isChess960),
+      });
+      ack?.({ ok: true, code: challenge.code });
+    });
+
+    socket.on('cancel_challenge', (payload: JoinChallengePayload, ack?: (res: Ack) => void) => {
+      const challenge = challenges.find(payload?.code);
+      if (!challenge || challenge.creatorSocketId !== socket.id) {
+        ack?.({ ok: false, error: 'Challenge not found.' });
+        return;
+      }
+      challenges.remove(payload.code);
+      ack?.({ ok: true });
+    });
+
+    socket.on('join_challenge', (payload: JoinChallengePayload, ack?: (res: Ack) => void) => {
+      const code = typeof payload?.code === 'string' ? payload.code.trim().toUpperCase() : '';
+      const challenge = challenges.find(code);
+      if (!challenge) {
+        ack?.({ ok: false, error: 'That challenge code was not found or has expired.' });
+        return;
+      }
+      if (challenge.creatorSocketId === socket.id) {
+        ack?.({ ok: false, error: "You can't join your own challenge." });
+        return;
+      }
+      challenges.remove(code);
+      ack?.({ ok: true });
+      pairAndCreateRoom(
+        {
+          socketId: challenge.creatorSocketId,
+          userId: challenge.creatorUserId,
+          timeControl: challenge.timeControl,
+          timeControlLabel: challenge.timeControlLabel,
+          isChess960: challenge.isChess960,
+        },
+        { socketId: socket.id, userId, timeControl: challenge.timeControl, timeControlLabel: challenge.timeControlLabel, isChess960: challenge.isChess960 }
+      );
+    });
+
+    socket.on('list_active_games', async (_payload: unknown, ack?: (res: Ack<{ games: Awaited<ReturnType<typeof rooms.listActiveGames>> }>) => void) => {
+      const games = await rooms.listActiveGames();
+      ack?.({ ok: true, games });
+    });
+
+    socket.on('spectate_game', (payload: { roomId: string }, ack?: (res: Ack) => void) => {
+      const result = rooms.spectate(socket.id, payload?.roomId);
+      ack?.(result);
+    });
+
+    socket.on('stop_spectating', (_payload: unknown, ack?: (res: Ack) => void) => {
+      rooms.stopSpectating(socket.id);
       ack?.({ ok: true });
     });
 
@@ -139,6 +222,7 @@ export function registerSocketHandlers(io: Server): void {
 
     socket.on('disconnect', () => {
       matchmaker.leave(socket.id);
+      challenges.removeByCreator(socket.id);
       rooms.handleDisconnect(socket.id);
       console.log(`[socket] disconnected ${socket.id}`);
     });

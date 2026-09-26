@@ -5,6 +5,7 @@ import { generateChess960Position } from './chess960.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
 import type {
+  ActiveGameSummary,
   Ack,
   ChatMessagePayload,
   DrawOfferedPayload,
@@ -14,6 +15,8 @@ import type {
   OpponentMovePayload,
   RejoinGamePayload,
   RejoinStatePayload,
+  SpectateStatePayload,
+  SpectatorMovePayload,
   TimeControl,
 } from './types.js';
 
@@ -61,6 +64,9 @@ interface Room {
   pendingDrawOfferBy: PieceColor | null;
   /** Server timestamp of each color's most recent draw offer, for the cooldown in offerDraw. */
   lastDrawOfferAt: Partial<Record<PieceColor, number>>;
+  /** Sockets watching this game read-only (see spectate) — every active game is spectatable by
+   * default, same as Lichess's own default. */
+  spectators: Set<string>;
 }
 
 export interface CreateRoomParams {
@@ -101,6 +107,7 @@ function initialClockMs(timeControl: TimeControl): number {
 export class RoomManager {
   private rooms = new Map<string, Room>();
   private socketToRoom = new Map<string, { roomId: string; color: PieceColor }>();
+  private socketToSpectatingRoom = new Map<string, string>();
 
   constructor(private io: Server) {}
 
@@ -131,6 +138,7 @@ export class RoomManager {
       status: 'active',
       pendingDrawOfferBy: null,
       lastDrawOfferAt: {},
+      spectators: new Set(),
     };
 
     this.rooms.set(id, room);
@@ -180,19 +188,21 @@ export class RoomManager {
     const opponentColor: PieceColor = mover === 'w' ? 'b' : 'w';
     const opponentSlot = room.players[opponentColor];
 
+    const movePayload: OpponentMovePayload = {
+      from: result.from,
+      to: result.to,
+      promotion: result.promotion,
+      san: result.san,
+      fen: room.engine.getFen(),
+      turn: newTurn,
+      whiteMs: room.whiteMs,
+      blackMs: room.blackMs,
+    };
     if (opponentSlot.socketId) {
-      const movePayload: OpponentMovePayload = {
-        from: result.from,
-        to: result.to,
-        promotion: result.promotion,
-        san: result.san,
-        fen: room.engine.getFen(),
-        turn: newTurn,
-        whiteMs: room.whiteMs,
-        blackMs: room.blackMs,
-      };
       this.io.to(opponentSlot.socketId).emit('opponent_move', movePayload);
     }
+    const spectatorPayload: SpectatorMovePayload = { ...movePayload, mover };
+    this.broadcastToSpectators(room, 'spectator_move', spectatorPayload);
 
     if (room.engine.isGameOver()) {
       const status = room.engine.getStatus();
@@ -352,9 +362,68 @@ export class RoomManager {
     return { ok: true };
   }
 
+  /** Every active game, most-recent-first — for the "spectate a game" browse list. Usernames are
+   * resolved fresh from the DB each call (rooms only track userId day-to-day) rather than cached,
+   * since this is called on-demand (opening the browse screen), not a hot path. */
+  async listActiveGames(): Promise<ActiveGameSummary[]> {
+    const rooms = [...this.rooms.values()].filter((r) => r.status === 'active');
+    const userIds = [...new Set(rooms.flatMap((r) => [r.players.w.userId, r.players.b.userId].filter((id): id is string => id !== null)))];
+    const users = userIds.length > 0 ? await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } }) : [];
+    const usernameById = new Map(users.map((u) => [u.id, u.username]));
+    const nameFor = (userId: string | null) => (userId ? (usernameById.get(userId) ?? 'Player') : 'Guest');
+
+    return rooms.map((r) => ({
+      roomId: r.id,
+      timeControlLabel: r.timeControlLabel,
+      isChess960: r.chess960,
+      whiteUsername: nameFor(r.players.w.userId),
+      blackUsername: nameFor(r.players.b.userId),
+    }));
+  }
+
+  /** Joins `socketId` as a read-only spectator of `roomId` — never touches player slots, and
+   * `applyMove`'s own "who's the side to move" check means a spectator's socket could never make
+   * a move even if it tried (it isn't seated as either color). */
+  spectate(socketId: string, roomId: string): Ack<{ state: SpectateStatePayload }> {
+    const room = this.rooms.get(roomId);
+    if (!room || room.status !== 'active') {
+      return { ok: false, error: 'This game is no longer active.' };
+    }
+    room.spectators.add(socketId);
+    this.socketToSpectatingRoom.set(socketId, roomId);
+
+    return {
+      ok: true,
+      state: {
+        fen: room.engine.getFen(),
+        turn: room.engine.getTurn(),
+        timeControl: room.timeControl,
+        isChess960: room.chess960,
+        whiteMs: room.whiteMs,
+        blackMs: room.blackMs,
+        moves: room.moves,
+      },
+    };
+  }
+
+  stopSpectating(socketId: string): void {
+    const roomId = this.socketToSpectatingRoom.get(socketId);
+    if (!roomId) return;
+    this.socketToSpectatingRoom.delete(socketId);
+    this.rooms.get(roomId)?.spectators.delete(socketId);
+  }
+
+  private broadcastToSpectators<T>(room: Room, event: string, payload: T): void {
+    for (const spectatorSocketId of room.spectators) {
+      this.io.to(spectatorSocketId).emit(event, payload);
+    }
+  }
+
   /** Called from the io-level 'disconnect' handler for every socket, regardless of whether it
    * was actually in a room — a no-op if it wasn't. */
   handleDisconnect(socketId: string): void {
+    this.stopSpectating(socketId);
+
     const location = this.socketToRoom.get(socketId);
     if (!location) return;
     this.socketToRoom.delete(socketId);
@@ -408,6 +477,12 @@ export class RoomManager {
         this.io.to(slot.socketId).emit('game_over', payload);
         this.socketToRoom.delete(slot.socketId);
       }
+    }
+
+    const gameOverPayload: GameOverPayload = { reason, winner };
+    this.broadcastToSpectators(room, 'game_over', gameOverPayload);
+    for (const spectatorSocketId of room.spectators) {
+      this.socketToSpectatingRoom.delete(spectatorSocketId);
     }
 
     // Fire-and-forget: persistence is a best-effort side effect and must never delay or risk

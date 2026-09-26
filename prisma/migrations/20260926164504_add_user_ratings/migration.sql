@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "users" ADD COLUMN     "blitz_rating" INTEGER NOT NULL DEFAULT 1200,
+ADD COLUMN     "bullet_rating" INTEGER NOT NULL DEFAULT 1200,
+ADD COLUMN     "rapid_rating" INTEGER NOT NULL DEFAULT 1200;

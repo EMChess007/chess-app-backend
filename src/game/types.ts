@@ -105,6 +105,35 @@ export interface RejoinStatePayload {
   opponentConnected: boolean;
 }
 
+/** Same live game state a rejoining player gets (see RejoinStatePayload), minus the two fields
+ * that only make sense for an actual seated player (which color is "theirs", whether their
+ * opponent is connected) — a spectator has neither. */
+export type SpectateStatePayload = Omit<RejoinStatePayload, 'color' | 'opponentConnected'>;
+
+export interface SpectatorMovePayload extends OpponentMovePayload {
+  /** Which side actually made this move — a spectator, unlike a player, has no fixed "opponent"
+   * color to infer it from. */
+  mover: PieceColor;
+}
+
+export interface ActiveGameSummary {
+  roomId: string;
+  timeControlLabel: string;
+  isChess960: boolean;
+  whiteUsername: string;
+  blackUsername: string;
+}
+
+export interface CreateChallengePayload {
+  timeControl: TimeControl;
+  isChess960?: boolean;
+  timeControlLabel?: string;
+}
+
+export interface JoinChallengePayload {
+  code: string;
+}
+
 // Generic acknowledgement shape used by every request/response-style client event
 // (join_queue, leave_queue, make_move, rejoin_game) — success payload varies, failure is uniform.
 export type Ack<T extends object = object> = ({ ok: true } & T) | { ok: false; error: string };

@@ -20,6 +20,14 @@ model User {
   passwordHash String   @map("password_hash")
   createdAt    DateTime @default(now()) @map("created_at")
 
+  /// Mirrors the client's own locally-computed Elo (src/logic/rating.ts) for the global
+  /// leaderboard — the client remains the source of truth for the rating MATH (it already knows
+  /// things the server doesn't, like a bot opponent's ELO, which bot games never touch the server
+  /// for at all), this is just the synced number so it can be read by other users.
+  bulletRating Int @default(1200) @map("bullet_rating")
+  blitzRating  Int @default(1200) @map("blitz_rating")
+  rapidRating  Int @default(1200) @map("rapid_rating")
+
   games           Game[]
   puzzleProgress  PuzzleProgress[]
 

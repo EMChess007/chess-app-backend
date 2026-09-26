@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import cors from 'cors';
 import 'dotenv/config';
 import express, { type ErrorRequestHandler } from 'express';
+import { rateLimit } from 'express-rate-limit';
+import helmet from 'helmet';
 import { Server as SocketIOServer } from 'socket.io';
 import { registerSocketHandlers } from './game/socketHandlers.js';
 import authRouter from './routes/auth.js';
@@ -12,8 +14,30 @@ import usersRouter from './routes/users.js';
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+app.use(helmet());
 app.use(cors());
 app.use(express.json());
+
+// A generous ceiling for the whole API — mainly to blunt naive scripted abuse/scraping, not meant
+// to affect any real client's normal usage pattern.
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
+
+// Tighter limit specifically for login/register — these are the endpoints an attacker would
+// actually want to hammer (password brute-forcing, mass fake-account creation), and are cheap for
+// a legitimate user to stay well under (nobody logs in or registers 20+ times in 15 minutes).
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again later.' },
+});
 
 // Without this, a successful request produces zero terminal output — indistinguishable from
 // a request that never arrived at all, which makes "is my client even reaching the backend?"
@@ -25,7 +49,7 @@ app.use((req, _res, next) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-app.use('/auth', authRouter);
+app.use('/auth', authLimiter, authRouter);
 app.use('/users', usersRouter);
 app.use('/games', gamesRouter);
 app.use('/puzzles', puzzlesRouter);

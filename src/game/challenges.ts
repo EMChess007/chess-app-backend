@@ -34,12 +34,32 @@ function generateCode(): string {
 export class ChallengeManager {
   private challenges = new Map<string, PendingChallenge>();
 
+  constructor() {
+    // A code nobody ever joins (or whose creator forgot about it) would otherwise sit in memory
+    // until this same socket happens to call find() on it again, which may never happen — sweep
+    // periodically so a long-running process doesn't accumulate them unbounded. The interval
+    // itself is unref()'d so it never keeps the process alive on its own.
+    setInterval(() => this.sweepExpired(), 5 * 60 * 1000).unref();
+  }
+
   create(params: Omit<PendingChallenge, 'code' | 'createdAt'>): PendingChallenge {
+    // A creator who somehow ends up calling this twice (e.g. a fast double-tap before the UI
+    // disables the button) would otherwise leave their first code orphaned — still joinable by
+    // anyone who has it, but no longer visible/cancellable from the creator's own screen.
+    this.removeByCreator(params.creatorSocketId);
+
     let code = generateCode();
     while (this.challenges.has(code)) code = generateCode(); // astronomically rare, cheap to guard
     const challenge: PendingChallenge = { ...params, code, createdAt: Date.now() };
     this.challenges.set(code, challenge);
     return challenge;
+  }
+
+  private sweepExpired(): void {
+    const now = Date.now();
+    for (const [code, challenge] of this.challenges) {
+      if (now - challenge.createdAt > CHALLENGE_TTL_MS) this.challenges.delete(code);
+    }
   }
 
   /** Looks up a still-valid (non-expired) challenge by code, transparently discarding it if it

@@ -180,8 +180,17 @@ export function registerSocketHandlers(io: Server): void {
     });
 
     socket.on('list_active_games', async (_payload: unknown, ack?: (res: Ack<{ games: Awaited<ReturnType<typeof rooms.listActiveGames>> }>) => void) => {
-      const games = await rooms.listActiveGames();
-      ack?.({ ok: true, games });
+      // Unlike an Express route handler, socket.io never awaits/catches a listener's own promise
+      // — a rejection here (e.g. a transient DB hiccup during the username lookup) would otherwise
+      // be a genuinely unhandled rejection, which can crash the whole process (killing every
+      // other active game too), not just fail this one request.
+      try {
+        const games = await rooms.listActiveGames();
+        ack?.({ ok: true, games });
+      } catch (err) {
+        console.error('[socket] list_active_games failed:', err);
+        ack?.({ ok: false, error: 'Could not load active games.' });
+      }
     });
 
     socket.on('spectate_game', (payload: { roomId: string }, ack?: (res: Ack) => void) => {

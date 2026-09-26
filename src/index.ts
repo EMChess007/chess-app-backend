@@ -11,6 +11,14 @@ import gamesRouter from './routes/games.js';
 import puzzlesRouter from './routes/puzzles.js';
 import usersRouter from './routes/users.js';
 
+// A defense-in-depth backstop, not a substitute for handling errors at their source (every
+// socket.io event handler below already does that) — this exists so a future handler someone adds
+// without a try/catch logs its failure instead of silently crashing the whole process and
+// disconnecting every player in every active game, online or not.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled promise rejection:', reason);
+});
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 

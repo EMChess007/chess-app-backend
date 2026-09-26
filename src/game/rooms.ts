@@ -389,6 +389,10 @@ export class RoomManager {
     if (!room || room.status !== 'active') {
       return { ok: false, error: 'This game is no longer active.' };
     }
+    // A socket switching straight from spectating room A to room B without an intervening
+    // stop_spectating (the client always does call it on unmount, but this guards against any
+    // path that doesn't) would otherwise leave it registered in room A's spectators forever.
+    this.stopSpectating(socketId);
     room.spectators.add(socketId);
     this.socketToSpectatingRoom.set(socketId, roomId);
 

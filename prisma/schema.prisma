@@ -13,6 +13,12 @@ enum OpponentType {
   online
 }
 
+enum TournamentStatus {
+  lobby
+  active
+  finished
+}
+
 model User {
   id           String   @id @default(uuid())
   email        String   @unique
@@ -30,6 +36,8 @@ model User {
 
   games           Game[]
   puzzleProgress  PuzzleProgress[]
+  createdTournaments      Tournament[]
+  tournamentParticipations TournamentParticipant[]
 
   @@map("users")
 }
@@ -53,6 +61,45 @@ model Game {
 
   @@index([userId])
   @@map("games")
+}
+
+/// A small (~8-player) friend-group knockout-free round-robin — every participant plays every
+/// other participant exactly once. Live orchestration (who's paired with whom, whose game room is
+/// active right now) lives entirely in-memory in TournamentManager (see backend/src/game/
+/// tournaments.ts), same as an active game Room or a pending Challenge code — this row (and
+/// TournamentParticipant below) is only the durable record of what was created/who joined/the
+/// final points, not a source of truth the server reads back from to resume a tournament after a
+/// restart (an in-progress tournament doesn't survive a server restart, same as an in-progress
+/// game doesn't today).
+model Tournament {
+  id               String           @id @default(uuid())
+  name             String
+  code             String           @unique
+  initialSeconds   Int              @map("initial_seconds")
+  incrementSeconds Int              @map("increment_seconds")
+  isChess960       Boolean          @default(false) @map("is_chess960")
+  status           TournamentStatus @default(lobby)
+  creatorId        String           @map("creator_id")
+  creator          User             @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  participants TournamentParticipant[]
+
+  @@map("tournaments")
+}
+
+model TournamentParticipant {
+  id           String     @id @default(uuid())
+  tournamentId String     @map("tournament_id")
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  userId       String     @map("user_id")
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 1 per win, 0.5 per draw, 0 per loss — mirrored from TournamentManager's in-memory tally
+  /// after every finished match (see handleMatchFinished).
+  points Float @default(0)
+
+  @@unique([tournamentId, userId])
+  @@map("tournament_participants")
 }
 
 model PuzzleProgress {

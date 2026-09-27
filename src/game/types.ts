@@ -134,6 +134,89 @@ export interface JoinChallengePayload {
   code: string;
 }
 
+// --- Tournaments -------------------------------------------------------------
+
+export type TournamentStatus = 'lobby' | 'active' | 'finished';
+
+export interface CreateTournamentPayload {
+  name: string;
+  timeControl: TimeControl;
+  timeControlLabel?: string;
+  isChess960?: boolean;
+}
+
+export interface JoinTournamentPayload {
+  code: string;
+}
+
+export interface TournamentIdPayload {
+  tournamentId: string;
+}
+
+export interface TournamentParticipantSummary {
+  userId: string;
+  username: string;
+}
+
+export interface TournamentLobbyState {
+  id: string;
+  code: string;
+  name: string;
+  timeControl: TimeControl;
+  isChess960: boolean;
+  status: TournamentStatus;
+  creatorUserId: string;
+  participants: TournamentParticipantSummary[];
+}
+
+export interface TournamentStandingRow {
+  userId: string;
+  username: string;
+  points: number;
+  played: number;
+}
+
+/** Pushed to one specific player's own socket (see TournamentManager.broadcastStandings) — unlike
+ * TournamentStandingRow, this can safely carry that player's own playerToken/color/roomId because
+ * it's never broadcast to anyone else. `status` is the match's status ('pending' until an
+ * opponent is also free, 'active' once a room exists), and roomId/playerToken/color are only
+ * populated once it's 'active'. */
+export interface TournamentNextMatch {
+  status: 'pending' | 'active';
+  opponentUsername: string;
+  timeControl: TimeControl;
+  isChess960: boolean;
+  roomId: string | null;
+  playerToken: string | null;
+  color: PieceColor | null;
+  /** The room's state at creation time — only correct for entering a match that just became
+   * active, not a fully-current resync after navigating away mid-game (see Match's own comment
+   * in tournaments.ts). Null until status is 'active'. */
+  fen: string | null;
+  whiteMs: number | null;
+  blackMs: number | null;
+}
+
+export interface TournamentStandingsPayload {
+  standings: TournamentStandingRow[];
+  status: TournamentStatus;
+  yourNextMatch: TournamentNextMatch | null;
+}
+
+/** Same shape as MatchFoundPayload (see below) — a tournament match is an ordinary game room in
+ * every respect once it starts, so the client reuses the exact same "enter the game" flow. */
+export interface TournamentMatchReadyPayload {
+  roomId: string;
+  color: PieceColor;
+  playerToken: string;
+  opponent: { userId: string; username: string };
+  timeControl: TimeControl;
+  isChess960: boolean;
+  fen: string;
+  whiteMs: number;
+  blackMs: number;
+}
+
 // Generic acknowledgement shape used by every request/response-style client event
 // (join_queue, leave_queue, make_move, rejoin_game) — success payload varies, failure is uniform.
 export type Ack<T extends object = object> = ({ ok: true } & T) | { ok: false; error: string };

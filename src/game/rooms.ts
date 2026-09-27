@@ -67,6 +67,11 @@ interface Room {
   /** Sockets watching this game read-only (see spectate) — every active game is spectatable by
    * default, same as Lichess's own default. */
   spectators: Set<string>;
+  /** Set only for a room created on behalf of TournamentManager (see tournaments.ts) — called
+   * once, right after this room's own game_over notifications go out, so the tournament can
+   * update points and pair up whoever's newly free. Kept as a plain optional callback rather than
+   * importing TournamentManager here, so this module stays unaware tournaments exist at all. */
+  onFinished?: (winner: PieceColor | null) => void;
 }
 
 export interface CreateRoomParams {
@@ -75,6 +80,8 @@ export interface CreateRoomParams {
   timeControl: TimeControl;
   timeControlLabel?: string;
   chess960: boolean;
+  /** See Room.onFinished. */
+  onFinished?: (winner: PieceColor | null) => void;
 }
 
 function defaultTimeControlLabel(tc: TimeControl): string {
@@ -139,6 +146,7 @@ export class RoomManager {
       pendingDrawOfferBy: null,
       lastDrawOfferAt: {},
       spectators: new Set(),
+      onFinished: params.onFinished,
     };
 
     this.rooms.set(id, room);
@@ -495,6 +503,7 @@ export class RoomManager {
       console.error(`[rooms] failed to save online game history for room ${room.id}:`, err);
     });
 
+    room.onFinished?.(winner);
     this.rooms.delete(room.id);
   }
 

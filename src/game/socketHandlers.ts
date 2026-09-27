@@ -1,13 +1,17 @@
 import type { Server, Socket } from 'socket.io';
+import { prisma } from '../lib/prisma.js';
 import { verifyToken } from '../lib/jwt.js';
 import { ChallengeManager } from './challenges.js';
 import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
+import { TournamentManager } from './tournaments.js';
 import type {
   Ack,
   CreateChallengePayload,
+  CreateTournamentPayload,
   JoinChallengePayload,
   JoinQueuePayload,
+  JoinTournamentPayload,
   MakeMovePayload,
   MatchFoundPayload,
   OfferDrawPayload,
@@ -16,6 +20,9 @@ import type {
   RespondDrawPayload,
   SendChatPayload,
   TimeControl,
+  TournamentIdPayload,
+  TournamentLobbyState,
+  TournamentStandingsPayload,
 } from './types.js';
 
 /** Optional: a logged-in user can pass their existing JWT via `socket.handshake.auth.token` to
@@ -54,6 +61,7 @@ export function registerSocketHandlers(io: Server): void {
   const matchmaker = new Matchmaker();
   const rooms = new RoomManager(io);
   const challenges = new ChallengeManager();
+  const tournaments = new TournamentManager(io, rooms);
 
   /** Creates a room for two already-paired entries (from the anonymous queue or a challenge code
    * alike) and pushes `match_found` to both — the one piece of logic join_queue's pairing and
@@ -229,10 +237,92 @@ export function registerSocketHandlers(io: Server): void {
       ack?.(rooms.sendChatMessage(socket.id, payload?.roomId, typeof payload?.text === 'string' ? payload.text : ''));
     });
 
+    socket.on('create_tournament', async (payload: CreateTournamentPayload, ack?: (res: Ack<{ code: string; tournamentId: string }>) => void) => {
+      if (!userId) {
+        ack?.({ ok: false, error: 'You need to be logged in to create a tournament.' });
+        return;
+      }
+      if (!isValidTimeControl(payload?.timeControl)) {
+        ack?.({ ok: false, error: 'Invalid time control.' });
+        return;
+      }
+      const name = typeof payload?.name === 'string' ? payload.name.trim().slice(0, 60) : '';
+      if (!name) {
+        ack?.({ ok: false, error: 'Please enter a tournament name.' });
+        return;
+      }
+      try {
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { username: true } });
+        if (!user) {
+          ack?.({ ok: false, error: 'Your account could not be found.' });
+          return;
+        }
+        const tournament = await tournaments.create({
+          name,
+          creatorSocketId: socket.id,
+          creatorUserId: userId,
+          creatorUsername: user.username,
+          timeControl: payload.timeControl,
+          timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
+          chess960: Boolean(payload.isChess960),
+        });
+        ack?.({ ok: true, code: tournament.code, tournamentId: tournament.id });
+      } catch (err) {
+        console.error('[socket] create_tournament failed:', err);
+        ack?.({ ok: false, error: 'Could not create the tournament.' });
+      }
+    });
+
+    socket.on('join_tournament', async (payload: JoinTournamentPayload, ack?: (res: Ack<{ tournament: TournamentLobbyState }>) => void) => {
+      if (!userId) {
+        ack?.({ ok: false, error: 'You need to be logged in to join a tournament.' });
+        return;
+      }
+      const code = typeof payload?.code === 'string' ? payload.code.trim() : '';
+      if (!code) {
+        ack?.({ ok: false, error: 'Please enter a code.' });
+        return;
+      }
+      try {
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { username: true } });
+        if (!user) {
+          ack?.({ ok: false, error: 'Your account could not be found.' });
+          return;
+        }
+        ack?.(await tournaments.join(code, socket.id, userId, user.username));
+      } catch (err) {
+        console.error('[socket] join_tournament failed:', err);
+        ack?.({ ok: false, error: 'Could not join the tournament.' });
+      }
+    });
+
+    socket.on('leave_tournament', (payload: TournamentIdPayload, ack?: (res: Ack) => void) => {
+      tournaments.leaveLobby(payload?.tournamentId, socket.id);
+      ack?.({ ok: true });
+    });
+
+    socket.on('start_tournament', (payload: TournamentIdPayload, ack?: (res: Ack) => void) => {
+      ack?.(tournaments.start(payload?.tournamentId, socket.id));
+    });
+
+    socket.on('get_tournament_standings', (payload: TournamentIdPayload, ack?: (res: Ack<{ standings: TournamentStandingsPayload }>) => void) => {
+      if (!userId) {
+        ack?.({ ok: false, error: 'You need to be logged in.' });
+        return;
+      }
+      const standings = tournaments.getStandingsPayloadFor(payload?.tournamentId, userId);
+      if (!standings) {
+        ack?.({ ok: false, error: 'Tournament not found.' });
+        return;
+      }
+      ack?.({ ok: true, standings });
+    });
+
     socket.on('disconnect', () => {
       matchmaker.leave(socket.id);
       challenges.removeByCreator(socket.id);
       rooms.handleDisconnect(socket.id);
+      tournaments.handleDisconnect(socket.id);
       console.log(`[socket] disconnected ${socket.id}`);
     });
   });

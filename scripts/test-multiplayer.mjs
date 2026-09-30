@@ -393,6 +393,111 @@ async function testKingOfTheHillWin() {
   petra.disconnect();
 }
 
+async function testThreeCheckMatchmaking() {
+  console.log('\n=== 8. Three-Check matchmaking (isolated queue) ===');
+  const quinn = await connect('Quinn');
+  const rex = await connect('Rex');
+  const classicalControl = { initialSeconds: 180, incrementSeconds: 0 };
+
+  // Same partitioning as King of the Hill (see testKingOfTheHillMatchmaking) — isThreeCheck must
+  // keep this queue separate from a plain-classical wait, even with an identical time control.
+  let quinnMatched = false;
+  quinn.once('match_found', () => {
+    quinnMatched = true;
+  });
+  await emitAck(quinn, 'join_queue', { timeControl: classicalControl, isChess960: false, isThreeCheck: false });
+
+  const rexMatchPromise = waitFor(rex, 'match_found');
+  const rexAck = await emitAck(rex, 'join_queue', { timeControl: classicalControl, isChess960: false, isThreeCheck: true });
+  check(rexAck.ok === true, 'Rex (Three-Check) join_queue ack is ok');
+
+  await new Promise((r) => setTimeout(r, 500));
+  check(quinnMatched === false, 'a plain-classical player is not matched against a Three-Check player');
+
+  const sara = await connect('Sara');
+  const quinnGivesUp = emitAck(quinn, 'leave_queue', {});
+  const saraMatchPromise = waitFor(sara, 'match_found');
+  await emitAck(sara, 'join_queue', { timeControl: classicalControl, isChess960: false, isThreeCheck: true });
+
+  const [rexMatch, saraMatch] = await Promise.all([rexMatchPromise, saraMatchPromise]);
+  await quinnGivesUp;
+
+  check(rexMatch.roomId === saraMatch.roomId, 'the two Three-Check players were matched together');
+  check(rexMatch.isThreeCheck === true, 'match_found correctly reports isThreeCheck: true');
+
+  quinn.disconnect();
+  rex.disconnect();
+  sara.disconnect();
+}
+
+async function testThreeCheckWin() {
+  console.log('\n=== 9. Three-Check win detection (delivering the 3rd check wins outright) ===');
+  const tara = await connect('Tara');
+  const uri = await connect('Uri');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchT, matchU] = await Promise.all([
+    (async () => {
+      await emitAck(tara, 'join_queue', { timeControl, isChess960: false, isThreeCheck: true });
+      return waitFor(tara, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(uri, 'join_queue', { timeControl, isChess960: false, isThreeCheck: true });
+      return waitFor(uri, 'match_found');
+    })(),
+  ]);
+  check(matchT.isThreeCheck === true, 'match_found reports isThreeCheck: true for both players');
+
+  const white = matchT.color === 'w' ? { socket: tara, name: 'Tara' } : { socket: uri, name: 'Uri' };
+  const black = matchT.color === 'b' ? { socket: tara, name: 'Tara' } : { socket: uri, name: 'Uri' };
+  const roomId = matchT.roomId;
+  console.log(`  White = ${white.name}, Black = ${black.name} — delivering 3 checks with White's knight...`);
+
+  // A verified-legal move sequence (see chess.js dry run) where White's knight checks Black's
+  // king three separate times (capturing on c7 twice along the way, then forking from e6) —
+  // White's own final move (Ne6+) should end the game immediately via Three-Check, before Black
+  // ever gets to move again.
+  const whiteMoves = [
+    { from: 'b1', to: 'a3' },
+    { from: 'a3', to: 'b5' },
+    { from: 'b5', to: 'c7' }, // check 1
+    { from: 'g1', to: 'f3' },
+    { from: 'f3', to: 'd4' },
+    { from: 'd4', to: 'b5' },
+    { from: 'b5', to: 'c7' }, // check 2
+    { from: 'c7', to: 'e6' }, // check 3 — ends the game
+  ];
+  const blackMoves = [
+    { from: 'a7', to: 'a6' },
+    { from: 'h7', to: 'h6' },
+    { from: 'd8', to: 'c7' },
+    { from: 'a6', to: 'a5' },
+    { from: 'h6', to: 'h5' },
+    { from: 'b7', to: 'b6' },
+    { from: 'e8', to: 'd8' },
+  ];
+
+  const whiteGameOver = waitFor(white.socket, 'game_over');
+  const blackGameOver = waitFor(black.socket, 'game_over');
+
+  for (let i = 0; i < whiteMoves.length; i++) {
+    const wAck = await emitAck(white.socket, 'make_move', { roomId, ...whiteMoves[i] });
+    check(wAck.ok === true, `White's move ${i + 1} (${whiteMoves[i].from}-${whiteMoves[i].to}) accepted`);
+    if (i === whiteMoves.length - 1) break; // the last move ends the game — Black never replies
+    const bAck = await emitAck(black.socket, 'make_move', { roomId, ...blackMoves[i] });
+    check(bAck.ok === true, `Black's move ${i + 1} (${blackMoves[i].from}-${blackMoves[i].to}) accepted`);
+  }
+
+  const [whiteResult, blackResult] = await Promise.all([whiteGameOver, blackGameOver]);
+  check(whiteResult.reason === 'threeCheck', 'game_over reason is "threeCheck"');
+  check(whiteResult.winner === 'w', 'White (who delivered the 3rd check) is declared the winner');
+  check(blackResult.reason === 'threeCheck' && blackResult.winner === 'w', 'both players received the same game_over outcome');
+
+  tara.disconnect();
+  uri.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -402,6 +507,8 @@ async function main() {
   await testChess960Matchmaking();
   await testKingOfTheHillMatchmaking();
   await testKingOfTheHillWin();
+  await testThreeCheckMatchmaking();
+  await testThreeCheckWin();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

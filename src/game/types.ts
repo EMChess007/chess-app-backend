@@ -7,7 +7,7 @@ export interface TimeControl {
   incrementSeconds: number;
 }
 
-export type GameOverReason = 'checkmate' | 'stalemate' | 'draw' | 'timeout' | 'abandonment' | 'resignation' | 'kingOfTheHill';
+export type GameOverReason = 'checkmate' | 'stalemate' | 'draw' | 'timeout' | 'abandonment' | 'resignation' | 'kingOfTheHill' | 'threeCheck';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -15,6 +15,7 @@ export interface JoinQueuePayload {
   timeControl: TimeControl;
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
+  isThreeCheck?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -64,6 +65,7 @@ export interface MatchFoundPayload {
   timeControl: TimeControl;
   isChess960: boolean;
   isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -102,6 +104,7 @@ export interface RejoinStatePayload {
   timeControl: TimeControl;
   isChess960: boolean;
   isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
   whiteMs: number;
   blackMs: number;
   moves: { from: string; to: string; promotion?: string; san: string }[];
@@ -131,6 +134,7 @@ export interface CreateChallengePayload {
   timeControl: TimeControl;
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
+  isThreeCheck?: boolean;
   timeControlLabel?: string;
 }
 
@@ -148,6 +152,7 @@ export interface CreateTournamentPayload {
   timeControlLabel?: string;
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
+  isThreeCheck?: boolean;
 }
 
 export interface JoinTournamentPayload {
@@ -170,6 +175,7 @@ export interface TournamentLobbyState {
   timeControl: TimeControl;
   isChess960: boolean;
   isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
   status: TournamentStatus;
   creatorUserId: string;
   participants: TournamentParticipantSummary[];
@@ -193,6 +199,7 @@ export interface TournamentNextMatch {
   timeControl: TimeControl;
   isChess960: boolean;
   isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
   roomId: string | null;
   playerToken: string | null;
   color: PieceColor | null;
@@ -220,6 +227,7 @@ export interface TournamentMatchReadyPayload {
   timeControl: TimeControl;
   isChess960: boolean;
   isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;

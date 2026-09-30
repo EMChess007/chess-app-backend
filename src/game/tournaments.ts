@@ -63,6 +63,7 @@ interface Tournament {
   timeControlLabel?: string;
   chess960: boolean;
   kingOfTheHill: boolean;
+  threeCheck: boolean;
   creatorUserId: string;
   status: TournamentStatus;
   participants: Map<string, Participant>;
@@ -115,6 +116,7 @@ export class TournamentManager {
     timeControlLabel?: string;
     chess960: boolean;
     kingOfTheHill: boolean;
+    threeCheck: boolean;
   }): Promise<Tournament> {
     let code = generateCode();
     while (this.codeToId.has(code)) code = generateCode(); // astronomically rare, cheap to guard
@@ -128,6 +130,7 @@ export class TournamentManager {
       timeControlLabel: params.timeControlLabel,
       chess960: params.chess960,
       kingOfTheHill: params.kingOfTheHill,
+      threeCheck: params.threeCheck,
       creatorUserId: params.creatorUserId,
       status: 'lobby',
       participants: new Map([
@@ -288,6 +291,7 @@ export class TournamentManager {
         timeControlLabel: tournament.timeControlLabel,
         chess960: tournament.chess960,
         kingOfTheHill: tournament.kingOfTheHill,
+        threeCheck: tournament.threeCheck,
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;
@@ -302,6 +306,7 @@ export class TournamentManager {
         timeControl: tournament.timeControl,
         isChess960: tournament.chess960,
         isKingOfTheHill: tournament.kingOfTheHill,
+        isThreeCheck: tournament.threeCheck,
         fen: created.fen,
         whiteMs: created.whiteMs,
         blackMs: created.blackMs,
@@ -390,6 +395,7 @@ export class TournamentManager {
         timeControl: tournament.timeControl,
         isChess960: tournament.chess960,
         isKingOfTheHill: tournament.kingOfTheHill,
+        isThreeCheck: tournament.threeCheck,
         roomId: match.roomId,
         playerToken: isActive ? (isA ? match.aToken : match.bToken) : null,
         color: isActive ? (isA ? match.aColor : match.aColor === 'w' ? 'b' : 'w') : null,
@@ -416,6 +422,7 @@ export class TournamentManager {
       timeControl: tournament.timeControl,
       isChess960: tournament.chess960,
       isKingOfTheHill: tournament.kingOfTheHill,
+      isThreeCheck: tournament.threeCheck,
       status: tournament.status,
       creatorUserId: tournament.creatorUserId,
       participants: [...tournament.participants.values()].map((p) => ({ userId: p.userId, username: p.username })),
@@ -463,6 +470,7 @@ export class TournamentManager {
         incrementSeconds: tournament.timeControl.incrementSeconds,
         isChess960: tournament.chess960,
         isKingOfTheHill: tournament.kingOfTheHill,
+        isThreeCheck: tournament.threeCheck,
         creatorId: tournament.creatorUserId,
         participants: { create: { userId: tournament.creatorUserId, points: 0 } },
       },

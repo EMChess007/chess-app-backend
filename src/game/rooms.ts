@@ -45,6 +45,7 @@ interface Room {
   initialFen: string;
   chess960: boolean;
   kingOfTheHill: boolean;
+  threeCheck: boolean;
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -82,6 +83,7 @@ export interface CreateRoomParams {
   timeControlLabel?: string;
   chess960: boolean;
   kingOfTheHill: boolean;
+  threeCheck: boolean;
   /** See Room.onFinished. */
   onFinished?: (winner: PieceColor | null) => void;
 }
@@ -134,6 +136,7 @@ export class RoomManager {
       initialFen,
       chess960: params.chess960,
       kingOfTheHill: params.kingOfTheHill,
+      threeCheck: params.threeCheck,
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -220,8 +223,14 @@ export class RoomManager {
     // chess.js has no idea this rule exists at all, so it can never surface via getStatus()/
     // isGameOver() on its own.
     const kingOfTheHillWinner = room.kingOfTheHill ? room.engine.getKingOfTheHillWinner() : null;
+    // Same "checked before the normal chess.js end-of-game logic" reasoning as King of the Hill
+    // above — three-checks wins outright regardless of the rest of the position, and chess.js has
+    // no idea this rule exists either.
+    const threeCheckWinner = room.threeCheck ? room.engine.getThreeCheckWinner() : null;
     if (kingOfTheHillWinner) {
       this.endGame(room, 'kingOfTheHill', kingOfTheHillWinner);
+    } else if (threeCheckWinner) {
+      this.endGame(room, 'threeCheck', threeCheckWinner);
     } else if (room.engine.isGameOver()) {
       const status = room.engine.getStatus();
       const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
@@ -271,6 +280,7 @@ export class RoomManager {
         timeControl: room.timeControl,
         isChess960: room.chess960,
         isKingOfTheHill: room.kingOfTheHill,
+        isThreeCheck: room.threeCheck,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -423,6 +433,7 @@ export class RoomManager {
         timeControl: room.timeControl,
         isChess960: room.chess960,
         isKingOfTheHill: room.kingOfTheHill,
+        isThreeCheck: room.threeCheck,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,

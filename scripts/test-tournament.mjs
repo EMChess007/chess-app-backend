@@ -256,12 +256,51 @@ async function testKingOfTheHillFlagThreadsThrough() {
   faySocket.disconnect();
 }
 
+async function testThreeCheckFlagThreadsThrough() {
+  console.log('\n=== 5. Three-Check flag propagates: create -> lobby -> match ===');
+  const gus = await registerUser(`gus_${randomUUID().slice(0, 6)}`);
+  const hana = await registerUser(`hana_${randomUUID().slice(0, 6)}`);
+  const ivo = await registerUser(`ivo_${randomUUID().slice(0, 6)}`);
+  const gusSocket = await connect('Gus', gus.token);
+  const hanaSocket = await connect('Hana', hana.token);
+  const ivoSocket = await connect('Ivo', ivo.token);
+
+  const createAck = await emitAck(gusSocket, 'create_tournament', {
+    name: 'Triple Check Cup',
+    timeControl: { initialSeconds: 180, incrementSeconds: 0 },
+    isChess960: false,
+    isThreeCheck: true,
+  });
+  check(createAck.ok === true, "Gus's create_tournament ack is ok");
+
+  const hanaJoinAck = await emitAck(hanaSocket, 'join_tournament', { code: createAck.code });
+  check(hanaJoinAck.ok === true, 'Hana joins with the code');
+  check(hanaJoinAck.tournament.isThreeCheck === true, 'the lobby state Hana receives reports isThreeCheck: true');
+
+  const readyPromise = Promise.race([
+    waitFor(gusSocket, 'tournament_match_ready'),
+    waitFor(hanaSocket, 'tournament_match_ready'),
+    waitFor(ivoSocket, 'tournament_match_ready'),
+  ]);
+  await emitAck(ivoSocket, 'join_tournament', { code: createAck.code });
+  const startAck = await emitAck(gusSocket, 'start_tournament', { tournamentId: createAck.tournamentId });
+  check(startAck.ok === true, 'the tournament starts successfully');
+
+  const readyPayload = await readyPromise;
+  check(readyPayload.isThreeCheck === true, 'the first tournament_match_ready payload also reports isThreeCheck: true');
+
+  gusSocket.disconnect();
+  hanaSocket.disconnect();
+  ivoSocket.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testGuestsAreRejected();
   await testMinimumPlayersToStart();
   await testFullRoundRobinProgression();
   await testKingOfTheHillFlagThreadsThrough();
+  await testThreeCheckFlagThreadsThrough();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

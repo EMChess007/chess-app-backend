@@ -9,6 +9,9 @@ export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0
  * Hill mode, regardless of the rest of the position. */
 export const KING_OF_THE_HILL_SQUARES = ['d4', 'd5', 'e4', 'e5'] as const;
 
+/** Number of times a side must have delivered check to win outright in Three-Check mode. */
+export const THREE_CHECK_TARGET = 3;
+
 export type PieceColor = 'w' | 'b';
 export type GameStatus = 'playing' | 'checkmate' | 'stalemate' | 'draw' | 'check';
 
@@ -95,6 +98,26 @@ export class RoomChessEngine {
       const piece = this.chess.get(square as ChessJsSquare);
       if (piece?.type === 'k') return piece.color;
     }
+    return null;
+  }
+
+  /** How many times each side has delivered check so far — derived from chess.js's own move
+   * history (every SAN it produces already ends in '+' or '#' for a checking move) rather than
+   * tracked as separate mutable state, so it's always consistent with the actual game. */
+  getCheckCounts(): Record<PieceColor, number> {
+    const counts: Record<PieceColor, number> = { w: 0, b: 0 };
+    for (const move of this.chess.history({ verbose: true })) {
+      if (move.san.endsWith('+') || move.san.endsWith('#')) counts[move.color]++;
+    }
+    return counts;
+  }
+
+  /** Whether either side has delivered check THREE_CHECK_TARGET times — checked by the caller
+   * only when the room is actually in Three-Check mode (see rooms.ts's applyMove). */
+  getThreeCheckWinner(): PieceColor | null {
+    const counts = this.getCheckCounts();
+    if (counts.w >= THREE_CHECK_TARGET) return 'w';
+    if (counts.b >= THREE_CHECK_TARGET) return 'b';
     return null;
   }
 

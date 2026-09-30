@@ -56,6 +56,7 @@ interface PairableEntry {
   timeControlLabel?: string;
   isChess960: boolean;
   isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
 }
 
 export function registerSocketHandlers(io: Server): void {
@@ -80,6 +81,7 @@ export function registerSocketHandlers(io: Server): void {
       timeControlLabel: a.timeControlLabel ?? b.timeControlLabel,
       chess960: a.isChess960,
       kingOfTheHill: a.isKingOfTheHill,
+      threeCheck: a.isThreeCheck,
     });
 
     const basePayload = {
@@ -87,6 +89,7 @@ export function registerSocketHandlers(io: Server): void {
       timeControl: a.timeControl,
       isChess960: a.isChess960,
       isKingOfTheHill: a.isKingOfTheHill,
+      isThreeCheck: a.isThreeCheck,
       fen: created.fen,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
@@ -126,6 +129,7 @@ export function registerSocketHandlers(io: Server): void {
         timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
         isChess960: Boolean(payload.isChess960),
         isKingOfTheHill: Boolean(payload.isKingOfTheHill),
+        isThreeCheck: Boolean(payload.isThreeCheck),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -153,6 +157,7 @@ export function registerSocketHandlers(io: Server): void {
         timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
         isChess960: Boolean(payload.isChess960),
         isKingOfTheHill: Boolean(payload.isKingOfTheHill),
+        isThreeCheck: Boolean(payload.isThreeCheck),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -188,6 +193,7 @@ export function registerSocketHandlers(io: Server): void {
           timeControlLabel: challenge.timeControlLabel,
           isChess960: challenge.isChess960,
           isKingOfTheHill: challenge.isKingOfTheHill,
+          isThreeCheck: challenge.isThreeCheck,
         },
         {
           socketId: socket.id,
@@ -196,6 +202,7 @@ export function registerSocketHandlers(io: Server): void {
           timeControlLabel: challenge.timeControlLabel,
           isChess960: challenge.isChess960,
           isKingOfTheHill: challenge.isKingOfTheHill,
+          isThreeCheck: challenge.isThreeCheck,
         }
       );
     });
@@ -279,6 +286,7 @@ export function registerSocketHandlers(io: Server): void {
           timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
           chess960: Boolean(payload.isChess960),
           kingOfTheHill: Boolean(payload.isKingOfTheHill),
+          threeCheck: Boolean(payload.isThreeCheck),
         });
         ack?.({ ok: true, code: tournament.code, tournamentId: tournament.id });
       } catch (err) {

@@ -222,11 +222,46 @@ async function testFullRoundRobinProgression() {
   carolSocket.disconnect();
 }
 
+async function testKingOfTheHillFlagThreadsThrough() {
+  console.log('\n=== 4. King of the Hill flag propagates: create -> lobby -> match ===');
+  const dan = await registerUser(`dan_${randomUUID().slice(0, 6)}`);
+  const eva = await registerUser(`eva_${randomUUID().slice(0, 6)}`);
+  const fay = await registerUser(`fay_${randomUUID().slice(0, 6)}`);
+  const danSocket = await connect('Dan', dan.token);
+  const evaSocket = await connect('Eva', eva.token);
+  const faySocket = await connect('Fay', fay.token);
+
+  const createAck = await emitAck(danSocket, 'create_tournament', {
+    name: 'Hilltop Cup',
+    timeControl: { initialSeconds: 180, incrementSeconds: 0 },
+    isChess960: false,
+    isKingOfTheHill: true,
+  });
+  check(createAck.ok === true, "Dan's create_tournament ack is ok");
+
+  const evaJoinAck = await emitAck(evaSocket, 'join_tournament', { code: createAck.code });
+  check(evaJoinAck.ok === true, 'Eva joins with the code');
+  check(evaJoinAck.tournament.isKingOfTheHill === true, "the lobby state Eva receives reports isKingOfTheHill: true");
+
+  const readyPromise = Promise.race([waitFor(danSocket, 'tournament_match_ready'), waitFor(evaSocket, 'tournament_match_ready'), waitFor(faySocket, 'tournament_match_ready')]);
+  await emitAck(faySocket, 'join_tournament', { code: createAck.code });
+  const startAck = await emitAck(danSocket, 'start_tournament', { tournamentId: createAck.tournamentId });
+  check(startAck.ok === true, 'the tournament starts successfully');
+
+  const readyPayload = await readyPromise;
+  check(readyPayload.isKingOfTheHill === true, 'the first tournament_match_ready payload also reports isKingOfTheHill: true');
+
+  danSocket.disconnect();
+  evaSocket.disconnect();
+  faySocket.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testGuestsAreRejected();
   await testMinimumPlayersToStart();
   await testFullRoundRobinProgression();
+  await testKingOfTheHillFlagThreadsThrough();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

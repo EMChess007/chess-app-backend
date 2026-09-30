@@ -78,6 +78,7 @@ model Tournament {
   initialSeconds   Int              @map("initial_seconds")
   incrementSeconds Int              @map("increment_seconds")
   isChess960       Boolean          @default(false) @map("is_chess960")
+  isKingOfTheHill  Boolean          @default(false) @map("is_king_of_the_hill")
   status           TournamentStatus @default(lobby)
   creatorId        String           @map("creator_id")
   creator          User             @relation(fields: [creatorId], references: [id], onDelete: Cascade)

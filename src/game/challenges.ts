@@ -8,6 +8,7 @@ export interface PendingChallenge {
   timeControl: TimeControl;
   timeControlLabel?: string;
   isChess960: boolean;
+  isKingOfTheHill: boolean;
   createdAt: number;
 }
 

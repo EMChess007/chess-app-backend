@@ -295,6 +295,104 @@ async function testChess960Matchmaking() {
   kate.disconnect();
 }
 
+async function testKingOfTheHillMatchmaking() {
+  console.log('\n=== 6. King of the Hill matchmaking (isolated queue) ===');
+  const leo = await connect('Leo', null);
+  const mia = await connect('Mia', null);
+  const classicalControl = { initialSeconds: 180, incrementSeconds: 0 };
+
+  // A plain-classical player waiting should NOT be matched against a King of the Hill player
+  // even with an identical time control — isKingOfTheHill must partition the queue exactly like
+  // isChess960 already does (see testChess960Matchmaking).
+  let leoMatched = false;
+  leo.once('match_found', () => {
+    leoMatched = true;
+  });
+  await emitAck(leo, 'join_queue', { timeControl: classicalControl, isChess960: false, isKingOfTheHill: false });
+
+  const miaMatchPromise = waitFor(mia, 'match_found');
+  const miaAck = await emitAck(mia, 'join_queue', { timeControl: classicalControl, isChess960: false, isKingOfTheHill: true });
+  check(miaAck.ok === true, 'Mia (King of the Hill) join_queue ack is ok');
+
+  await new Promise((r) => setTimeout(r, 500));
+  check(leoMatched === false, 'a plain-classical player is not matched against a King of the Hill player');
+
+  const noa = await connect('Noa', null);
+  const leoGivesUp = emitAck(leo, 'leave_queue', {});
+  const noaMatchPromise = waitFor(noa, 'match_found');
+  await emitAck(noa, 'join_queue', { timeControl: classicalControl, isChess960: false, isKingOfTheHill: true });
+
+  const [miaMatch, noaMatch] = await Promise.all([miaMatchPromise, noaMatchPromise]);
+  await leoGivesUp;
+
+  check(miaMatch.roomId === noaMatch.roomId, 'the two King of the Hill players were matched together');
+  check(miaMatch.isKingOfTheHill === true, 'match_found correctly reports isKingOfTheHill: true');
+
+  leo.disconnect();
+  mia.disconnect();
+  noa.disconnect();
+}
+
+async function testKingOfTheHillWin() {
+  console.log('\n=== 7. King of the Hill win detection (reaching d4 wins outright) ===');
+  const oscar = await connect('Oscar', null);
+  const petra = await connect('Petra', null);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchO, matchP] = await Promise.all([
+    (async () => {
+      await emitAck(oscar, 'join_queue', { timeControl, isChess960: false, isKingOfTheHill: true });
+      return waitFor(oscar, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(petra, 'join_queue', { timeControl, isChess960: false, isKingOfTheHill: true });
+      return waitFor(petra, 'match_found');
+    })(),
+  ]);
+  check(matchO.isKingOfTheHill === true, 'match_found reports isKingOfTheHill: true for both players');
+
+  const white = matchO.color === 'w' ? { socket: oscar, name: 'Oscar' } : { socket: petra, name: 'Petra' };
+  const black = matchO.color === 'b' ? { socket: oscar, name: 'Oscar' } : { socket: petra, name: 'Petra' };
+  const roomId = matchO.roomId;
+  console.log(`  White = ${white.name}, Black = ${black.name} — marching White's king to d4...`);
+
+  // A verified-legal move sequence (see chess.js dry run) that walks White's king straight to d4
+  // without ever passing through check, castling, or a repeated position — Black just shuffles a
+  // knight harmlessly out of the way. White's own final move (Kd4) should end the game immediately
+  // via King of the Hill, before Black ever gets to move again.
+  const whiteMoves = [
+    { from: 'e2', to: 'e3' },
+    { from: 'e1', to: 'e2' },
+    { from: 'e2', to: 'd3' },
+    { from: 'd3', to: 'd4' },
+  ];
+  const blackMoves = [
+    { from: 'g8', to: 'f6' },
+    { from: 'f6', to: 'g8' },
+    { from: 'g8', to: 'f6' },
+  ];
+
+  const whiteGameOver = waitFor(white.socket, 'game_over');
+  const blackGameOver = waitFor(black.socket, 'game_over');
+
+  for (let i = 0; i < whiteMoves.length; i++) {
+    const wAck = await emitAck(white.socket, 'make_move', { roomId, ...whiteMoves[i] });
+    check(wAck.ok === true, `White's move ${i + 1} (${whiteMoves[i].from}-${whiteMoves[i].to}) accepted`);
+    if (i === whiteMoves.length - 1) break; // the last move ends the game — Black never replies
+    const bAck = await emitAck(black.socket, 'make_move', { roomId, ...blackMoves[i] });
+    check(bAck.ok === true, `Black's move ${i + 1} (${blackMoves[i].from}-${blackMoves[i].to}) accepted`);
+  }
+
+  const [whiteResult, blackResult] = await Promise.all([whiteGameOver, blackGameOver]);
+  check(whiteResult.reason === 'kingOfTheHill', 'game_over reason is "kingOfTheHill"');
+  check(whiteResult.winner === 'w', 'White (who reached d4) is declared the winner');
+  check(blackResult.reason === 'kingOfTheHill' && blackResult.winner === 'w', 'both players received the same game_over outcome');
+
+  oscar.disconnect();
+  petra.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -302,6 +400,8 @@ async function main() {
   await testDisconnectAndReconnect();
   await testClockTimeout();
   await testChess960Matchmaking();
+  await testKingOfTheHillMatchmaking();
+  await testKingOfTheHillWin();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

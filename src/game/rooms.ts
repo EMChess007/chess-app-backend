@@ -44,6 +44,7 @@ interface Room {
   engine: RoomChessEngine;
   initialFen: string;
   chess960: boolean;
+  kingOfTheHill: boolean;
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -80,6 +81,7 @@ export interface CreateRoomParams {
   timeControl: TimeControl;
   timeControlLabel?: string;
   chess960: boolean;
+  kingOfTheHill: boolean;
   /** See Room.onFinished. */
   onFinished?: (winner: PieceColor | null) => void;
 }
@@ -131,6 +133,7 @@ export class RoomManager {
       engine,
       initialFen,
       chess960: params.chess960,
+      kingOfTheHill: params.kingOfTheHill,
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -212,7 +215,14 @@ export class RoomManager {
     const spectatorPayload: SpectatorMovePayload = { ...movePayload, mover };
     this.broadcastToSpectators(room, 'spectator_move', spectatorPayload);
 
-    if (room.engine.isGameOver()) {
+    // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
+    // outright regardless of the rest of the position (check/material/etc. don't matter), and
+    // chess.js has no idea this rule exists at all, so it can never surface via getStatus()/
+    // isGameOver() on its own.
+    const kingOfTheHillWinner = room.kingOfTheHill ? room.engine.getKingOfTheHillWinner() : null;
+    if (kingOfTheHillWinner) {
+      this.endGame(room, 'kingOfTheHill', kingOfTheHillWinner);
+    } else if (room.engine.isGameOver()) {
       const status = room.engine.getStatus();
       const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
       const winner: PieceColor | null = status === 'checkmate' ? mover : null;
@@ -260,6 +270,7 @@ export class RoomManager {
         color,
         timeControl: room.timeControl,
         isChess960: room.chess960,
+        isKingOfTheHill: room.kingOfTheHill,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -411,6 +422,7 @@ export class RoomManager {
         turn: room.engine.getTurn(),
         timeControl: room.timeControl,
         isChess960: room.chess960,
+        isKingOfTheHill: room.kingOfTheHill,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,

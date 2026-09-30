@@ -55,6 +55,7 @@ interface PairableEntry {
   timeControl: TimeControl;
   timeControlLabel?: string;
   isChess960: boolean;
+  isKingOfTheHill: boolean;
 }
 
 export function registerSocketHandlers(io: Server): void {
@@ -78,12 +79,14 @@ export function registerSocketHandlers(io: Server): void {
       timeControl: a.timeControl,
       timeControlLabel: a.timeControlLabel ?? b.timeControlLabel,
       chess960: a.isChess960,
+      kingOfTheHill: a.isKingOfTheHill,
     });
 
     const basePayload = {
       roomId: created.roomId,
       timeControl: a.timeControl,
       isChess960: a.isChess960,
+      isKingOfTheHill: a.isKingOfTheHill,
       fen: created.fen,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
@@ -122,6 +125,7 @@ export function registerSocketHandlers(io: Server): void {
         timeControl: payload.timeControl,
         timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
         isChess960: Boolean(payload.isChess960),
+        isKingOfTheHill: Boolean(payload.isKingOfTheHill),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -148,6 +152,7 @@ export function registerSocketHandlers(io: Server): void {
         timeControl: payload.timeControl,
         timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
         isChess960: Boolean(payload.isChess960),
+        isKingOfTheHill: Boolean(payload.isKingOfTheHill),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -182,8 +187,16 @@ export function registerSocketHandlers(io: Server): void {
           timeControl: challenge.timeControl,
           timeControlLabel: challenge.timeControlLabel,
           isChess960: challenge.isChess960,
+          isKingOfTheHill: challenge.isKingOfTheHill,
         },
-        { socketId: socket.id, userId, timeControl: challenge.timeControl, timeControlLabel: challenge.timeControlLabel, isChess960: challenge.isChess960 }
+        {
+          socketId: socket.id,
+          userId,
+          timeControl: challenge.timeControl,
+          timeControlLabel: challenge.timeControlLabel,
+          isChess960: challenge.isChess960,
+          isKingOfTheHill: challenge.isKingOfTheHill,
+        }
       );
     });
 
@@ -265,6 +278,7 @@ export function registerSocketHandlers(io: Server): void {
           timeControl: payload.timeControl,
           timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
           chess960: Boolean(payload.isChess960),
+          kingOfTheHill: Boolean(payload.isKingOfTheHill),
         });
         ack?.({ ok: true, code: tournament.code, tournamentId: tournament.id });
       } catch (err) {

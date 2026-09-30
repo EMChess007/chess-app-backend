@@ -5,6 +5,10 @@ const FILES = 'abcdefgh';
 
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
+/** The four center squares — reaching one with your own king is an immediate win in King of the
+ * Hill mode, regardless of the rest of the position. */
+export const KING_OF_THE_HILL_SQUARES = ['d4', 'd5', 'e4', 'e5'] as const;
+
 export type PieceColor = 'w' | 'b';
 export type GameStatus = 'playing' | 'checkmate' | 'stalemate' | 'draw' | 'check';
 
@@ -81,6 +85,17 @@ export class RoomChessEngine {
 
   getFen(): string {
     return this.chess.fen();
+  }
+
+  /** Whether either king is currently on one of the 4 center squares — checked by the caller only
+   * when the room is actually in King of the Hill mode (see rooms.ts's applyMove). Chess.js has
+   * no idea this rule exists, so this is a plain independent board check, not part of getStatus(). */
+  getKingOfTheHillWinner(): PieceColor | null {
+    for (const square of KING_OF_THE_HILL_SQUARES) {
+      const piece = this.chess.get(square as ChessJsSquare);
+      if (piece?.type === 'k') return piece.color;
+    }
+    return null;
   }
 
   // --- Chess960 castling (see mobile ChessEngine.ts for the twin implementation) ------------

@@ -46,6 +46,7 @@ interface Room {
   chess960: boolean;
   kingOfTheHill: boolean;
   threeCheck: boolean;
+  setupChess: boolean;
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -84,6 +85,11 @@ export interface CreateRoomParams {
   chess960: boolean;
   kingOfTheHill: boolean;
   threeCheck: boolean;
+  setupChess: boolean;
+  /** Required (and only meaningful) when `setupChess` is true — the merged, already-validated
+   * starting position built by both players' armies. Every other variant still self-generates
+   * its own starting position (classical, or a random Chess960 back rank) as before. */
+  initialFen?: string;
   /** See Room.onFinished. */
   onFinished?: (winner: PieceColor | null) => void;
 }
@@ -124,7 +130,7 @@ export class RoomManager {
 
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
-    const initialFen = params.chess960 ? generateChess960Position() : START_FEN;
+    const initialFen = params.setupChess && params.initialFen ? params.initialFen : params.chess960 ? generateChess960Position() : START_FEN;
     const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
@@ -137,6 +143,7 @@ export class RoomManager {
       chess960: params.chess960,
       kingOfTheHill: params.kingOfTheHill,
       threeCheck: params.threeCheck,
+      setupChess: params.setupChess,
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -281,6 +288,7 @@ export class RoomManager {
         isChess960: room.chess960,
         isKingOfTheHill: room.kingOfTheHill,
         isThreeCheck: room.threeCheck,
+        isSetupChess: room.setupChess,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -434,6 +442,7 @@ export class RoomManager {
         isChess960: room.chess960,
         isKingOfTheHill: room.kingOfTheHill,
         isThreeCheck: room.threeCheck,
+        isSetupChess: room.setupChess,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,

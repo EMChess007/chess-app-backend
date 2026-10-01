@@ -10,6 +10,7 @@ export interface PendingChallenge {
   isChess960: boolean;
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
+  isSetupChess: boolean;
   createdAt: number;
 }
 

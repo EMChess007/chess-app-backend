@@ -498,6 +498,119 @@ async function testThreeCheckWin() {
   uri.disconnect();
 }
 
+async function testSetupChessBlindPairing() {
+  console.log('\n=== 10. Setup Chess: blind pairing, both armies submitted, merged position playable ===');
+  const vera = await connect('Vera');
+  const wade = await connect('Wade');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  // Paired instantly (isSetupChess partitions the queue exactly like every other variant flag),
+  // but — unlike every other variant — NOT via match_found: no room exists yet, since there's no
+  // starting position until both armies are in.
+  const veraPairedPromise = waitFor(vera, 'setup_chess_paired');
+  const wadePairedPromise = waitFor(wade, 'setup_chess_paired');
+  await emitAck(vera, 'join_queue', { timeControl, isChess960: false, isSetupChess: true });
+  await new Promise((r) => setTimeout(r, 150));
+  await emitAck(wade, 'join_queue', { timeControl, isChess960: false, isSetupChess: true });
+  const [veraPaired, wadePaired] = await Promise.all([veraPairedPromise, wadePairedPromise]);
+
+  check(veraPaired.pairingId === wadePaired.pairingId, 'both players share the same pairingId');
+  check(veraPaired.color !== wadePaired.color, 'the two players were assigned opposite colors');
+
+  const white = veraPaired.color === 'w' ? { socket: vera, name: 'Vera' } : { socket: wade, name: 'Wade' };
+  const black = veraPaired.color === 'b' ? { socket: vera, name: 'Vera' } : { socket: wade, name: 'Wade' };
+  const pairingId = veraPaired.pairingId;
+  console.log(`  White = ${white.name}, Black = ${black.name} — both submitting a King + Rook army...`);
+
+  // A minimal, deliberately cheap, obviously-valid army for both sides (well under the 39-point
+  // budget) — just enough to confirm the merge/validation/room-creation pipeline works end to
+  // end, not a test of every possible army shape.
+  const whiteArmySubmitted = emitAck(white.socket, 'submit_setup_chess', {
+    pairingId,
+    pieces: [
+      { square: 'e1', type: 'k' },
+      { square: 'a1', type: 'r' },
+    ],
+  });
+  const whiteAck = await whiteArmySubmitted;
+  check(whiteAck.ok === true, "White's army submission is accepted (still waiting on Black)");
+
+  const whiteMatchFound = waitFor(white.socket, 'match_found');
+  const blackMatchFound = waitFor(black.socket, 'match_found');
+  const blackAck = await emitAck(black.socket, 'submit_setup_chess', {
+    pairingId,
+    pieces: [
+      { square: 'e8', type: 'k' },
+      { square: 'a8', type: 'r' },
+    ],
+  });
+  check(blackAck.ok === true, "Black's army submission is accepted");
+
+  const [whiteMatch, blackMatch] = await Promise.all([whiteMatchFound, blackMatchFound]);
+  check(whiteMatch.roomId === blackMatch.roomId, 'both players land in the same room once both armies are in');
+  check(whiteMatch.isSetupChess === true, 'match_found reports isSetupChess: true');
+  check(
+    whiteMatch.fen === 'r3k3/8/8/8/8/8/8/R3K3 w Qq - 0 1',
+    'the merged FEN matches the two submitted armies exactly (empty middle ranks, White to move, queenside castling rights for both since each king+rook sit on their classical corner)'
+  );
+
+  // Confirm the merged position is a genuinely normal, playable game from here on — no special
+  // Setup Chess logic exists past this point, it's 100% ordinary chess.js rules.
+  const blackSeesE2 = waitFor(black.socket, 'opponent_move');
+  const moveAck = await emitAck(white.socket, 'make_move', { roomId: whiteMatch.roomId, from: 'e1', to: 'e2' });
+  check(moveAck.ok === true, "White's Ke1-e2 is accepted as an ordinary legal move from the merged position");
+  check((await blackSeesE2).san === 'Ke2', 'Black received the move normally, like any other online game');
+
+  vera.disconnect();
+  wade.disconnect();
+}
+
+async function testSetupChessInvalidMergeAsksBothToRedo() {
+  console.log('\n=== 11. Setup Chess: a merge that leaves a king in check asks both players to rebuild ===');
+  const xena = await connect('Xena');
+  const yuri = await connect('Yuri');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const xenaPairedPromise = waitFor(xena, 'setup_chess_paired');
+  const yuriPairedPromise = waitFor(yuri, 'setup_chess_paired');
+  await emitAck(xena, 'join_queue', { timeControl, isChess960: false, isSetupChess: true });
+  await new Promise((r) => setTimeout(r, 150));
+  await emitAck(yuri, 'join_queue', { timeControl, isChess960: false, isSetupChess: true });
+  const [xenaPaired, yuriPaired] = await Promise.all([xenaPairedPromise, yuriPairedPromise]);
+
+  const white = xenaPaired.color === 'w' ? xena : yuri;
+  const black = xenaPaired.color === 'b' ? xena : yuri;
+  const pairingId = xenaPaired.pairingId;
+
+  // White's queen on e1 has an entirely open e-file straight to Black's king on e8 (the king went
+  // on a1 instead, so the queen has the e-file to itself) — Black would already be in check
+  // before ever getting a move, which a real game could never reach.
+  const whiteInvalid = waitFor(white, 'setup_chess_invalid');
+  const blackInvalid = waitFor(black, 'setup_chess_invalid');
+  await emitAck(white, 'submit_setup_chess', {
+    pairingId,
+    pieces: [
+      { square: 'a1', type: 'k' },
+      { square: 'e1', type: 'q' },
+    ],
+  });
+  await emitAck(black, 'submit_setup_chess', { pairingId, pieces: [{ square: 'e8', type: 'k' }] });
+
+  await Promise.all([whiteInvalid, blackInvalid]);
+  check(true, 'both players are told to rebuild when the merged position is illegal');
+
+  // The pairing survives — both can resubmit and reach a normal match_found.
+  const whiteMatchFound = waitFor(white, 'match_found');
+  const blackMatchFound = waitFor(black, 'match_found');
+  await emitAck(white, 'submit_setup_chess', { pairingId, pieces: [{ square: 'e1', type: 'k' }] });
+  await emitAck(black, 'submit_setup_chess', { pairingId, pieces: [{ square: 'e8', type: 'k' }] });
+  const [whiteMatch] = await Promise.all([whiteMatchFound, blackMatchFound]);
+  check(whiteMatch.fen === '4k3/8/8/8/8/8/8/4K3 w - - 0 1', 'the pairing still works after a redo — resubmitted armies merge correctly');
+
+  xena.disconnect();
+  yuri.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -509,6 +622,8 @@ async function main() {
   await testKingOfTheHillWin();
   await testThreeCheckMatchmaking();
   await testThreeCheckWin();
+  await testSetupChessBlindPairing();
+  await testSetupChessInvalidMergeAsksBothToRedo();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

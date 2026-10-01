@@ -292,6 +292,7 @@ export class TournamentManager {
         chess960: tournament.chess960,
         kingOfTheHill: tournament.kingOfTheHill,
         threeCheck: tournament.threeCheck,
+        setupChess: false, // Tournaments don't support Setup Chess yet — see VariantSelector's excludeVariants on TournamentScreen
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;

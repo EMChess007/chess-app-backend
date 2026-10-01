@@ -4,6 +4,7 @@ import { verifyToken } from '../lib/jwt.js';
 import { ChallengeManager } from './challenges.js';
 import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
+import { SetupChessPairingManager } from './setupChessPairing.js';
 import { TournamentManager } from './tournaments.js';
 import type {
   Ack,
@@ -19,6 +20,8 @@ import type {
   ResignPayload,
   RespondDrawPayload,
   SendChatPayload,
+  SetupChessPieceWire,
+  SubmitSetupChessPayload,
   TimeControl,
   TournamentIdPayload,
   TournamentLobbyState,
@@ -57,6 +60,20 @@ interface PairableEntry {
   isChess960: boolean;
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
+  isSetupChess: boolean;
+}
+
+function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (p) =>
+        typeof p === 'object' &&
+        p !== null &&
+        typeof (p as Record<string, unknown>).square === 'string' &&
+        ['p', 'n', 'b', 'r', 'q', 'k'].includes((p as Record<string, unknown>).type as string)
+    )
+  );
 }
 
 export function registerSocketHandlers(io: Server): void {
@@ -64,6 +81,7 @@ export function registerSocketHandlers(io: Server): void {
   const rooms = new RoomManager(io);
   const challenges = new ChallengeManager();
   const tournaments = new TournamentManager(io, rooms);
+  const setupChessPairings = new SetupChessPairingManager(io, rooms);
 
   /** Creates a room for two already-paired entries (from the anonymous queue or a challenge code
    * alike) and pushes `match_found` to both — the one piece of logic join_queue's pairing and
@@ -82,6 +100,7 @@ export function registerSocketHandlers(io: Server): void {
       chess960: a.isChess960,
       kingOfTheHill: a.isKingOfTheHill,
       threeCheck: a.isThreeCheck,
+      setupChess: false, // Setup Chess never reaches this path — see the isSetupChess branches below
     });
 
     const basePayload = {
@@ -90,6 +109,7 @@ export function registerSocketHandlers(io: Server): void {
       isChess960: a.isChess960,
       isKingOfTheHill: a.isKingOfTheHill,
       isThreeCheck: a.isThreeCheck,
+      isSetupChess: false,
       fen: created.fen,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
@@ -130,6 +150,7 @@ export function registerSocketHandlers(io: Server): void {
         isChess960: Boolean(payload.isChess960),
         isKingOfTheHill: Boolean(payload.isKingOfTheHill),
         isThreeCheck: Boolean(payload.isThreeCheck),
+        isSetupChess: Boolean(payload.isSetupChess),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -137,7 +158,13 @@ export function registerSocketHandlers(io: Server): void {
       const opponent = matchmaker.join(entry);
       ack?.({ ok: true });
       if (!opponent) return;
-      pairAndCreateRoom(entry, opponent);
+      // Setup Chess has no starting position at all until both players submit a blind army — see
+      // SetupChessPairingManager's own doc comment for why this can't just be pairAndCreateRoom.
+      if (entry.isSetupChess) {
+        setupChessPairings.pair(entry, opponent);
+      } else {
+        pairAndCreateRoom(entry, opponent);
+      }
     });
 
     socket.on('leave_queue', (_payload: unknown, ack?: (res: Ack) => void) => {
@@ -158,6 +185,7 @@ export function registerSocketHandlers(io: Server): void {
         isChess960: Boolean(payload.isChess960),
         isKingOfTheHill: Boolean(payload.isKingOfTheHill),
         isThreeCheck: Boolean(payload.isThreeCheck),
+        isSetupChess: Boolean(payload.isSetupChess),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -185,26 +213,33 @@ export function registerSocketHandlers(io: Server): void {
       }
       challenges.remove(code);
       ack?.({ ok: true });
-      pairAndCreateRoom(
-        {
-          socketId: challenge.creatorSocketId,
-          userId: challenge.creatorUserId,
-          timeControl: challenge.timeControl,
-          timeControlLabel: challenge.timeControlLabel,
-          isChess960: challenge.isChess960,
-          isKingOfTheHill: challenge.isKingOfTheHill,
-          isThreeCheck: challenge.isThreeCheck,
-        },
-        {
-          socketId: socket.id,
-          userId,
-          timeControl: challenge.timeControl,
-          timeControlLabel: challenge.timeControlLabel,
-          isChess960: challenge.isChess960,
-          isKingOfTheHill: challenge.isKingOfTheHill,
-          isThreeCheck: challenge.isThreeCheck,
-        }
-      );
+
+      const creatorEntry = {
+        socketId: challenge.creatorSocketId,
+        userId: challenge.creatorUserId,
+        timeControl: challenge.timeControl,
+        timeControlLabel: challenge.timeControlLabel,
+        isChess960: challenge.isChess960,
+        isKingOfTheHill: challenge.isKingOfTheHill,
+        isThreeCheck: challenge.isThreeCheck,
+        isSetupChess: challenge.isSetupChess,
+      };
+      const joinerEntry = {
+        socketId: socket.id,
+        userId,
+        timeControl: challenge.timeControl,
+        timeControlLabel: challenge.timeControlLabel,
+        isChess960: challenge.isChess960,
+        isKingOfTheHill: challenge.isKingOfTheHill,
+        isThreeCheck: challenge.isThreeCheck,
+        isSetupChess: challenge.isSetupChess,
+      };
+      // Same "no room until both blind armies are in" branch as join_queue above.
+      if (challenge.isSetupChess) {
+        setupChessPairings.pair(creatorEntry, joinerEntry);
+      } else {
+        pairAndCreateRoom(creatorEntry, joinerEntry);
+      }
     });
 
     socket.on('list_active_games', async (_payload: unknown, ack?: (res: Ack<{ games: Awaited<ReturnType<typeof rooms.listActiveGames>> }>) => void) => {
@@ -229,6 +264,15 @@ export function registerSocketHandlers(io: Server): void {
     socket.on('stop_spectating', (_payload: unknown, ack?: (res: Ack) => void) => {
       rooms.stopSpectating(socket.id);
       ack?.({ ok: true });
+    });
+
+    socket.on('submit_setup_chess', (payload: SubmitSetupChessPayload, ack?: (res: Ack) => void) => {
+      const pairingId = typeof payload?.pairingId === 'string' ? payload.pairingId : '';
+      if (!pairingId || !isValidSetupChessPieces(payload?.pieces)) {
+        ack?.({ ok: false, error: 'Invalid setup.' });
+        return;
+      }
+      ack?.(setupChessPairings.submitSetup(socket.id, pairingId, payload.pieces));
     });
 
     socket.on('make_move', (payload: MakeMovePayload, ack?: (res: Ack) => void) => {
@@ -345,6 +389,7 @@ export function registerSocketHandlers(io: Server): void {
       challenges.removeByCreator(socket.id);
       rooms.handleDisconnect(socket.id);
       tournaments.handleDisconnect(socket.id);
+      setupChessPairings.handleDisconnect(socket.id);
       console.log(`[socket] disconnected ${socket.id}`);
     });
   });

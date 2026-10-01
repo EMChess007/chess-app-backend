@@ -16,6 +16,7 @@ export interface JoinQueuePayload {
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
+  isSetupChess?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -66,6 +67,7 @@ export interface MatchFoundPayload {
   isChess960: boolean;
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
+  isSetupChess: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -105,6 +107,7 @@ export interface RejoinStatePayload {
   isChess960: boolean;
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
+  isSetupChess: boolean;
   whiteMs: number;
   blackMs: number;
   moves: { from: string; to: string; promotion?: string; san: string }[];
@@ -135,11 +138,35 @@ export interface CreateChallengePayload {
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
+  isSetupChess?: boolean;
   timeControlLabel?: string;
 }
 
 export interface JoinChallengePayload {
   code: string;
+}
+
+// --- Setup Chess (blind, simultaneous army-building before the room is created) --------------
+
+export interface SetupChessPieceWire {
+  square: string;
+  type: 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
+}
+
+/** Sent to both players the instant they're paired for a Setup Chess game (queue or challenge)
+ * — replaces `match_found` for this one variant, since the room itself can't exist yet (there's
+ * no starting position until both armies are submitted and merged). `color` is this player's own
+ * assigned color, decided once at pairing time so their builder knows which two ranks are theirs. */
+export interface SetupChessPairedPayload {
+  pairingId: string;
+  color: PieceColor;
+  opponent: { userId: string | null };
+  timeControl: TimeControl;
+}
+
+export interface SubmitSetupChessPayload {
+  pairingId: string;
+  pieces: SetupChessPieceWire[];
 }
 
 // --- Tournaments -------------------------------------------------------------

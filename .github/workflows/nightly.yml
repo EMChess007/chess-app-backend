@@ -1,0 +1,138 @@
+name: Nightly extended fuzz
+
+# Runs thousands of randomized Fog of War games — far more than ci.yml's per-commit counts can
+# afford without slowing down every push — on a schedule instead, so a rare bug (like the en
+# passant / performance / visibility issues found during this project's own investigation) has a
+# real chance of surfacing even when it needs thousands of games to show up even once.
+#
+# Visibility if something fails: this workflow uploads its two markdown reports as build artifacts
+# on every run (pass or fail), and opens/updates a single pinned GitHub issue when the run fails
+# (closing it automatically next time the run passes) — see the last two steps. GitHub also emails
+# the workflow file's last editor by default whenever a scheduled run fails, with no extra setup.
+on:
+  schedule:
+    # 03:00 UTC every night — low-traffic hours, well clear of ci.yml's own on-push runs.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {} # lets a maintainer trigger it manually from the Actions tab too.
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chess
+          POSTGRES_PASSWORD: chess
+          POSTGRES_DB: chess_app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://chess:chess@localhost:5432/chess_app
+      JWT_SECRET: ci-test-secret-not-for-production
+      PORT: 3000
+
+    steps:
+      - name: Checkout frontend (EM-Chess) — the logic fuzz imports its chess engine directly
+        uses: actions/checkout@v4
+        with:
+          repository: EMChess007/EM-Chess
+          path: chess-app
+
+      - name: Checkout backend (this repo) into chess-app/backend — matches local dev layout
+        uses: actions/checkout@v4
+        with:
+          path: chess-app/backend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: chess-app
+        run: npm ci
+
+      - name: Install backend dependencies
+        working-directory: chess-app/backend
+        run: npm ci
+
+      - name: Generate Prisma client and apply migrations
+        working-directory: chess-app/backend
+        run: |
+          npx prisma generate
+          npx prisma migrate deploy
+
+      - name: Pure-logic fuzz (3000 games, both ChessEngine implementations)
+        id: logic_fuzz
+        working-directory: chess-app/backend
+        run: node scripts/nightly-fuzz-logic.mjs 3000 80
+        continue-on-error: true
+
+      - name: Start dev server (for the online fuzz below)
+        working-directory: chess-app/backend
+        run: nohup npm run dev > server.log 2>&1 &
+
+      - name: Wait for server to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat chess-app/backend/server.log || true
+          exit 1
+
+      - name: Online fuzz (200 real games through the live server/socket protocol)
+        id: online_fuzz
+        working-directory: chess-app/backend
+        run: node scripts/nightly-fuzz-online.mjs 200 80
+        continue-on-error: true
+
+      - name: Upload fuzz reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-reports
+          path: |
+            chess-app/backend/nightly-fuzz-report.md
+            chess-app/backend/nightly-fuzz-online-report.md
+          retention-days: 90
+
+      - name: Fail the job if either fuzz run failed
+        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure'
+        run: exit 1
+
+      - name: Open/update a tracking issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const read = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return '(report file not found — job may have crashed before writing it)'; } };
+            const logicReport = read('chess-app/backend/nightly-fuzz-report.md');
+            const onlineReport = read('chess-app/backend/nightly-fuzz-online-report.md');
+            const title = 'Nightly fuzz failure';
+            const body = `The nightly extended Fog of War fuzz found something. Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n<details><summary>Pure-logic fuzz report</summary>\n\n${logicReport}\n\n</details>\n\n<details><summary>Online fuzz report</summary>\n\n${onlineReport}\n\n</details>\n`;
+            const existing = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: ['nightly-fuzz'] });
+            if (existing.data.length > 0) {
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.data[0].number, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ['nightly-fuzz'] });
+            }
+
+      - name: Close the tracking issue once the run passes again
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const existing = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: ['nightly-fuzz'] });
+            for (const issue of existing.data) {
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'closed' });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: 'Nightly fuzz passed again — closing.' });
+            }

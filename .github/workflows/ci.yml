@@ -1,0 +1,110 @@
+name: CI
+
+# Runs on every push/PR targeting main — type-checks the backend and runs the full E2E +
+# regression test suite against a real (ephemeral) Postgres + dev server, exactly like this
+# project's own established "tsc --noEmit, then the full suite" habit, just automated.
+#
+# Several backend test scripts (scripts/test-fogOfWar*.mjs) import the mobile app's own
+# src/logic/ChessEngine.ts directly (see those scripts' own doc comments for why — testing the
+# real shared chess logic, not a reimplementation) via a relative path that assumes the local dev
+# layout: chess-app/ (frontend) with chess-app/backend/ (this repo) nested inside it. Since this
+# is a separate GitHub repo, that layout is recreated here by checking out EM-Chess first and this
+# repo into chess-app/backend afterward, rather than at the default location.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chess
+          POSTGRES_PASSWORD: chess
+          POSTGRES_DB: chess_app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://chess:chess@localhost:5432/chess_app
+      JWT_SECRET: ci-test-secret-not-for-production
+      PORT: 3000
+
+    steps:
+      - name: Checkout frontend (EM-Chess) — several test scripts import its chess logic directly
+        uses: actions/checkout@v4
+        with:
+          repository: EMChess007/EM-Chess
+          path: chess-app
+
+      - name: Checkout backend (this repo) into chess-app/backend — matches local dev layout
+        uses: actions/checkout@v4
+        with:
+          path: chess-app/backend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies (chess.js etc. — resolved by the cross-imported files)
+        working-directory: chess-app
+        run: npm ci
+
+      - name: Install backend dependencies
+        working-directory: chess-app/backend
+        run: npm ci
+
+      - name: Generate Prisma client and apply migrations
+        working-directory: chess-app/backend
+        run: |
+          npx prisma generate
+          npx prisma migrate deploy
+
+      - name: Type-check (backend)
+        working-directory: chess-app/backend
+        run: npx tsc --noEmit
+
+      - name: Start dev server
+        working-directory: chess-app/backend
+        run: nohup npm run dev > server.log 2>&1 &
+
+      - name: Wait for server to become healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "Server is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server never became healthy — dumping log:"
+          cat chess-app/backend/server.log || true
+          exit 1
+
+      - name: Run E2E test suite (multiplayer + tournaments)
+        working-directory: chess-app/backend
+        run: |
+          node scripts/test-multiplayer.mjs
+          node scripts/test-tournament.mjs
+
+      - name: Run Fog of War regression suite
+        working-directory: chess-app/backend
+        run: |
+          npm run test:fogOfWarEnPassant
+          npm run test:fogOfWarPerformance
+          npm run test:fogOfWarRedactionHistory
+          npm run test:fogOfWarVisibilityGroundTruth
+
+      - name: Dump server log on failure
+        if: failure()
+        run: cat chess-app/backend/server.log || true

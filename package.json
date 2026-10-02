@@ -10,7 +10,11 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "test:multiplayer": "node scripts/test-multiplayer.mjs"
+    "test:multiplayer": "node scripts/test-multiplayer.mjs",
+    "test:fogOfWarEnPassant": "tsx scripts/test-fogOfWarEnPassant.mjs",
+    "test:fogOfWarPerformance": "tsx scripts/test-fogOfWarPerformance.mjs",
+    "test:fogOfWarRedactionHistory": "tsx scripts/test-fogOfWarRedactionHistory.mjs",
+    "test:fogOfWarVisibilityGroundTruth": "tsx scripts/test-fogOfWarVisibilityGroundTruth.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",

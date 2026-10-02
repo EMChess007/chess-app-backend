@@ -10,9 +10,12 @@ name: CI
 # layout: chess-app/ (frontend) with chess-app/backend/ (this repo) nested inside it. Since this
 # is a separate GitHub repo, that layout is recreated here by checking out EM-Chess first and this
 # repo into chess-app/backend afterward, rather than at the default location.
+# Pushes to ANY branch run CI too (not just main): with branch protection requiring the `test`
+# check on main, a commit can only reach main once that exact commit already has a passing check —
+# so it has to be validated on a branch first.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
     branches: [main]
 

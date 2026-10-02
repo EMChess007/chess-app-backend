@@ -7,7 +7,16 @@ export interface TimeControl {
   incrementSeconds: number;
 }
 
-export type GameOverReason = 'checkmate' | 'stalemate' | 'draw' | 'timeout' | 'abandonment' | 'resignation' | 'kingOfTheHill' | 'threeCheck';
+export type GameOverReason =
+  | 'checkmate'
+  | 'stalemate'
+  | 'draw'
+  | 'timeout'
+  | 'abandonment'
+  | 'resignation'
+  | 'kingOfTheHill'
+  | 'threeCheck'
+  | 'fogOfWar';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -17,6 +26,7 @@ export interface JoinQueuePayload {
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
   isSetupChess?: boolean;
+  isFogOfWar?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -68,20 +78,31 @@ export interface MatchFoundPayload {
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
   isSetupChess: boolean;
+  isFogOfWar: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
+  /** Fog of War only — this recipient's own current visibility (square names). Even the
+   * classical starting position isn't fully visible to either side under this variant's
+   * visibility rule, so this is populated from the very first `match_found`, same as every later
+   * `opponent_move`/`rejoin_game` state. Omitted outside Fog of War. */
+  visibleSquares?: string[];
 }
 
 export interface OpponentMovePayload {
-  from: string;
-  to: string;
+  /** Omitted together (along with `san`) when this move happened outside the Fog of War
+   * recipient's own visibility — they still get the new (redacted) `fen`/`turn`/clocks/
+   * `visibleSquares`, just not what specifically happened. Always present outside Fog of War. */
+  from?: string;
+  to?: string;
   promotion?: 'n' | 'b' | 'r' | 'q';
-  san: string;
+  san?: string;
   fen: string;
   turn: PieceColor;
   whiteMs: number;
   blackMs: number;
+  /** Fog of War only — see MatchFoundPayload.visibleSquares. */
+  visibleSquares?: string[];
 }
 
 export interface GameOverPayload {
@@ -108,9 +129,15 @@ export interface RejoinStatePayload {
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
   isSetupChess: boolean;
+  isFogOfWar: boolean;
   whiteMs: number;
   blackMs: number;
-  moves: { from: string; to: string; promotion?: string; san: string }[];
+  /** Each entry's fields are all omitted together for a Fog of War move this viewer never
+   * witnessed (see redactMoveHistory) — always fully populated outside Fog of War. */
+  moves: { from?: string; to?: string; promotion?: string; san?: string }[];
+  /** Fog of War only — see MatchFoundPayload.visibleSquares; recomputed fresh for whoever's
+   * rejoining/spectating. */
+  visibleSquares?: string[];
   opponentConnected: boolean;
 }
 
@@ -139,6 +166,7 @@ export interface CreateChallengePayload {
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
   isSetupChess?: boolean;
+  isFogOfWar?: boolean;
   timeControlLabel?: string;
 }
 

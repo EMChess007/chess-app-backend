@@ -1,7 +1,27 @@
-import { Chess, type Square as ChessJsSquare } from 'chess.js';
+import { Chess, Move as ChessJsMove, type Square as ChessJsSquare } from 'chess.js';
 import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './chess960.js';
 
 const FILES = 'abcdefgh';
+
+/** chess.js's own internal move shape — not exported by name, but structurally identical to this
+ * (TypeScript matches structurally, so this works wherever chess.js's own unexported
+ * `InternalMove` type is expected, e.g. the `Move` class's constructor). See `ChessInternals`
+ * below for why this exists — this is the server-side twin of the mobile app's identical
+ * src/logic/ChessEngine.ts addition; see that file's own doc comment for the full rationale. */
+interface InternalMove {
+  color: PieceColor;
+  from: number;
+  to: number;
+  piece: 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
+  captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
+  promotion?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
+  flags: number;
+}
+
+interface ChessInternals {
+  _moves(options?: { legal?: boolean; square?: ChessJsSquare; piece?: string }): InternalMove[];
+  _makeMove(move: InternalMove): void;
+}
 
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
@@ -20,6 +40,10 @@ export interface AppliedMove {
   to: string;
   promotion?: 'n' | 'b' | 'r' | 'q';
   san: string;
+  /** The type of piece captured by this move, if any — only ever populated by movePseudoLegal
+   * (Fog of War), which needs it to detect a king capture; the normal move() path has never
+   * needed it since every other variant's win conditions don't depend on what was captured. */
+  captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
 }
 
 export interface RoomChessEngineOptions {
@@ -87,7 +111,10 @@ export class RoomChessEngine {
   }
 
   getFen(): string {
-    return this.chess.fen();
+    // forceEnpassantSquare: see the mobile app's identical ChessEngine.getFen() for the full
+    // rationale — without this, chess.js's own .fen() can silently drop an en-passant target
+    // that movePseudoLegal would otherwise still accept once Fog of War allows king exposure.
+    return this.chess.fen({ forceEnpassantSquare: true });
   }
 
   /** Whether either king is currently on one of the 4 center squares — checked by the caller only
@@ -119,6 +146,51 @@ export class RoomChessEngine {
     if (counts.w >= THREE_CHECK_TARGET) return 'w';
     if (counts.b >= THREE_CHECK_TARGET) return 'b';
     return null;
+  }
+
+  // --- Fog of War (see ChessInternals above) -----------------------------
+
+  /** Pseudo-legal moves for `color` (defaults to the side to move) — see the mobile app's
+   * identical ChessEngine.getPseudoLegalMoves for the full rationale. Used here both to validate
+   * a submitted Fog of War move server-side and to compute each player's own visibility
+   * (off-turn too, via a throwaway turn-flipped clone — chess.js's generator is always
+   * turn-bound). */
+  getPseudoLegalMoves(color?: PieceColor): AppliedMove[] {
+    const turn = this.chess.turn();
+    const source = !color || color === turn ? this.chess : this.cloneWithTurn(color);
+    const internals = source as unknown as ChessInternals;
+    return internals._moves({ legal: false }).map(toAppliedMoveFromRaw);
+  }
+
+  /** Server-authoritative Fog of War move application — validates `from`/`to`/`promotion`
+   * against the current side's own pseudo-legal moves (never trusts the client beyond that) and
+   * applies it directly via chess.js's internal _makeMove, bypassing the public move()'s
+   * king-safety gate entirely. Returns null if nothing matches. */
+  movePseudoLegal(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q'): AppliedMove | null {
+    const internals = this.chess as unknown as ChessInternals;
+    const candidates = internals._moves({ legal: false });
+    // See the mobile app's identical movePseudoLegal — compared off the raw move's own fields,
+    // not a chess.js Move wrapper built (at full cost) for every candidate scanned.
+    const raw = candidates.find(
+      (m) => squareFromIndex(m.from) === from && squareFromIndex(m.to) === to && (!m.promotion || m.promotion === promotion)
+    );
+    if (!raw) return null;
+    const pretty = new ChessJsMove(this.chess, raw);
+    internals._makeMove(raw);
+    return toAppliedMove(pretty);
+  }
+
+  private cloneWithTurn(color: PieceColor): Chess {
+    const fields = this.chess.fen().split(' ');
+    fields[1] = color;
+    // skipValidation: the position being cloned can legitimately be missing a king here — either
+    // the king was just captured (Fog of War's own win condition) or this engine was constructed
+    // from an already-redacted fen in the first place. chess.js validates the WHOLE position on
+    // load regardless of which color's moves are actually being asked for, so this is required
+    // even when only querying the side that still has its king — confirmed the hard way: omitting
+    // this crashed the whole process with "Invalid FEN: missing white king" the moment a Fog of
+    // War king capture needed the mover's own (off-turn) visibility recomputed afterward.
+    return new Chess(fields.join(' '), { skipValidation: true });
   }
 
   // --- Chess960 castling (see mobile ChessEngine.ts for the twin implementation) ------------
@@ -206,6 +278,39 @@ export class RoomChessEngine {
     const san = side === 'k' ? 'O-O' : 'O-O-O';
     return { from, to, san };
   }
+}
+
+function toAppliedMove(pretty: ChessJsMove): AppliedMove {
+  return {
+    from: pretty.from,
+    to: pretty.to,
+    promotion: pretty.promotion as 'n' | 'b' | 'r' | 'q' | undefined,
+    san: pretty.san,
+    captured: pretty.captured as AppliedMove['captured'],
+  };
+}
+
+/** Mirrors chess.js's own internal (unexported) `algebraic()` — see the mobile app's identical
+ * ChessEngine.squareFromIndex for the full rationale. */
+function squareFromIndex(index: number): string {
+  const file = index & 0xf;
+  const rank = index >> 4;
+  return `${FILES[file]}${'87654321'[rank]}`;
+}
+
+/** See the mobile app's identical ChessEngine.toAppMoveFromRaw — avoids constructing a full
+ * chess.js Move (which eagerly computes `.san` via a complete `_moves({legal:true})` regeneration
+ * plus two `.fen()` calls) for every pseudo-legal candidate, when getPseudoLegalMoves' only
+ * caller here (visibility computation) ever reads is `.to`. `san` is a placeholder, never read —
+ * grep getPseudoLegalMoves before changing that. */
+function toAppliedMoveFromRaw(raw: InternalMove): AppliedMove {
+  return {
+    from: squareFromIndex(raw.from),
+    to: squareFromIndex(raw.to),
+    promotion: raw.promotion as 'n' | 'b' | 'r' | 'q' | undefined,
+    san: '',
+    captured: raw.captured as AppliedMove['captured'],
+  };
 }
 
 function fileRange(a: number, b: number): number[] {

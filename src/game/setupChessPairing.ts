@@ -108,6 +108,7 @@ export class SetupChessPairingManager {
       kingOfTheHill: false,
       threeCheck: false,
       setupChess: true,
+      fogOfWar: false, // Fog of War isn't combinable with Setup Chess
       initialFen: fen,
     });
 
@@ -118,6 +119,7 @@ export class SetupChessPairingManager {
       isKingOfTheHill: false,
       isThreeCheck: false,
       isSetupChess: true,
+      isFogOfWar: false,
       fen: created.fen,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,

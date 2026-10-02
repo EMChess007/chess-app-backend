@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Server } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { generateChess960Position } from './chess960.js';
+import { buildRedactedFen, getFogOfWarWinner, getVisibleSquares, redactMoveHistory } from './fogOfWar.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
 import type {
@@ -47,6 +48,7 @@ interface Room {
   kingOfTheHill: boolean;
   threeCheck: boolean;
   setupChess: boolean;
+  fogOfWar: boolean;
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -86,6 +88,7 @@ export interface CreateRoomParams {
   kingOfTheHill: boolean;
   threeCheck: boolean;
   setupChess: boolean;
+  fogOfWar: boolean;
   /** Required (and only meaningful) when `setupChess` is true — the merged, already-validated
    * starting position built by both players' armies. Every other variant still self-generates
    * its own starting position (classical, or a random Chess960 back rank) as before. */
@@ -107,6 +110,13 @@ export interface CreateRoomResult {
   fen: string;
   whiteMs: number;
   blackMs: number;
+  /** Fog of War only — each color's own redacted view of the starting position, for the very
+   * first `match_found` payload: even the classical starting position isn't fully visible to
+   * either side under this variant's visibility rule (nothing on the back rank is reachable yet),
+   * so `fen` above (the true position) is never what either client should actually be shown.
+   * Undefined outside Fog of War. */
+  whiteView?: { fen: string; visibleSquares: string[] };
+  blackView?: { fen: string; visibleSquares: string[] };
 }
 
 function initialClockMs(timeControl: TimeControl): number {
@@ -144,6 +154,7 @@ export class RoomManager {
       kingOfTheHill: params.kingOfTheHill,
       threeCheck: params.threeCheck,
       setupChess: params.setupChess,
+      fogOfWar: params.fogOfWar,
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -167,14 +178,22 @@ export class RoomManager {
     this.socketToRoom.set(params.black.socketId, { roomId: id, color: 'b' });
 
     this.scheduleTimeout(room);
-    return { roomId: id, whitePlayerToken, blackPlayerToken, fen: initialFen, whiteMs: ms, blackMs: ms };
+    const result: CreateRoomResult = { roomId: id, whitePlayerToken, blackPlayerToken, fen: initialFen, whiteMs: ms, blackMs: ms };
+    if (params.fogOfWar) {
+      result.whiteView = { fen: buildRedactedFen(engine, 'w'), visibleSquares: [...getVisibleSquares(engine, 'w')] };
+      result.blackView = { fen: buildRedactedFen(engine, 'b'), visibleSquares: [...getVisibleSquares(engine, 'b')] };
+    }
+    return result;
   }
 
   /** Validates and applies a move submitted by `socketId` — the single point where a client's
    * claim about a move becomes real game state. Rejects anything chess.js (or the Chess960
    * castling logic) doesn't accept, and anything from a socket that isn't actually the side to
    * move in that room. */
-  applyMove(socketId: string, payload: MakeMovePayload): Ack<{ fen: string; san: string; turn: PieceColor; whiteMs: number; blackMs: number }> {
+  applyMove(
+    socketId: string,
+    payload: MakeMovePayload
+  ): Ack<{ fen: string; san: string; turn: PieceColor; whiteMs: number; blackMs: number; visibleSquares?: string[] }> {
     const location = this.socketToRoom.get(socketId);
     if (!location || location.roomId !== payload.roomId) {
       return { ok: false, error: 'No active game found for this connection.' };
@@ -189,7 +208,15 @@ export class RoomManager {
       return { ok: false, error: "It's not your turn." };
     }
 
-    const result = room.engine.move(payload.from, payload.to, payload.promotion);
+    const opponentColor: PieceColor = mover === 'w' ? 'b' : 'w';
+    // Fog of War only — needed BEFORE the move is applied, to later decide (together with the
+    // post-move visibility) whether the opponent actually witnessed it — see
+    // redactMoveHistory's own pre/post-visibility-union rationale (mobile app's fogOfWar.ts).
+    const opponentVisibleBefore = room.fogOfWar ? getVisibleSquares(room.engine, opponentColor) : null;
+
+    const result = room.fogOfWar
+      ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
+      : room.engine.move(payload.from, payload.to, payload.promotion);
     if (!result) {
       return { ok: false, error: 'Invalid move.' };
     }
@@ -206,48 +233,94 @@ export class RoomManager {
     room.moves.push(result);
 
     const newTurn = room.engine.getTurn();
-    const opponentColor: PieceColor = mover === 'w' ? 'b' : 'w';
     const opponentSlot = room.players[opponentColor];
+    let moverVisibleSquares: string[] | undefined;
 
-    const movePayload: OpponentMovePayload = {
-      from: result.from,
-      to: result.to,
-      promotion: result.promotion,
-      san: result.san,
-      fen: room.engine.getFen(),
-      turn: newTurn,
-      whiteMs: room.whiteMs,
-      blackMs: room.blackMs,
-    };
-    if (opponentSlot.socketId) {
-      this.io.to(opponentSlot.socketId).emit('opponent_move', movePayload);
-    }
-    const spectatorPayload: SpectatorMovePayload = { ...movePayload, mover };
-    this.broadcastToSpectators(room, 'spectator_move', spectatorPayload);
-
-    // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
-    // outright regardless of the rest of the position (check/material/etc. don't matter), and
-    // chess.js has no idea this rule exists at all, so it can never surface via getStatus()/
-    // isGameOver() on its own.
-    const kingOfTheHillWinner = room.kingOfTheHill ? room.engine.getKingOfTheHillWinner() : null;
-    // Same "checked before the normal chess.js end-of-game logic" reasoning as King of the Hill
-    // above — three-checks wins outright regardless of the rest of the position, and chess.js has
-    // no idea this rule exists either.
-    const threeCheckWinner = room.threeCheck ? room.engine.getThreeCheckWinner() : null;
-    if (kingOfTheHillWinner) {
-      this.endGame(room, 'kingOfTheHill', kingOfTheHillWinner);
-    } else if (threeCheckWinner) {
-      this.endGame(room, 'threeCheck', threeCheckWinner);
-    } else if (room.engine.isGameOver()) {
-      const status = room.engine.getStatus();
-      const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
-      const winner: PieceColor | null = status === 'checkmate' ? mover : null;
-      this.endGame(room, reason, winner);
+    if (room.fogOfWar) {
+      const opponentVisibleAfter = getVisibleSquares(room.engine, opponentColor);
+      const revealedToOpponent = opponentVisibleBefore!.has(result.to) || opponentVisibleAfter.has(result.to);
+      const opponentPayload: OpponentMovePayload = {
+        ...(revealedToOpponent ? { from: result.from, to: result.to, promotion: result.promotion, san: result.san } : {}),
+        fen: buildRedactedFen(room.engine, opponentColor),
+        turn: newTurn,
+        whiteMs: room.whiteMs,
+        blackMs: room.blackMs,
+        visibleSquares: [...opponentVisibleAfter],
+      };
+      if (opponentSlot.socketId) {
+        this.io.to(opponentSlot.socketId).emit('opponent_move', opponentPayload);
+      }
+      // Spectators always see the full true position (see fogOfWar.ts's design notes) — never
+      // redacted, regardless of either player's own visibility.
+      const spectatorPayload: SpectatorMovePayload = {
+        from: result.from,
+        to: result.to,
+        promotion: result.promotion,
+        san: result.san,
+        fen: room.engine.getFen(),
+        turn: newTurn,
+        whiteMs: room.whiteMs,
+        blackMs: room.blackMs,
+        mover,
+      };
+      this.broadcastToSpectators(room, 'spectator_move', spectatorPayload);
+      moverVisibleSquares = [...getVisibleSquares(room.engine, mover)];
     } else {
-      this.scheduleTimeout(room);
+      const movePayload: OpponentMovePayload = {
+        from: result.from,
+        to: result.to,
+        promotion: result.promotion,
+        san: result.san,
+        fen: room.engine.getFen(),
+        turn: newTurn,
+        whiteMs: room.whiteMs,
+        blackMs: room.blackMs,
+      };
+      if (opponentSlot.socketId) {
+        this.io.to(opponentSlot.socketId).emit('opponent_move', movePayload);
+      }
+      const spectatorPayload: SpectatorMovePayload = { ...movePayload, mover };
+      this.broadcastToSpectators(room, 'spectator_move', spectatorPayload);
     }
 
-    return { ok: true, fen: room.engine.getFen(), san: result.san, turn: newTurn, whiteMs: room.whiteMs, blackMs: room.blackMs };
+    if (room.fogOfWar) {
+      // Fog of War's ONLY win condition — no checkmate/stalemate/draw concept at all (see
+      // ChessBoard's own fogOfWar doc comment), so room.engine.isGameOver() is never consulted
+      // here: moves went through movePseudoLegal above, which can perfectly well reach a
+      // position chess.js would call checkmate/stalemate without anyone's king actually being
+      // captured, and that must NOT end the game.
+      const winner = getFogOfWarWinner(result, mover);
+      if (winner) {
+        this.endGame(room, 'fogOfWar', winner);
+      } else {
+        this.scheduleTimeout(room);
+      }
+    } else {
+      // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
+      // outright regardless of the rest of the position (check/material/etc. don't matter), and
+      // chess.js has no idea this rule exists at all, so it can never surface via getStatus()/
+      // isGameOver() on its own.
+      const kingOfTheHillWinner = room.kingOfTheHill ? room.engine.getKingOfTheHillWinner() : null;
+      // Same "checked before the normal chess.js end-of-game logic" reasoning as King of the Hill
+      // above — three-checks wins outright regardless of the rest of the position, and chess.js
+      // has no idea this rule exists either.
+      const threeCheckWinner = room.threeCheck ? room.engine.getThreeCheckWinner() : null;
+      if (kingOfTheHillWinner) {
+        this.endGame(room, 'kingOfTheHill', kingOfTheHillWinner);
+      } else if (threeCheckWinner) {
+        this.endGame(room, 'threeCheck', threeCheckWinner);
+      } else if (room.engine.isGameOver()) {
+        const status = room.engine.getStatus();
+        const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
+        const winner: PieceColor | null = status === 'checkmate' ? mover : null;
+        this.endGame(room, reason, winner);
+      } else {
+        this.scheduleTimeout(room);
+      }
+    }
+
+    const moverFen = room.fogOfWar ? buildRedactedFen(room.engine, mover) : room.engine.getFen();
+    return { ok: true, fen: moverFen, san: result.san, turn: newTurn, whiteMs: room.whiteMs, blackMs: room.blackMs, visibleSquares: moverVisibleSquares };
   }
 
   rejoin(socketId: string, payload: RejoinGamePayload): Ack<{ state: RejoinStatePayload }> {
@@ -281,7 +354,7 @@ export class RoomManager {
     return {
       ok: true,
       state: {
-        fen: room.engine.getFen(),
+        fen: room.fogOfWar ? buildRedactedFen(room.engine, color) : room.engine.getFen(),
         turn: room.engine.getTurn(),
         color,
         timeControl: room.timeControl,
@@ -289,9 +362,11 @@ export class RoomManager {
         isKingOfTheHill: room.kingOfTheHill,
         isThreeCheck: room.threeCheck,
         isSetupChess: room.setupChess,
+        isFogOfWar: room.fogOfWar,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
-        moves: room.moves,
+        moves: room.fogOfWar ? redactedMovesFor(room, color) : room.moves,
+        visibleSquares: room.fogOfWar ? [...getVisibleSquares(room.engine, color)] : undefined,
         opponentConnected: opponentSlot.socketId !== null,
       },
     };
@@ -436,6 +511,8 @@ export class RoomManager {
     return {
       ok: true,
       state: {
+        // Spectators always see the full true position, never redacted — see fogOfWar.ts's
+        // design notes ("they're not cheating anyone since they're not competing").
         fen: room.engine.getFen(),
         turn: room.engine.getTurn(),
         timeControl: room.timeControl,
@@ -443,6 +520,7 @@ export class RoomManager {
         isKingOfTheHill: room.kingOfTheHill,
         isThreeCheck: room.threeCheck,
         isSetupChess: room.setupChess,
+        isFogOfWar: room.fogOfWar,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -576,4 +654,13 @@ export class RoomManager {
 
     await prisma.$transaction(rows.map((data) => prisma.game.create({ data })));
   }
+}
+
+/** Fog of War only — `room.moves` redacted for a rejoining player's own point of view (see
+ * redactMoveHistory). Each entry's fields are all omitted together for a move this viewer never
+ * witnessed; always fully populated for one they did. */
+function redactedMovesFor(room: Room, viewer: PieceColor): RejoinStatePayload['moves'] {
+  return redactMoveHistory(room.initialFen, room.moves, viewer).map((entry) =>
+    entry.revealed ? { from: entry.from, to: entry.to, san: entry.san } : {}
+  );
 }

@@ -611,6 +611,125 @@ async function testSetupChessInvalidMergeAsksBothToRedo() {
   yuri.disconnect();
 }
 
+async function testFogOfWarMatchmaking() {
+  console.log('\n=== 12. Fog of War matchmaking (isolated queue) ===');
+  const zane = await connect('Zane');
+  const amy = await connect('Amy');
+  const classicalControl = { initialSeconds: 180, incrementSeconds: 0 };
+
+  // Same partitioning as every other variant flag (see testKingOfTheHillMatchmaking) —
+  // isFogOfWar must keep this queue separate from a plain-classical wait.
+  let zaneMatched = false;
+  zane.once('match_found', () => {
+    zaneMatched = true;
+  });
+  await emitAck(zane, 'join_queue', { timeControl: classicalControl, isChess960: false, isFogOfWar: false });
+
+  const amyMatchPromise = waitFor(amy, 'match_found');
+  const amyAck = await emitAck(amy, 'join_queue', { timeControl: classicalControl, isChess960: false, isFogOfWar: true });
+  check(amyAck.ok === true, 'Amy (Fog of War) join_queue ack is ok');
+
+  await new Promise((r) => setTimeout(r, 500));
+  check(zaneMatched === false, 'a plain-classical player is not matched against a Fog of War player');
+
+  const bran = await connect('Bran');
+  const zaneGivesUp = emitAck(zane, 'leave_queue', {});
+  const branMatchPromise = waitFor(bran, 'match_found');
+  await emitAck(bran, 'join_queue', { timeControl: classicalControl, isChess960: false, isFogOfWar: true });
+
+  const [amyMatch, branMatch] = await Promise.all([amyMatchPromise, branMatchPromise]);
+  await zaneGivesUp;
+
+  check(amyMatch.roomId === branMatch.roomId, 'the two Fog of War players were matched together');
+  check(amyMatch.isFogOfWar === true, 'match_found correctly reports isFogOfWar: true');
+
+  zane.disconnect();
+  amy.disconnect();
+  bran.disconnect();
+}
+
+async function testFogOfWarRedactionAndWin() {
+  console.log('\n=== 13. Fog of War: redacted starting position, hidden moves, king-safety bypass, king-capture win ===');
+  const cleo = await connect('Cleo');
+  const dirk = await connect('Dirk');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchC, matchD] = await Promise.all([
+    (async () => {
+      await emitAck(cleo, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
+      return waitFor(cleo, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(dirk, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
+      return waitFor(dirk, 'match_found');
+    })(),
+  ]);
+  check(matchC.isFogOfWar === true, 'match_found reports isFogOfWar: true for both players');
+
+  const white = matchC.color === 'w' ? { socket: cleo, name: 'Cleo' } : { socket: dirk, name: 'Dirk' };
+  const black = matchC.color === 'b' ? { socket: cleo, name: 'Cleo' } : { socket: dirk, name: 'Dirk' };
+  const whiteMatch = matchC.color === 'w' ? matchC : matchD;
+  const blackMatch = matchC.color === 'b' ? matchC : matchD;
+  const roomId = matchC.roomId;
+  console.log(`  White = ${white.name}, Black = ${black.name}`);
+
+  // Even the classical starting position isn't fully visible to either side under Fog of War's
+  // visibility rule — neither side's pieces can reach anywhere on the opponent's two ranks yet
+  // (verified by hand against a plain chess.js + the same pseudo-legal-reach logic as
+  // fogOfWar.ts, see this session's own exploration before writing this test).
+  check(whiteMatch.fen === '8/8/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', "White's own starting view shows only White's own two ranks");
+  check(blackMatch.fen === 'rnbqkbnr/pppppppp/8/8/8/8/8/8 w KQkq - 0 1', "Black's own starting view shows only Black's own two ranks");
+  check(Array.isArray(whiteMatch.visibleSquares) && whiteMatch.visibleSquares.length > 0, 'match_found carries visibleSquares');
+
+  // A verified-legal (as pseudo-legal, see this session's own chess.js exploration) sequence:
+  // White pins their own knight (Nc3) to their own king with Black's bishop (Bb4) once the
+  // d-pawn clears d2 — then moves the pinned knight away anyway (Nc3-d5), which ordinary chess
+  // would reject outright (it leaves White's own king in check) but Fog of War must accept
+  // (rule: no king-safety restriction at all). Black then captures the exposed king directly
+  // (Bxe1) — Fog of War's only win condition.
+  const plies = [
+    { mover: white, from: 'e2', to: 'e4', expectedSan: 'e4', revealedToOpponent: false },
+    { mover: black, from: 'e7', to: 'e5', expectedSan: 'e5', revealedToOpponent: true },
+    { mover: white, from: 'b1', to: 'c3', expectedSan: 'Nc3', revealedToOpponent: false },
+    { mover: black, from: 'f8', to: 'b4', expectedSan: 'Bb4', revealedToOpponent: true },
+    { mover: white, from: 'd2', to: 'd4', expectedSan: 'd4', revealedToOpponent: true },
+    { mover: black, from: 'd7', to: 'd6', expectedSan: 'd6', revealedToOpponent: false },
+    // White's own king is in genuine check-safety danger here (Bb4 pins Nc3 to Ke1 with d2 now
+    // empty) — moving the knight away is illegal in ordinary chess, accepted here.
+    { mover: white, from: 'c3', to: 'd5', expectedSan: 'Nd5', revealedToOpponent: true },
+  ];
+
+  for (const ply of plies) {
+    const opponent = ply.mover === white ? black : white;
+    const opponentSeesMove = waitFor(opponent.socket, 'opponent_move');
+    const ack = await emitAck(ply.mover.socket, 'make_move', { roomId, from: ply.from, to: ply.to });
+    check(ack.ok === true, `${ply.mover.name}'s move ${ply.from}-${ply.to} (${ply.expectedSan}) accepted`);
+    const seen = await opponentSeesMove;
+    if (ply.revealedToOpponent) {
+      check(seen.san === ply.expectedSan, `${opponent.name} is shown ${ply.expectedSan} (it was within their own visibility)`);
+    } else {
+      check(seen.san === undefined && seen.from === undefined, `${opponent.name} is NOT shown ${ply.expectedSan} (outside their own visibility)`);
+      check(typeof seen.fen === 'string' && Array.isArray(seen.visibleSquares), `${opponent.name} still gets an updated (redacted) fen + visibleSquares`);
+    }
+  }
+
+  // Black's bishop on b4 now has a clear diagonal straight to White's exposed king on e1 — the
+  // direct king capture that ends a Fog of War game, instead of any checkmate/stalemate concept.
+  const whiteGameOver = waitFor(white.socket, 'game_over');
+  const blackGameOver = waitFor(black.socket, 'game_over');
+  const captureAck = await emitAck(black.socket, 'make_move', { roomId, from: 'b4', to: 'e1' });
+  check(captureAck.ok === true, "Black's king-capturing Bxe1 is accepted as an ordinary move");
+
+  const [whiteResult, blackResult] = await Promise.all([whiteGameOver, blackGameOver]);
+  check(whiteResult.reason === 'fogOfWar', 'game_over reason is "fogOfWar"');
+  check(whiteResult.winner === 'b', 'Black (who captured the king) is declared the winner');
+  check(blackResult.reason === 'fogOfWar' && blackResult.winner === 'b', 'both players received the same game_over outcome');
+
+  cleo.disconnect();
+  dirk.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -624,6 +743,8 @@ async function main() {
   await testThreeCheckWin();
   await testSetupChessBlindPairing();
   await testSetupChessInvalidMergeAsksBothToRedo();
+  await testFogOfWarMatchmaking();
+  await testFogOfWarRedactionAndWin();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

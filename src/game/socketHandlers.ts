@@ -61,6 +61,7 @@ interface PairableEntry {
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
   isSetupChess: boolean;
+  isFogOfWar: boolean;
 }
 
 function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
@@ -101,6 +102,7 @@ export function registerSocketHandlers(io: Server): void {
       kingOfTheHill: a.isKingOfTheHill,
       threeCheck: a.isThreeCheck,
       setupChess: false, // Setup Chess never reaches this path — see the isSetupChess branches below
+      fogOfWar: a.isFogOfWar,
     });
 
     const basePayload = {
@@ -110,18 +112,25 @@ export function registerSocketHandlers(io: Server): void {
       isKingOfTheHill: a.isKingOfTheHill,
       isThreeCheck: a.isThreeCheck,
       isSetupChess: false,
-      fen: created.fen,
+      isFogOfWar: a.isFogOfWar,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
     };
+    // Fog of War: each color gets its OWN redacted view of the starting position (see
+    // RoomManager.createRoom's whiteView/blackView) instead of the one shared `created.fen` —
+    // even the classical start isn't fully visible to either side under this variant's rule.
     const whitePayload: MatchFoundPayload = {
       ...basePayload,
+      fen: created.whiteView?.fen ?? created.fen,
+      visibleSquares: created.whiteView?.visibleSquares,
       color: 'w',
       playerToken: created.whitePlayerToken,
       opponent: { userId: blackEntry.userId },
     };
     const blackPayload: MatchFoundPayload = {
       ...basePayload,
+      fen: created.blackView?.fen ?? created.fen,
+      visibleSquares: created.blackView?.visibleSquares,
       color: 'b',
       playerToken: created.blackPlayerToken,
       opponent: { userId: whiteEntry.userId },
@@ -151,6 +160,7 @@ export function registerSocketHandlers(io: Server): void {
         isKingOfTheHill: Boolean(payload.isKingOfTheHill),
         isThreeCheck: Boolean(payload.isThreeCheck),
         isSetupChess: Boolean(payload.isSetupChess),
+        isFogOfWar: Boolean(payload.isFogOfWar),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -186,6 +196,7 @@ export function registerSocketHandlers(io: Server): void {
         isKingOfTheHill: Boolean(payload.isKingOfTheHill),
         isThreeCheck: Boolean(payload.isThreeCheck),
         isSetupChess: Boolean(payload.isSetupChess),
+        isFogOfWar: Boolean(payload.isFogOfWar),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -223,6 +234,7 @@ export function registerSocketHandlers(io: Server): void {
         isKingOfTheHill: challenge.isKingOfTheHill,
         isThreeCheck: challenge.isThreeCheck,
         isSetupChess: challenge.isSetupChess,
+        isFogOfWar: challenge.isFogOfWar,
       };
       const joinerEntry = {
         socketId: socket.id,
@@ -233,6 +245,7 @@ export function registerSocketHandlers(io: Server): void {
         isKingOfTheHill: challenge.isKingOfTheHill,
         isThreeCheck: challenge.isThreeCheck,
         isSetupChess: challenge.isSetupChess,
+        isFogOfWar: challenge.isFogOfWar,
       };
       // Same "no room until both blind armies are in" branch as join_queue above.
       if (challenge.isSetupChess) {

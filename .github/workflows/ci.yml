@@ -116,6 +116,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:atomic
 
+      - name: Run Duck Chess regression suite (server rules authority, no-drift check, parity with the mobile app)
+        working-directory: chess-app/backend
+        run: npm run test:duck
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

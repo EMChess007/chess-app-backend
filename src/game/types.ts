@@ -18,7 +18,8 @@ export type GameOverReason =
   | 'threeCheck'
   | 'fogOfWar'
   | 'giveaway'
-  | 'atomic';
+  | 'atomic'
+  | 'duckChess';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -33,6 +34,8 @@ export interface JoinQueuePayload {
   isGiveaway?: boolean;
   /** Atomic chess — see atomic.ts. Mutually exclusive with every other variant. */
   isAtomic?: boolean;
+  /** Duck Chess — see duckChess.ts. Mutually exclusive with every other variant. */
+  isDuckChess?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -48,6 +51,9 @@ export interface MakeMovePayload {
   to: string;
   /** 'k' is only ever legal in Giveaway (a pawn may promote to a king there). */
   promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  /** Duck Chess only — where the duck goes as the second half of the turn. Required with every move that does not
+   * capture a king; the whole turn is refused if it is missing or not a legal placement. */
+  duckTo?: string;
 }
 
 export interface RejoinGamePayload {
@@ -88,6 +94,7 @@ export interface MatchFoundPayload {
   isFogOfWar: boolean;
   isGiveaway: boolean;
   isAtomic: boolean;
+  isDuckChess: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -106,6 +113,9 @@ export interface OpponentMovePayload {
   to?: string;
   promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
   san?: string;
+  /** Duck Chess only — the square the duck was just placed on (absent after a king capture) and where it stands now. */
+  duck?: string;
+  duckSquare?: string | null;
   fen: string;
   turn: PieceColor;
   whiteMs: number;
@@ -141,11 +151,14 @@ export interface RejoinStatePayload {
   isFogOfWar: boolean;
   isGiveaway: boolean;
   isAtomic: boolean;
+  isDuckChess: boolean;
+  /** Duck Chess only — where the duck stands now. */
+  duckSquare?: string | null;
   whiteMs: number;
   blackMs: number;
   /** Each entry's fields are all omitted together for a Fog of War move this viewer never
    * witnessed (see redactMoveHistory) — always fully populated outside Fog of War. */
-  moves: { from?: string; to?: string; promotion?: string; san?: string }[];
+  moves: { from?: string; to?: string; promotion?: string; san?: string; duck?: string }[];
   /** Fog of War only — see MatchFoundPayload.visibleSquares; recomputed fresh for whoever's
    * rejoining/spectating. */
   visibleSquares?: string[];
@@ -180,6 +193,7 @@ export interface CreateChallengePayload {
   isFogOfWar?: boolean;
   isGiveaway?: boolean;
   isAtomic?: boolean;
+  isDuckChess?: boolean;
   timeControlLabel?: string;
 }
 

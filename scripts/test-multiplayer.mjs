@@ -870,6 +870,75 @@ async function testAtomicOnline() {
   bob.disconnect();
 }
 
+async function testDuckChessOnline() {
+  console.log('\n=== Duck Chess: matchmaking, a turn is a move + the duck, a king capture ends the game ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const duckSeeker = await connect('Dora');
+  const classicSeeker = await connect('Cyd');
+  check((await emitAck(duckSeeker, 'join_queue', { timeControl, isDuckChess: true })).ok === true, 'Dora queues for Duck Chess');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Cyd queues for a classic game');
+  let wronglyPaired = false;
+  duckSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Duck Chess seeker and a classic seeker are never paired with each other');
+  await emitAck(duckSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  duckSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused3');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isDuckChess: true, isAtomic: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Duck Chess + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isDuckChess: true, isGiveaway: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  const alice = await connect('Duckie');
+  const bob = await connect('Quack');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl, isDuckChess: true });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(bob, 'join_queue', { timeControl, isDuckChess: true });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Duck Chess seekers are paired');
+  check(matchA.isDuckChess === true && matchB.isDuckChess === true && matchA.isAtomic === false, 'match_found tells both clients isDuckChess: true');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to, duckTo) => emitAck(who.socket, 'make_move', { roomId, from, to, duckTo });
+
+  const noDuck = await turn(white, 'e2', 'e4');
+  check(noDuck.ok === false && /duck/i.test(noDuck.error), 'a move with no duck destination is refused');
+  check((await turn(white, 'e2', 'e4', 'e4')).ok === false, 'a duck on an occupied square is refused');
+  const blackSees = waitFor(black.socket, 'opponent_move');
+  const first = await turn(white, 'e2', 'e4', 'a6');
+  check(first.ok === true && first.duckSquare === 'a6', '1.e4 with the duck placed on a6 is accepted as one turn');
+  const seen = await blackSees;
+  check(seen.san === 'e4' && seen.duck === 'a6' && seen.duckSquare === 'a6', 'Black receives the move and the duck together');
+  check((await turn(black, 'a7', 'a6', 'a5')).ok === false, 'Black cannot push a7-a6: the duck is on a6');
+  check((await turn(black, 'f7', 'f5', 'a6')).ok === false, 'the duck may not stay where it is');
+  check((await turn(black, 'f7', 'f5', 'a5')).ok === true, '1...f5 (duck to a5)');
+  check((await turn(white, 'd1', 'h5', 'a4')).ok === true, '2.Qh5 (duck to a4) — the queen now looks down the h5-e8 diagonal');
+  check((await turn(black, 'h7', 'h6', 'a3')).ok === true, '2...h6 (duck to a3) — Black ignores the attack, there is no check');
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  const win = await turn(white, 'h5', 'e8');
+  check(win.ok === true && win.san === 'Qxe8', '3.Qxe8 captures the king and needs no duck');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'duckChess' && wr.winner === 'w' && br.reason === 'duckChess' && br.winner === 'w', 'both players get game_over {reason: duckChess, winner: white}');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -887,6 +956,7 @@ async function main() {
   await testFogOfWarRedactionAndWin();
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
+  await testDuckChessOnline();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

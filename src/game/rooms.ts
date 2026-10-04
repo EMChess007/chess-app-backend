@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma.js';
 import { generateChess960Position } from './chess960.js';
 import { buildRedactedFen, getFogOfWarWinner, getVisibleSquares, redactMoveHistory } from './fogOfWar.js';
 import { getAtomicKingWinner, isAtomicThreefoldRepetition } from './atomic.js';
+import { hasNoDuckMoves, isLegalDuckPlacement } from './duckChess.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
@@ -53,6 +54,9 @@ interface Room {
   fogOfWar: boolean;
   giveaway: boolean;
   atomic: boolean;
+  duckChess: boolean;
+  /** Duck Chess only: where the duck stands now (null before White's first move) — see duckChess.ts. */
+  duckSquare: string | null;
   /** Atomic only: the FEN of the starting position and after every move, for the history-based threefold
    * repetition draw (chess.js cannot see repetitions here — the Atomic engine is not chess.js). */
   atomicFens: string[];
@@ -98,6 +102,7 @@ export interface CreateRoomParams {
   fogOfWar: boolean;
   giveaway: boolean;
   atomic: boolean;
+  duckChess: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
    * both players' armies. Every other variant's production caller omits it and still self-generates
    * its own starting position (classical, or a random Chess960 back rank) as before; the regression
@@ -151,7 +156,7 @@ export class RoomManager {
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
     const initialFen = params.initialFen ?? (params.chess960 ? generateChess960Position() : START_FEN);
-    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen, giveaway: params.giveaway, atomic: params.atomic });
+    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen, giveaway: params.giveaway, atomic: params.atomic, duckChess: params.duckChess });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
     const blackPlayerToken = randomUUID();
@@ -167,6 +172,8 @@ export class RoomManager {
       fogOfWar: params.fogOfWar,
       giveaway: params.giveaway,
       atomic: params.atomic,
+      duckChess: params.duckChess,
+      duckSquare: null,
       atomicFens: [initialFen],
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
@@ -206,7 +213,7 @@ export class RoomManager {
   applyMove(
     socketId: string,
     payload: MakeMovePayload
-  ): Ack<{ fen: string; san: string; turn: PieceColor; whiteMs: number; blackMs: number; visibleSquares?: string[] }> {
+  ): Ack<{ fen: string; san: string; turn: PieceColor; whiteMs: number; blackMs: number; visibleSquares?: string[]; duckSquare?: string | null }> {
     const location = this.socketToRoom.get(socketId);
     if (!location || location.roomId !== payload.roomId) {
       return { ok: false, error: 'No active game found for this connection.' };
@@ -241,12 +248,38 @@ export class RoomManager {
       return { ok: false, error: 'Invalid move.' };
     }
 
-    const result =
-      room.fogOfWar || room.giveaway
+    // Duck Chess: a TURN is a regular move AND the duck's new square, applied as one unit. The move is tried on a
+    // scratch engine first so a bad (or missing) duck destination refuses the WHOLE turn without touching the
+    // room; a move that captures a king needs no placement (the game is over).
+    let duckTurn: { engine: RoomChessEngine; result: AppliedMove; duckTo: string | null } | null = null;
+    if (room.duckChess) {
+      const scratch = new RoomChessEngine(room.engine.getFen(), { duckChess: true, duckSquare: room.duckSquare });
+      const probe = scratch.movePseudoLegal(payload.from, payload.to, payload.promotion);
+      if (!probe) return { ok: false, error: 'Invalid move.' };
+      let duckTo: string | null = null;
+      if (probe.captured !== 'k') {
+        duckTo = typeof payload.duckTo === 'string' ? payload.duckTo : null;
+        if (!duckTo || !isLegalDuckPlacement(scratch.getFen(), room.duckSquare, duckTo)) {
+          return { ok: false, error: 'Place the duck on an empty square other than the one it is on.' };
+        }
+      }
+      duckTurn = { engine: scratch, result: duckTo ? { ...probe, duck: duckTo } : probe, duckTo };
+    }
+
+    const result = duckTurn
+      ? duckTurn.result
+      : room.fogOfWar || room.giveaway
         ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
         : room.engine.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
     if (!result) {
       return { ok: false, error: 'Invalid move.' };
+    }
+    if (duckTurn) {
+      room.engine = duckTurn.engine;
+      if (duckTurn.duckTo) {
+        room.engine.setDuckSquare(duckTurn.duckTo);
+        room.duckSquare = duckTurn.duckTo;
+      }
     }
 
     const now = Date.now();
@@ -300,6 +333,7 @@ export class RoomManager {
         to: result.to,
         promotion: result.promotion,
         san: result.san,
+        ...(room.duckChess ? { duck: result.duck, duckSquare: room.duckSquare } : {}),
         fen: room.engine.getFen(),
         turn: newTurn,
         whiteMs: room.whiteMs,
@@ -331,6 +365,17 @@ export class RoomManager {
       const winner = getGiveawayWinner(room.engine);
       if (winner) {
         this.endGame(room, 'giveaway', winner);
+      } else {
+        this.scheduleTimeout(room);
+      }
+    } else if (room.duckChess) {
+      // Duck Chess: no checkmate/stalemate/draw-by-check — capturing the king is the only decisive result (the move
+      // that did so carried no duck); a side to move with no regular move at all (blockaded by the duck and its own
+      // pieces) is a draw.
+      if (result.captured === 'k') {
+        this.endGame(room, 'duckChess', mover);
+      } else if (hasNoDuckMoves(room.engine)) {
+        this.endGame(room, 'draw', null);
       } else {
         this.scheduleTimeout(room);
       }
@@ -375,7 +420,16 @@ export class RoomManager {
     }
 
     const moverFen = room.fogOfWar ? buildRedactedFen(room.engine, mover) : room.engine.getFen();
-    return { ok: true, fen: moverFen, san: result.san, turn: newTurn, whiteMs: room.whiteMs, blackMs: room.blackMs, visibleSquares: moverVisibleSquares };
+    return {
+      ok: true,
+      fen: moverFen,
+      san: result.san,
+      turn: newTurn,
+      whiteMs: room.whiteMs,
+      blackMs: room.blackMs,
+      visibleSquares: moverVisibleSquares,
+      duckSquare: room.duckChess ? room.duckSquare : undefined,
+    };
   }
 
   rejoin(socketId: string, payload: RejoinGamePayload): Ack<{ state: RejoinStatePayload }> {
@@ -420,6 +474,8 @@ export class RoomManager {
         isFogOfWar: room.fogOfWar,
         isGiveaway: room.giveaway,
         isAtomic: room.atomic,
+        isDuckChess: room.duckChess,
+        duckSquare: room.duckChess ? room.duckSquare : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.fogOfWar ? redactedMovesFor(room, color) : room.moves,
@@ -580,6 +636,8 @@ export class RoomManager {
         isFogOfWar: room.fogOfWar,
         isGiveaway: room.giveaway,
         isAtomic: room.atomic,
+        isDuckChess: room.duckChess,
+        duckSquare: room.duckChess ? room.duckSquare : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -687,7 +745,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : undefined);
+    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : undefined);
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));

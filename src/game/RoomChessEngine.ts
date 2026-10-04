@@ -13,6 +13,7 @@ import {
   type AtomicPosition,
 } from './atomic.js';
 import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './chess960.js';
+import { isCastleBlockedByDuck, isMoveBlockedByDuck } from './duckChess.js';
 
 const FILES = 'abcdefgh';
 
@@ -105,6 +106,9 @@ export interface AppliedMove {
   to: string;
   /** 'k' only ever appears in Giveaway (Antichess), where a pawn may promote to a king. */
   promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  /** Duck Chess only — the square the duck was placed on as the second half of this turn. Absent for every other
+   * mode, and for the move that captures a king (the game ends with no placement). */
+  duck?: string;
   san: string;
   /** The type of piece captured by this move, if any — only ever populated by movePseudoLegal
    * (Fog of War), which needs it to detect a king capture; the normal move() path has never
@@ -140,6 +144,16 @@ export interface RoomChessEngineOptions {
    * the loser, so this implies skipValidation. Every other mode leaves this off.
    */
   atomic?: boolean;
+  /**
+   * Duck Chess only — the server-side twin of the mobile app's identical ChessEngine option (see
+   * src/logic/duckChess.ts there, mirrored in ./duckChess.ts). Moves come from the pseudo-legal generator (no
+   * check concept) with the duck in the way: generateRaw drops every candidate that lands on the duck, slides or
+   * double-steps over it, or castles across it, and adds back the castles chess.js withholds for attack reasons
+   * (there is no check). `duckSquare` is where the duck stands now; the room keeps it up to date with
+   * setDuckSquare. SAN carries no '+'/'#'. Implies skipValidation (positions may lack a king).
+   */
+  duckChess?: boolean;
+  duckSquare?: string | null;
 }
 
 /**
@@ -153,6 +167,8 @@ export class RoomChessEngine {
   private files: { kingFile: number; queenRookFile: number; kingRookFile: number };
   private giveaway: boolean;
   private atomic: boolean;
+  private duckChess: boolean;
+  private duckSquare: string | null;
   /** Atomic only: the position's FEN as produced by atomic.ts (the source of truth in that mode). */
   private atomicCurrentFen: string;
   private atomicPosCache: AtomicPosition | null = null;
@@ -161,7 +177,9 @@ export class RoomChessEngine {
   constructor(fen?: string, options?: RoomChessEngineOptions) {
     this.giveaway = options?.giveaway ?? false;
     this.atomic = options?.atomic ?? false;
-    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic })) : new Chess();
+    this.duckChess = options?.duckChess ?? false;
+    this.duckSquare = options?.duckChess ? (options.duckSquare ?? null) : null;
+    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic || this.duckChess })) : new Chess();
     this.atomicCurrentFen = fen ?? START_FEN;
     this.chess960 = options?.chess960 ?? false;
     this.files = getChess960BackRankFiles(options?.initialFen ?? fen ?? START_FEN);
@@ -249,6 +267,18 @@ export class RoomChessEngine {
     return null;
   }
 
+  // --- Duck Chess (see duckChess.ts) --------------------------------------
+
+  /** Where the duck stands now (null before White's first move, and always null outside Duck Chess). */
+  getDuckSquare(): string | null {
+    return this.duckSquare;
+  }
+
+  /** Moves the duck — called by the room once a turn's second half (the placement) has been validated. */
+  setDuckSquare(square: string | null): void {
+    this.duckSquare = this.duckChess ? square : null;
+  }
+
   // --- Atomic (see atomic.ts) --------------------------------------------
 
   /** The current position in atomic.ts's representation (parsed once per position and cached). Only
@@ -311,6 +341,8 @@ export class RoomChessEngine {
     const pretty = new ChessJsMove(this.chess, raw);
     internals._makeMove(raw);
     const applied = toAppliedMove(pretty);
+    // Duck Chess has no check either, so no '+'/'#' (and its games end at a king capture, so no rebuild is needed).
+    if (this.duckChess) return { ...applied, san: applied.san.replace(/[+#]$/, '') };
     if (!this.giveaway) return applied;
     // Giveaway only: unlike Fog of War (where a king capture ends the game on the spot), a Giveaway game
     // CARRIES ON after a king is captured, and chess.js's live internal state does not cope — its
@@ -330,6 +362,38 @@ export class RoomChessEngine {
    * dropped; each queen promotion also offered as a king promotion). */
   private generateRaw(source: Chess): InternalMove[] {
     const raw = (source as unknown as ChessInternals)._moves({ legal: false });
+    if (this.duckChess) {
+      const duck = this.duckSquare;
+      const kept = duck
+        ? raw.filter((m) =>
+            m.flags & CASTLE_FLAGS
+              ? !isCastleBlockedByDuck(squareFromIndex(m.from), squareFromIndex(m.to), duck)
+              : !isMoveBlockedByDuck(m.piece, squareFromIndex(m.from), squareFromIndex(m.to), duck)
+          )
+        : raw.slice();
+
+      // There is no check in Duck Chess, so castling has no attack-based restrictions either (out of, through
+      // or into "check"). chess.js's generator withholds O-O/O-O-O when the king's squares are attacked, so add
+      // back every castle whose right remains and whose squares are merely empty (and not blocked by the duck).
+      const color = source.turn();
+      const rank = color === 'w' ? '1' : '8';
+      const king = source.get(`e${rank}` as ChessJsSquare);
+      if (king && king.type === 'k' && king.color === color) {
+        const rights = source.getCastlingRights(color);
+        for (const side of ['k', 'q'] as const) {
+          if (!rights[side]) continue;
+          const rook = source.get((side === 'k' ? `h${rank}` : `a${rank}`) as ChessJsSquare);
+          if (!rook || rook.type !== 'r' || rook.color !== color) continue;
+          const between = side === 'k' ? ['f', 'g'] : ['b', 'c', 'd'];
+          if (between.some((file) => source.get(`${file}${rank}` as ChessJsSquare))) continue;
+          const to = side === 'k' ? `g${rank}` : `c${rank}`;
+          if (kept.some((m) => m.flags & CASTLE_FLAGS && m.to === indexFromSquare(to))) continue; // chess.js already offered it
+          if (duck && isCastleBlockedByDuck(`e${rank}`, to, duck)) continue;
+          kept.push({ color, from: indexFromSquare(`e${rank}`), to: indexFromSquare(to), piece: 'k', flags: side === 'k' ? 32 : 64 });
+        }
+      }
+      return kept;
+    }
     if (!this.giveaway) return raw;
     const out: InternalMove[] = [];
     for (const m of raw) {

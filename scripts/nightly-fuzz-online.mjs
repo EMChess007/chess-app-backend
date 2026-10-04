@@ -9,6 +9,12 @@
  *
  * Variants covered (each section reports separately):
  *  - Fog of War: pseudo-legal moves from each side's own redacted fen.
+ *  - Duck Chess: a turn is a move AND the duck's new square. Every turn comes from the mobile app's own duck-aware
+ *    move generation and legal duck squares and MUST be accepted; a fraction of turns first submit something the
+ *    server MUST refuse — a move the duck blocks (landing on it / passing over it), or a legal move with a bad duck
+ *    (missing, occupied, or the square it already stands on) — and the refused turn must leave the room untouched
+ *    (the real turn is then accepted). Every ack / opponent_move must carry the duck square the mobile app expects,
+ *    and a king capture must end the game with reason duckChess.
  *  - Atomic: same idea — every move comes from the mobile app's own atomic.ts and MUST be accepted; a fraction
  *    of turns first submit a pseudo-legal move that Atomic forbids (a king capture, a blast that would reach
  *    the mover's own king, ...) which the server MUST refuse; every game_over (king exploded, checkmate,
@@ -20,8 +26,8 @@
  *
  * Usage:
  *   npm run dev                                (in one terminal, from backend/)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames]
- * (giveawayGames and atomicGames default to the same count as fogGames.) BACKEND_URL env var overrides the
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames]
+ * (the others default to the same count as fogGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
 import { writeFileSync } from 'node:fs';
@@ -29,12 +35,14 @@ import { io } from 'socket.io-client';
 import { ChessEngine } from '../../src/logic/ChessEngine.ts';
 import { getGiveawayMoves, getGiveawayWinner } from '../../src/logic/giveaway.ts';
 import { getAtomicMoves, getAtomicWinner, isAtomicThreefoldRepetition } from '../../src/logic/atomic.ts';
+import { getLegalDuckPlacementSquares, hasNoDuckMoves } from '../../src/logic/duckChess.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const GAMES = Number(process.argv[2] ?? 100);
 const MAX_PLIES = Number(process.argv[3] ?? 60);
 const GIVEAWAY_GAMES = Number(process.argv[4] ?? GAMES);
 const ATOMIC_GAMES = Number(process.argv[5] ?? GAMES);
+const DUCK_GAMES = Number(process.argv[6] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -360,8 +368,128 @@ async function playAtomicGame(gameIndex) {
   return { stats, issues };
 }
 
+/** One real Duck Chess game through the server — see the file header for what is checked. */
+async function playDuckGame(gameIndex) {
+  const alice = await connect(`DAlice${gameIndex}`);
+  const bob = await connect(`DBob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl, isDuckChess: true });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      await emitAck(bob, 'join_queue', { timeControl, isDuckChess: true });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: false, kingCaptures: 0 };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  let duck = null;
+  if (matchA.isDuckChess !== true) issues.push({ kind: 'match-found-missing-isDuckChess', game: gameIndex });
+
+  const newEngine = (f, d) => new ChessEngine(f, { skipValidation: true, duckChess: true, duckSquare: d });
+  const key = (m) => `${m.from}${m.to}${m.promotion ?? ''}`;
+
+  for (; stats.plies < MAX_PLIES * 2; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = newEngine(fen, duck);
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const legal = engine.getPseudoLegalMoves(turn);
+    if (legal.length === 0) break;
+
+    // Server authority, part 1: a move the duck blocks (plain chess says it is fine) must bounce.
+    if (duck && Math.random() < 0.25) {
+      const legalKeys = new Set(legal.map(key));
+      const blocked = new ChessEngine(fen, { skipValidation: true }).getPseudoLegalMoves(turn).filter((m) => !legalKeys.has(key(m)));
+      if (blocked.length > 0) {
+        const bad = blocked[randInt(blocked.length)];
+        stats.illegalProbes++;
+        const refusal = await emitAck(mover, 'make_move', { roomId, from: bad.from, to: bad.to, promotion: bad.promotion, duckTo: 'a1' });
+        if (refusal.ok) {
+          issues.push({ kind: 'server-ACCEPTED-duck-blocked-move', game: gameIndex, ply: stats.plies, fen, duck, move: bad });
+          break;
+        }
+      }
+    }
+
+    const pick = legal[randInt(legal.length)];
+    const after = newEngine(fen, duck);
+    const applied = after.movePseudoLegal(pick.from, pick.to, pick.promotion);
+    const kingCapture = applied?.captured === 'k';
+    const squares = kingCapture ? [] : getLegalDuckPlacementSquares(after, duck);
+
+    // Server authority, part 2: a legal move with a bad duck refuses the WHOLE turn and leaves the room untouched.
+    if (!kingCapture && Math.random() < 0.25) {
+      const occupiedSquare = ['a1', 'e1', 'e8', 'h8', 'd1', 'd8'].find((sq) => !squares.includes(sq) && sq !== duck && after.getPieceAt(sq));
+      const badDucks = [undefined, ...(occupiedSquare ? [occupiedSquare] : []), ...(duck ? [duck] : [])];
+      const badDuck = badDucks[randInt(badDucks.length)];
+      stats.illegalProbes++;
+      const refusal = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion, duckTo: badDuck });
+      if (refusal.ok) {
+        issues.push({ kind: 'server-ACCEPTED-bad-duck-destination', game: gameIndex, ply: stats.plies, fen, duck, move: pick, duckTo: badDuck });
+        break;
+      }
+    }
+
+    const duckTo = kingCapture ? undefined : squares[randInt(squares.length)];
+    const opponentColor = turn === 'w' ? 'b' : 'w';
+    const opponentMove = waitFor(players[opponentColor], 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion, duckTo });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-duck-turn', game: gameIndex, ply: stats.plies, fen, duck, pick, duckTo, error: ack.error });
+      break;
+    }
+    fen = ack.fen;
+    if (!kingCapture) duck = duckTo;
+    if (!kingCapture && ack.duckSquare !== duck) {
+      issues.push({ kind: 'ack-duck-differs', game: gameIndex, ply: stats.plies, expected: duck, got: ack.duckSquare });
+      break;
+    }
+    const pushed = await opponentMove;
+    if (pushed && (pushed.fen !== ack.fen || (!kingCapture && pushed.duckSquare !== duck))) {
+      issues.push({ kind: 'opponent-state-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: { fen: ack.fen, duck: ack.duckSquare }, pushed: { fen: pushed.fen, duck: pushed.duckSquare } });
+      break;
+    }
+
+    let expected = null;
+    if (kingCapture) expected = { reason: 'duckChess', winner: turn };
+    else if (hasNoDuckMoves(newEngine(fen, duck))) expected = { reason: 'draw', winner: null };
+    if (expected) {
+      stats.finished = true;
+      if (kingCapture) stats.kingCaptures++;
+      await new Promise((r) => setTimeout(r, 150));
+      if (!gameOverPayload || gameOverPayload.reason !== expected.reason || gameOverPayload.winner !== expected.winner) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile', game: gameIndex, ply: stats.plies, fen, expected, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
 async function main() {
-  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} real Giveaway games + ${ATOMIC_GAMES} real Atomic games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
+  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
@@ -413,6 +541,24 @@ async function main() {
   }
   allIssues.push(...atomic.issues.map((i) => ({ ...i, variant: 'atomic' })));
 
+  // --- Duck Chess ---
+  const duckStats = { games: 0, plies: 0, probes: 0, finished: 0, kingCaptures: 0, issues: [] };
+  for (let g = 0; g < DUCK_GAMES; g++) {
+    try {
+      const { stats, issues } = await playDuckGame(g);
+      duckStats.games++;
+      duckStats.plies += stats.plies;
+      duckStats.probes += stats.illegalProbes;
+      if (stats.finished) duckStats.finished++;
+      duckStats.kingCaptures += stats.kingCaptures;
+      duckStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${DUCK_GAMES} Duck Chess games played`);
+    } catch (err) {
+      duckStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...duckStats.issues.map((i) => ({ ...i, variant: 'duckChess' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
@@ -420,10 +566,11 @@ async function main() {
   console.log(`Expected blind-push-into-fog rejections (not a bug — see script's own doc comment): ${expected.length}`);
   console.log(`Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused, ${giveaway.finished} games ended by the stuck-wins rule.`);
   console.log(`Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king).`);
+  console.log(`Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture).`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -433,6 +580,7 @@ async function main() {
     `- Expected blind-push-into-fog rejections: ${expected.length} (normal Fog of War Online behavior, not a failure)`,
     `- Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused by the server, ${giveaway.finished} games ended by the stuck-wins rule`,
     `- Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused by the server, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king)`,
+    `- Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused by the server, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture)`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];

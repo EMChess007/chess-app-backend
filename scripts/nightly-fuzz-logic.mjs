@@ -28,6 +28,8 @@ import { getAtomicMoves as clientAtomicMoves, getAtomicWinner as clientAtomicWin
 import { RoomChessEngine, START_FEN } from '../src/game/RoomChessEngine.ts';
 import { getGiveawayMoves as serverGiveawayMoves, getGiveawayWinner as serverGiveawayWinner } from '../src/game/giveaway.ts';
 import { generateAtomicMoves, getAtomicKingWinner, squareName } from '../src/game/atomic.ts';
+import { getLegalDuckPlacementSquares as clientDuckSquares, hasNoDuckMoves as clientDuckBlockade } from '../../src/logic/duckChess.ts';
+import { emptySquares, hasNoDuckMoves as serverDuckBlockade } from '../src/game/duckChess.ts';
 
 const GAMES = Number(process.argv[2] ?? 3000);
 const MAX_PLIES = Number(process.argv[3] ?? 80);
@@ -185,16 +187,77 @@ function fuzzAtomicParity() {
   return { label: 'Atomic parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
 }
 
-console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway and Atomic parity.\n`);
+/**
+ * Duck Chess PARITY: random games (a regular move, then a random legal duck square, as one turn) replayed through
+ * BOTH implementations — the legal move set, the legal duck squares, the blockade verdict, the applied move's
+ * SAN/capture and the resulting FEN must agree at every ply. The server keeps ONE live engine and moves its duck
+ * with setDuckSquare; the mobile app builds a fresh engine from { fen, duckSquare } every ply, as in production.
+ */
+function fuzzDuckParity() {
+  const uci = (moves) => moves.map((m) => `${m.from}${m.to}${m.promotion ?? ''}`).sort().join();
+  const mismatches = [];
+  let totalPlies = 0;
+  let totalChecked = 0;
+  let totalGames = 0;
+  for (let g = 0; g < GAMES; g++) {
+    totalGames++;
+    const server = new RoomChessEngine(START_FEN, { duckChess: true, duckSquare: null });
+    let duck = null;
+    let clientFen = START_FEN;
+    for (let ply = 0; ply < MAX_PLIES * 3; ply++) {
+      const client = new ChessEngine(clientFen, { skipValidation: true, duckChess: true, duckSquare: duck });
+      const serverMoves = server.getPseudoLegalMoves(server.getTurn());
+      totalChecked++;
+      if (uci(serverMoves) !== uci(client.getPseudoLegalMoves(client.getTurn()))) {
+        mismatches.push({ kind: 'duck-legal-moves-differ', game: g, ply, duck, fen: server.getFen() });
+        break;
+      }
+      if (serverDuckBlockade(server) !== clientDuckBlockade(client)) {
+        mismatches.push({ kind: 'duck-blockade-differs', game: g, ply, duck, fen: server.getFen() });
+        break;
+      }
+      if (serverMoves.length === 0) break;
+      const pick = serverMoves[randInt(serverMoves.length)];
+      let a;
+      let b;
+      try {
+        a = server.movePseudoLegal(pick.from, pick.to, pick.promotion);
+        b = client.movePseudoLegal(pick.from, pick.to, pick.promotion);
+      } catch (err) {
+        mismatches.push({ kind: 'duck-apply-threw', game: g, ply, fen: clientFen, pick, error: String(err) });
+        break;
+      }
+      if (!a || !b || a.san !== b.san || a.captured !== b.captured || server.getFen() !== client.getFen()) {
+        mismatches.push({ kind: 'duck-applied-move-differs', game: g, ply, fen: clientFen, pick, server: a, client: b });
+        break;
+      }
+      totalPlies++;
+      if (a.captured === 'k') break;
+      const serverSquares = emptySquares(server.getFen()).filter((sq) => sq !== duck).sort();
+      const clientSquares = [...clientDuckSquares(client, duck)].sort();
+      if (serverSquares.join() !== clientSquares.join()) {
+        mismatches.push({ kind: 'duck-placement-squares-differ', game: g, ply, duck, fen: server.getFen() });
+        break;
+      }
+      duck = serverSquares[randInt(serverSquares.length)];
+      server.setDuckSquare(duck);
+      clientFen = client.getFen();
+    }
+  }
+  return { label: 'Duck Chess parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
+}
+
+console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway, Atomic and Duck Chess parity.\n`);
 
 const results = [
   fuzzEngine('Mobile app (src/logic/ChessEngine.ts)', ChessEngine),
   fuzzEngine('Server (backend/src/game/RoomChessEngine.ts)', RoomChessEngine),
   fuzzGiveawayParity(),
   fuzzAtomicParity(),
+  fuzzDuckParity(),
 ];
 
-let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
+let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic + Duck Chess parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
 let anyFailure = false;
 
 for (const r of results) {

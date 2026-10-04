@@ -296,6 +296,7 @@ export class TournamentManager {
         fogOfWar: false, // Tournaments don't support Fog of War either — same exclusion
         giveaway: false, // ...nor Giveaway (1v1 Online only)
         atomic: false, // ...nor Atomic
+        duckChess: false, // ...nor Duck Chess
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;

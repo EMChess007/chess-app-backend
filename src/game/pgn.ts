@@ -32,7 +32,9 @@ export function buildPgn(initialFen: string, moves: AppliedMove[], result: strin
   const movetext = formatSanMoves(
     startTurn,
     startMoveNumber,
-    moves.map((m) => m.san)
+    // Duck Chess: where the duck went rides along as a standard PGN comment, "e4 {@g6}" — mirrors the mobile
+    // app's buildPgn.
+    moves.map((m) => (m.duck ? `${m.san} {@${m.duck}}` : m.san))
   );
 
   const tags = [`[Result "${result}"]`];

@@ -17,7 +17,8 @@ export type GameOverReason =
   | 'kingOfTheHill'
   | 'threeCheck'
   | 'fogOfWar'
-  | 'giveaway';
+  | 'giveaway'
+  | 'atomic';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -30,6 +31,8 @@ export interface JoinQueuePayload {
   isFogOfWar?: boolean;
   /** Giveaway (Antichess) — see giveaway.ts. Mutually exclusive with every other variant. */
   isGiveaway?: boolean;
+  /** Atomic chess — see atomic.ts. Mutually exclusive with every other variant. */
+  isAtomic?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -84,6 +87,7 @@ export interface MatchFoundPayload {
   isSetupChess: boolean;
   isFogOfWar: boolean;
   isGiveaway: boolean;
+  isAtomic: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -136,6 +140,7 @@ export interface RejoinStatePayload {
   isSetupChess: boolean;
   isFogOfWar: boolean;
   isGiveaway: boolean;
+  isAtomic: boolean;
   whiteMs: number;
   blackMs: number;
   /** Each entry's fields are all omitted together for a Fog of War move this viewer never
@@ -174,6 +179,7 @@ export interface CreateChallengePayload {
   isSetupChess?: boolean;
   isFogOfWar?: boolean;
   isGiveaway?: boolean;
+  isAtomic?: boolean;
   timeControlLabel?: string;
 }
 

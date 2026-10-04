@@ -1,4 +1,17 @@
 import { Chess, Move as ChessJsMove, type Square as ChessJsSquare } from 'chess.js';
+import {
+  applyAtomicMove,
+  atomicCapturedType,
+  atomicFen,
+  atomicSan,
+  findAtomicMove,
+  generateAtomicMoves,
+  getAtomicKingWinner,
+  getAtomicStatus,
+  parseAtomicFen,
+  type AtomicMove,
+  type AtomicPosition,
+} from './atomic.js';
 import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './chess960.js';
 
 const FILES = 'abcdefgh';
@@ -119,6 +132,14 @@ export interface RoomChessEngineOptions {
    * this off, so its behaviour is untouched.
    */
   giveaway?: boolean;
+  /**
+   * Atomic chess only — the server-side twin of the mobile app's identical ChessEngine option (see
+   * src/logic/atomic.ts there, mirrored verbatim in ./atomic.ts). The engine's public move API
+   * (move/getStatus/isGameOver/getFen) is answered by atomic.ts instead of chess.js, which stays only as
+   * the board model, reloaded from the new FEN after every move. A finished game's FEN has no king for
+   * the loser, so this implies skipValidation. Every other mode leaves this off.
+   */
+  atomic?: boolean;
 }
 
 /**
@@ -131,10 +152,17 @@ export class RoomChessEngine {
   private chess960: boolean;
   private files: { kingFile: number; queenRookFile: number; kingRookFile: number };
   private giveaway: boolean;
+  private atomic: boolean;
+  /** Atomic only: the position's FEN as produced by atomic.ts (the source of truth in that mode). */
+  private atomicCurrentFen: string;
+  private atomicPosCache: AtomicPosition | null = null;
+  private atomicLegalCache: AtomicMove[] | null = null;
 
   constructor(fen?: string, options?: RoomChessEngineOptions) {
     this.giveaway = options?.giveaway ?? false;
-    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen)) : new Chess();
+    this.atomic = options?.atomic ?? false;
+    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic })) : new Chess();
+    this.atomicCurrentFen = fen ?? START_FEN;
     this.chess960 = options?.chess960 ?? false;
     this.files = getChess960BackRankFiles(options?.initialFen ?? fen ?? START_FEN);
   }
@@ -144,6 +172,7 @@ export class RoomChessEngine {
   }
 
   move(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q'): AppliedMove | null {
+    if (this.atomic) return this.moveAtomic(from, to, promotion);
     if (this.chess960) {
       const side = this.matchChess960CastleAttempt(from, to);
       if (side) {
@@ -164,6 +193,7 @@ export class RoomChessEngine {
   }
 
   getStatus(): GameStatus {
+    if (this.atomic) return getAtomicStatus(this.getAtomicPosition(), this.getAtomicLegal());
     if (this.chess.isCheckmate()) return 'checkmate';
     if (this.chess.isStalemate()) return 'stalemate';
     if (this.chess.isDraw()) return 'draw';
@@ -172,10 +202,16 @@ export class RoomChessEngine {
   }
 
   isGameOver(): boolean {
+    if (this.atomic) {
+      if (getAtomicKingWinner(this.getAtomicPosition())) return true;
+      const status = this.getStatus();
+      return status === 'checkmate' || status === 'stalemate' || status === 'draw';
+    }
     return this.chess.isGameOver();
   }
 
   getFen(): string {
+    if (this.atomic) return this.atomicCurrentFen;
     // forceEnpassantSquare: see the mobile app's identical ChessEngine.getFen() for the full
     // rationale — without this, chess.js's own .fen() can silently drop an en-passant target
     // that movePseudoLegal would otherwise still accept once Fog of War allows king exposure.
@@ -211,6 +247,39 @@ export class RoomChessEngine {
     if (counts.w >= THREE_CHECK_TARGET) return 'w';
     if (counts.b >= THREE_CHECK_TARGET) return 'b';
     return null;
+  }
+
+  // --- Atomic (see atomic.ts) --------------------------------------------
+
+  /** The current position in atomic.ts's representation (parsed once per position and cached). Only
+   * meaningful for an engine constructed with { atomic: true }. Treat as read-only. */
+  getAtomicPosition(): AtomicPosition {
+    this.atomicPosCache ??= parseAtomicFen(this.atomicCurrentFen);
+    return this.atomicPosCache;
+  }
+
+  private getAtomicLegal(): AtomicMove[] {
+    this.atomicLegalCache ??= generateAtomicMoves(this.getAtomicPosition());
+    return this.atomicLegalCache;
+  }
+
+  /** Applies a legal Atomic move: atomic.ts computes the whole resulting position (explosion, castling
+   * rights, clocks, en passant square) and chess.js is simply reloaded from the new FEN. Returns null for
+   * anything illegal — including a king capture or a move that would explode the mover's own king. */
+  private moveAtomic(from: string, to: string, promotion?: string): AppliedMove | null {
+    const pos = this.getAtomicPosition();
+    const found = findAtomicMove(pos, from, to, promotion);
+    if (!found) return null;
+
+    const legal = this.getAtomicLegal();
+    const result = applyAtomicMove(pos, found);
+    const san = atomicSan(pos, found, legal, result.position);
+    const newFen = atomicFen(result.position);
+    this.chess.load(newFen, { skipValidation: true });
+    this.atomicCurrentFen = newFen;
+    this.atomicPosCache = null;
+    this.atomicLegalCache = null;
+    return { from, to, promotion: found.promotion, san, captured: atomicCapturedType(pos, found) };
   }
 
   // --- Fog of War (see ChessInternals above) -----------------------------

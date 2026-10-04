@@ -24,8 +24,10 @@
 import { writeFileSync } from 'node:fs';
 import { ChessEngine } from '../../src/logic/ChessEngine.ts';
 import { getGiveawayMoves as clientGiveawayMoves, getGiveawayWinner as clientGiveawayWinner } from '../../src/logic/giveaway.ts';
+import { getAtomicMoves as clientAtomicMoves, getAtomicWinner as clientAtomicWinner } from '../../src/logic/atomic.ts';
 import { RoomChessEngine, START_FEN } from '../src/game/RoomChessEngine.ts';
 import { getGiveawayMoves as serverGiveawayMoves, getGiveawayWinner as serverGiveawayWinner } from '../src/game/giveaway.ts';
+import { generateAtomicMoves, getAtomicKingWinner, squareName } from '../src/game/atomic.ts';
 
 const GAMES = Number(process.argv[2] ?? 3000);
 const MAX_PLIES = Number(process.argv[3] ?? 80);
@@ -132,15 +134,67 @@ function fuzzGiveawayParity() {
   return { label: 'Giveaway parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
 }
 
-console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway parity.\n`);
+/**
+ * Atomic PARITY: random capture-biased games replayed through BOTH implementations (mobile ChessEngine +
+ * atomic.ts, server RoomChessEngine + its verbatim copy of atomic.ts) — legal moves, status, game-over,
+ * king-explosion winner, the applied move's SAN/capture and the resulting FEN must agree at every ply.
+ */
+function fuzzAtomicParity() {
+  const uci = (moves) => moves.map((m) => `${m.from}${m.to}${m.promotion ?? ''}`).sort().join();
+  const mismatches = [];
+  let totalPlies = 0;
+  let totalChecked = 0;
+  let totalGames = 0;
+  for (let g = 0; g < GAMES; g++) {
+    totalGames++;
+    const server = new RoomChessEngine(START_FEN, { atomic: true });
+    let clientFen = START_FEN;
+    for (let ply = 0; ply < MAX_PLIES * 3; ply++) {
+      const client = new ChessEngine(clientFen, { atomic: true });
+      const serverLegal = generateAtomicMoves(server.getAtomicPosition()).map((m) => ({ from: squareName(m.from), to: squareName(m.to), promotion: m.promotion, ep: m.enPassant }));
+      totalChecked++;
+      if (uci(serverLegal) !== uci(clientAtomicMoves(client))) {
+        mismatches.push({ kind: 'atomic-legal-moves-differ', game: g, ply, fen: server.getFen() });
+        break;
+      }
+      if (server.getStatus() !== client.getStatus() || server.isGameOver() !== client.isGameOver() || getAtomicKingWinner(server.getAtomicPosition()) !== clientAtomicWinner(client)) {
+        mismatches.push({ kind: 'atomic-status-differs', game: g, ply, fen: server.getFen(), server: server.getStatus(), client: client.getStatus() });
+        break;
+      }
+      if (server.isGameOver()) break;
+      const captures = serverLegal.filter((m) => client.getPieceAt(m.to) || m.ep);
+      const pool = captures.length > 0 && Math.random() < 0.6 ? captures : serverLegal;
+      const pick = pool[randInt(pool.length)];
+      let a;
+      let b;
+      try {
+        a = server.move(pick.from, pick.to, pick.promotion ?? 'q');
+        b = client.move(pick.from, pick.to, pick.promotion ?? 'q');
+      } catch (err) {
+        mismatches.push({ kind: 'atomic-apply-threw', game: g, ply, fen: clientFen, pick, error: String(err) });
+        break;
+      }
+      if (!a || !b || a.san !== b.san || a.captured !== b.captured || server.getFen() !== client.getFen()) {
+        mismatches.push({ kind: 'atomic-applied-move-differs', game: g, ply, fen: clientFen, pick, server: a, client: b });
+        break;
+      }
+      clientFen = client.getFen();
+      totalPlies++;
+    }
+  }
+  return { label: 'Atomic parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
+}
+
+console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway and Atomic parity.\n`);
 
 const results = [
   fuzzEngine('Mobile app (src/logic/ChessEngine.ts)', ChessEngine),
   fuzzEngine('Server (backend/src/game/RoomChessEngine.ts)', RoomChessEngine),
   fuzzGiveawayParity(),
+  fuzzAtomicParity(),
 ];
 
-let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
+let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
 let anyFailure = false;
 
 for (const r of results) {

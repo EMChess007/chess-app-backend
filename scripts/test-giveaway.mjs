@@ -104,6 +104,7 @@ function giveawayRoom(initialFen) {
     setupChess: false,
     fogOfWar: false,
     giveaway: true,
+    atomic: false,
     initialFen,
   });
   return { io, manager, roomId: created.roomId };
@@ -151,6 +152,7 @@ function giveawayRoom(initialFen) {
     setupChess: false,
     fogOfWar: false,
     giveaway: false,
+    atomic: false,
     initialFen: '8/4P3/8/8/8/8/8/k6K w - - 0 1',
   });
   const ack = manager.applyMove('W', { roomId: created.roomId, from: 'e7', to: 'e8', promotion: 'k' });

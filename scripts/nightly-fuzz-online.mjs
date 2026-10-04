@@ -9,6 +9,10 @@
  *
  * Variants covered (each section reports separately):
  *  - Fog of War: pseudo-legal moves from each side's own redacted fen.
+ *  - Atomic: same idea — every move comes from the mobile app's own atomic.ts and MUST be accepted; a fraction
+ *    of turns first submit a pseudo-legal move that Atomic forbids (a king capture, a blast that would reach
+ *    the mover's own king, ...) which the server MUST refuse; every game_over (king exploded, checkmate,
+ *    stalemate, insufficient material, repetition) must agree with the mobile app's own judgement.
  *  - Giveaway: every move comes from the mobile app's own getGiveawayMoves and MUST be accepted; a
  *    fraction of turns ALSO first submit a deliberately illegal move (a non-capturing move while a
  *    capture is mandatory) and the server MUST reject it — the "server is the authority" check —
@@ -16,19 +20,21 @@
  *
  * Usage:
  *   npm run dev                                (in one terminal, from backend/)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames]
- * (giveawayGames defaults to the same count as fogGames.) BACKEND_URL env var overrides the
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames]
+ * (giveawayGames and atomicGames default to the same count as fogGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
 import { writeFileSync } from 'node:fs';
 import { io } from 'socket.io-client';
 import { ChessEngine } from '../../src/logic/ChessEngine.ts';
 import { getGiveawayMoves, getGiveawayWinner } from '../../src/logic/giveaway.ts';
+import { getAtomicMoves, getAtomicWinner, isAtomicThreefoldRepetition } from '../../src/logic/atomic.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const GAMES = Number(process.argv[2] ?? 100);
 const MAX_PLIES = Number(process.argv[3] ?? 60);
 const GIVEAWAY_GAMES = Number(process.argv[4] ?? GAMES);
+const ATOMIC_GAMES = Number(process.argv[5] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -249,8 +255,113 @@ async function playGiveawayGame(gameIndex) {
   return { stats, issues };
 }
 
+/** One real Atomic game through the server — see the file header for what is checked. */
+async function playAtomicGame(gameIndex) {
+  const alice = await connect(`AAlice${gameIndex}`);
+  const bob = await connect(`ABob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl, isAtomic: true });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      await emitAck(bob, 'join_queue', { timeControl, isAtomic: true });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: false, kingExplosions: 0 };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  const fens = [fen];
+  if (matchA.isAtomic !== true) issues.push({ kind: 'match-found-missing-isAtomic', game: gameIndex });
+
+  const newEngine = (f) => new ChessEngine(f, { atomic: true });
+  const key = (m) => `${m.from}${m.to}${m.promotion ?? ''}`;
+
+  for (; stats.plies < MAX_PLIES * 2; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = newEngine(fen);
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const legal = getAtomicMoves(engine);
+    if (legal.length === 0) break;
+
+    // Server authority: a move chess.js calls pseudo-legal that Atomic forbids must bounce.
+    if (Math.random() < 0.3) {
+      const legalKeys = new Set(legal.map(key));
+      const illegal = new ChessEngine(fen, { skipValidation: true }).getPseudoLegalMoves(turn).filter((m) => !legalKeys.has(key(m)));
+      if (illegal.length > 0) {
+        const bad = illegal[randInt(illegal.length)];
+        stats.illegalProbes++;
+        const refusal = await emitAck(mover, 'make_move', { roomId, from: bad.from, to: bad.to, promotion: bad.promotion });
+        if (refusal.ok) {
+          issues.push({ kind: 'server-ACCEPTED-illegal-atomic-move', game: gameIndex, ply: stats.plies, fen, move: bad });
+          break;
+        }
+      }
+    }
+
+    // Prefer captures half the time so explosions actually happen in 80-ply games.
+    const captures = legal.filter((m) => m.captured);
+    const pool = captures.length > 0 && Math.random() < 0.5 ? captures : legal;
+    const pick = pool[randInt(pool.length)];
+    const opponentColor = turn === 'w' ? 'b' : 'w';
+    const opponentMove = waitFor(players[opponentColor], 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion ?? 'q' });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-atomic-move', game: gameIndex, ply: stats.plies, fen, pick, error: ack.error });
+      break;
+    }
+    fen = ack.fen;
+    fens.push(fen);
+    const pushed = await opponentMove;
+    if (pushed && pushed.fen !== ack.fen) {
+      issues.push({ kind: 'opponent-fen-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: ack.fen, pushed: pushed.fen });
+      break;
+    }
+
+    // The server's verdict must match the mobile app's own judgement of the new position.
+    const after = newEngine(fen);
+    const kingWinner = getAtomicWinner(after);
+    const status = after.getStatus();
+    let expected = null;
+    if (kingWinner) expected = { reason: 'atomic', winner: kingWinner };
+    else if (after.isGameOver()) expected = { reason: status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw', winner: status === 'checkmate' ? turn : null };
+    else if (isAtomicThreefoldRepetition(fens)) expected = { reason: 'draw', winner: null };
+    if (expected) {
+      stats.finished = true;
+      if (kingWinner) stats.kingExplosions++;
+      await new Promise((r) => setTimeout(r, 150));
+      if (!gameOverPayload || gameOverPayload.reason !== expected.reason || gameOverPayload.winner !== expected.winner) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile', game: gameIndex, ply: stats.plies, fen, expected, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
 async function main() {
-  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} real Giveaway games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
+  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} real Giveaway games + ${ATOMIC_GAMES} real Atomic games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
@@ -284,16 +395,35 @@ async function main() {
   }
   allIssues.push(...giveaway.issues.map((i) => ({ ...i, variant: 'giveaway' })));
 
+  // --- Atomic ---
+  const atomic = { games: 0, plies: 0, probes: 0, finished: 0, kingExplosions: 0, issues: [] };
+  for (let g = 0; g < ATOMIC_GAMES; g++) {
+    try {
+      const { stats, issues } = await playAtomicGame(g);
+      atomic.games++;
+      atomic.plies += stats.plies;
+      atomic.probes += stats.illegalProbes;
+      if (stats.finished) atomic.finished++;
+      atomic.kingExplosions += stats.kingExplosions;
+      atomic.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${ATOMIC_GAMES} Atomic games played`);
+    } catch (err) {
+      atomic.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...atomic.issues.map((i) => ({ ...i, variant: 'atomic' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
   console.log(`\nCompleted ${completedGames}/${GAMES} games, ${totalPlies} total plies.`);
   console.log(`Expected blind-push-into-fog rejections (not a bug — see script's own doc comment): ${expected.length}`);
   console.log(`Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused, ${giveaway.finished} games ended by the stuck-wins rule.`);
+  console.log(`Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king).`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -302,6 +432,7 @@ async function main() {
     `- Total plies: ${totalPlies}`,
     `- Expected blind-push-into-fog rejections: ${expected.length} (normal Fog of War Online behavior, not a failure)`,
     `- Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused by the server, ${giveaway.finished} games ended by the stuck-wins rule`,
+    `- Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused by the server, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king)`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];

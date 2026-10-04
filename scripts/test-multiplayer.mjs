@@ -805,6 +805,71 @@ async function testGiveawayMatchmakingAndMandatoryCapture() {
   bob.disconnect();
 }
 
+async function testAtomicOnline() {
+  console.log('\n=== Atomic: matchmaking, flag isolation, an exploded king ends the game ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const atomicSeeker = await connect('Ada');
+  const classicSeeker = await connect('Cal');
+  check((await emitAck(atomicSeeker, 'join_queue', { timeControl, isAtomic: true })).ok === true, 'Ada queues for Atomic');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Cal queues for a classic game');
+  let wronglyPaired = false;
+  atomicSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'an Atomic seeker and a classic seeker are never paired with each other');
+  await emitAck(atomicSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  atomicSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused2');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isAtomic: true, isGiveaway: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Atomic + Giveaway is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isAtomic: true, isFogOfWar: true })).ok === false, 'Atomic + another variant flag is rejected on create_challenge too');
+  confused.disconnect();
+
+  const alice = await connect('Atlas');
+  const bob = await connect('Atom');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl, isAtomic: true });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(bob, 'join_queue', { timeControl, isAtomic: true });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Atomic seekers are paired');
+  check(matchA.isAtomic === true && matchB.isAtomic === true && matchA.isGiveaway === false, 'match_found tells both clients isAtomic: true (and not Giveaway)');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const move = (who, from, to, promotion) => emitAck(who.socket, 'make_move', { roomId, from, to, promotion });
+
+  check((await move(white, 'e2', 'e4')).ok === true, '1.e4 accepted');
+  check((await move(black, 'e7', 'e5')).ok === true, '1...e5 accepted');
+  check((await move(white, 'f1', 'c4')).ok === true, '2.Bc4 accepted');
+  check((await move(black, 'b8', 'c6')).ok === true, '2...Nc6 accepted');
+  check((await move(white, 'e1', 'f1')).ok === true, 'a king step is an ordinary legal move');
+  check((await move(black, 'a7', 'a6')).ok === true, '...a6');
+  check((await move(white, 'f1', 'e1')).ok === true, '...Ke1 back');
+  check((await move(black, 'a6', 'a5')).ok === true, '...a5');
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  const bxf7 = await move(white, 'c4', 'f7');
+  check(bxf7.ok === true && bxf7.san === 'Bxf7#', '3.Bxf7 explodes the black king on e8 and is written Bxf7#');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'atomic' && wr.winner === 'w', 'game_over reason is atomic and White wins');
+  check(br.reason === 'atomic' && br.winner === 'w', 'both players received the same outcome');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -821,6 +886,7 @@ async function main() {
   await testFogOfWarMatchmaking();
   await testFogOfWarRedactionAndWin();
   await testGiveawayMatchmakingAndMandatoryCapture();
+  await testAtomicOnline();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

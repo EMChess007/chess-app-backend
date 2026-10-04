@@ -29,6 +29,13 @@ Triggers on every push/PR to `main`. One job:
      non-capturing move while a capture is mandatory, declaring the stuck-wins winner, refusing king
      promotion outside Giveaway), and a parity run replaying random Giveaway games through BOTH the
      mobile app's and the server's implementation (legal moves, SAN, FEN and winner must agree at every ply).
+   - `npm run test:atomic` (`scripts/test-atomic.mjs`, no server needed) — Atomic's server side: a **no-drift
+     check** that the rules block of `src/game/atomic.ts` is byte-identical to the mobile app's
+     `src/logic/atomic.ts` (hand-mirrored, no shared module), `RoomManager.applyMove` as the authority
+     (king captures and blasts reaching the mover's own king refused, king explosion = reason `atomic`, mate/
+     stalemate/insufficient material/50-move/threefold from the room's FEN history, forged king promotion
+     refused, castling next to the enemy king), and parity with the mobile app over 100 random capture-biased
+     games. (The rules themselves are verified against chessops by the mobile suite.)
 
 **This blocks merges only once branch protection is turned on in the GitHub repo settings** — that
 one step needs a human with admin access to this repo (`Settings → Branches → Branch protection
@@ -43,14 +50,16 @@ checkout/Postgres setup as CI, then:
 - `scripts/nightly-fuzz-logic.mjs` — **3,000** randomized Fog of War games, up to 80 plies each,
   checking every pseudo-legal candidate at every ply against both `ChessEngine.ts` and
   `RoomChessEngine.ts`, plus the same number of Giveaway games run through both implementations in
-  lockstep (parity of legal moves/SAN/FEN/winner). (CI's own regression tests use far smaller counts — 6-80 games — to stay
+  lockstep (parity of legal moves/SAN/FEN/winner), and the same for Atomic. (CI's own regression tests use far smaller counts — 6-80 games — to stay
   fast on every commit; this is the same methodology at a scale only a schedule can afford.)
 - `scripts/nightly-fuzz-online.mjs` — **200** real Fog of War games plus **200** real Giveaway games
-  played end-to-end through the actual running server/socket protocol (not a simulation), checking for
+  plus **200** real Atomic games played end-to-end through the actual running server/socket protocol (not a simulation), checking for
   genuine client/server desyncs (as opposed to the one *expected* class — see §5). In Giveaway every
   move comes from the mobile app's own legal-move set and must be accepted; ~30% of turns also first
   submit a deliberately illegal move (a non-capturing move while a capture is mandatory) which the
-  server must refuse, and every `game_over` must match the mobile app's own winner detection.
+  server must refuse, and every `game_over` must match the mobile app's own winner detection. Atomic is
+  fuzzed the same way (illegal probes are pseudo-legal moves Atomic forbids; `game_over` reasons `atomic`/
+  `checkmate`/`stalemate`/`draw` must match the mobile app's own judgement).
 
 **Visibility when something fails:**
 - Both scripts write a markdown report (`nightly-fuzz-report.md`, `nightly-fuzz-online-report.md`)

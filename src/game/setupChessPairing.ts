@@ -110,6 +110,7 @@ export class SetupChessPairingManager {
       setupChess: true,
       fogOfWar: false, // Fog of War isn't combinable with Setup Chess
       giveaway: false, // ...and neither is Giveaway
+      atomic: false, // ...nor Atomic
       initialFen: fen,
     });
 
@@ -122,6 +123,7 @@ export class SetupChessPairingManager {
       isSetupChess: true,
       isFogOfWar: false,
       isGiveaway: false,
+      isAtomic: false,
       fen: created.fen,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,

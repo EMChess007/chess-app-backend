@@ -63,14 +63,17 @@ interface PairableEntry {
   isSetupChess: boolean;
   isFogOfWar: boolean;
   isGiveaway: boolean;
+  isAtomic: boolean;
 }
 
-/** Giveaway cannot be combined with any other variant (see game/giveaway.ts) — a client that sends
- * Giveaway together with another flag is misbehaving, so reject it instead of silently picking one. */
-function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown }): string | null {
-  if (!flags.isGiveaway) return null;
-  const others = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar];
-  return others.some(Boolean) ? 'Giveaway cannot be combined with another variant.' : null;
+/** Giveaway and Atomic cannot be combined with any other variant (see game/giveaway.ts, game/atomic.ts) — a
+ * client that sends one of them together with another flag is misbehaving, so reject it instead of silently
+ * picking one. */
+function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown }): string | null {
+  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic];
+  if (!flags.isGiveaway && !flags.isAtomic) return null;
+  if (all.filter(Boolean).length < 2) return null;
+  return `${flags.isGiveaway ? 'Giveaway' : 'Atomic'} cannot be combined with another variant.`;
 }
 
 function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
@@ -113,6 +116,7 @@ export function registerSocketHandlers(io: Server): void {
       setupChess: false, // Setup Chess never reaches this path — see the isSetupChess branches below
       fogOfWar: a.isFogOfWar,
       giveaway: a.isGiveaway,
+      atomic: a.isAtomic,
     });
 
     const basePayload = {
@@ -124,6 +128,7 @@ export function registerSocketHandlers(io: Server): void {
       isSetupChess: false,
       isFogOfWar: a.isFogOfWar,
       isGiveaway: a.isGiveaway,
+      isAtomic: a.isAtomic,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
     };
@@ -178,6 +183,7 @@ export function registerSocketHandlers(io: Server): void {
         isSetupChess: Boolean(payload.isSetupChess),
         isFogOfWar: Boolean(payload.isFogOfWar),
         isGiveaway: Boolean(payload.isGiveaway),
+        isAtomic: Boolean(payload.isAtomic),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -220,6 +226,7 @@ export function registerSocketHandlers(io: Server): void {
         isSetupChess: Boolean(payload.isSetupChess),
         isFogOfWar: Boolean(payload.isFogOfWar),
         isGiveaway: Boolean(payload.isGiveaway),
+        isAtomic: Boolean(payload.isAtomic),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -259,6 +266,7 @@ export function registerSocketHandlers(io: Server): void {
         isSetupChess: challenge.isSetupChess,
         isFogOfWar: challenge.isFogOfWar,
         isGiveaway: challenge.isGiveaway,
+        isAtomic: challenge.isAtomic,
       };
       const joinerEntry = {
         socketId: socket.id,
@@ -271,6 +279,7 @@ export function registerSocketHandlers(io: Server): void {
         isSetupChess: challenge.isSetupChess,
         isFogOfWar: challenge.isFogOfWar,
         isGiveaway: challenge.isGiveaway,
+        isAtomic: challenge.isAtomic,
       };
       // Same "no room until both blind armies are in" branch as join_queue above.
       if (challenge.isSetupChess) {

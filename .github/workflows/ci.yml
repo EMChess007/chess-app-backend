@@ -112,6 +112,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:giveaway
 
+      - name: Run Atomic regression suite (server rules authority, no-drift check, parity with the mobile app)
+        working-directory: chess-app/backend
+        run: npm run test:atomic
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

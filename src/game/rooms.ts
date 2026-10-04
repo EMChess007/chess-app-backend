@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { generateChess960Position } from './chess960.js';
 import { buildRedactedFen, getFogOfWarWinner, getVisibleSquares, redactMoveHistory } from './fogOfWar.js';
+import { getAtomicKingWinner, isAtomicThreefoldRepetition } from './atomic.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
@@ -51,6 +52,10 @@ interface Room {
   setupChess: boolean;
   fogOfWar: boolean;
   giveaway: boolean;
+  atomic: boolean;
+  /** Atomic only: the FEN of the starting position and after every move, for the history-based threefold
+   * repetition draw (chess.js cannot see repetitions here — the Atomic engine is not chess.js). */
+  atomicFens: string[];
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -92,6 +97,7 @@ export interface CreateRoomParams {
   setupChess: boolean;
   fogOfWar: boolean;
   giveaway: boolean;
+  atomic: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
    * both players' armies. Every other variant's production caller omits it and still self-generates
    * its own starting position (classical, or a random Chess960 back rank) as before; the regression
@@ -145,7 +151,7 @@ export class RoomManager {
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
     const initialFen = params.initialFen ?? (params.chess960 ? generateChess960Position() : START_FEN);
-    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen, giveaway: params.giveaway });
+    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen, giveaway: params.giveaway, atomic: params.atomic });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
     const blackPlayerToken = randomUUID();
@@ -160,6 +166,8 @@ export class RoomManager {
       setupChess: params.setupChess,
       fogOfWar: params.fogOfWar,
       giveaway: params.giveaway,
+      atomic: params.atomic,
+      atomicFens: [initialFen],
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -251,6 +259,7 @@ export class RoomManager {
     }
     room.lastMoveAt = now;
     room.moves.push(result);
+    if (room.atomic) room.atomicFens.push(room.engine.getFen());
 
     const newTurn = room.engine.getTurn();
     const opponentSlot = room.players[opponentColor];
@@ -325,6 +334,22 @@ export class RoomManager {
       } else {
         this.scheduleTimeout(room);
       }
+    } else if (room.atomic) {
+      // Atomic: a blown-up king ends the game on the spot (reason 'atomic'); otherwise the usual
+      // checkmate / stalemate / draw — all judged by atomic.ts (adjacent kings are never in check, ...) — plus
+      // the threefold-repetition draw, which only the room's own FEN history can see.
+      const kingWinner = getAtomicKingWinner(room.engine.getAtomicPosition());
+      if (kingWinner) {
+        this.endGame(room, 'atomic', kingWinner);
+      } else if (room.engine.isGameOver()) {
+        const status = room.engine.getStatus();
+        const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
+        this.endGame(room, reason, status === 'checkmate' ? mover : null);
+      } else if (isAtomicThreefoldRepetition(room.atomicFens)) {
+        this.endGame(room, 'draw', null);
+      } else {
+        this.scheduleTimeout(room);
+      }
     } else {
       // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
       // outright regardless of the rest of the position (check/material/etc. don't matter), and
@@ -394,6 +419,7 @@ export class RoomManager {
         isSetupChess: room.setupChess,
         isFogOfWar: room.fogOfWar,
         isGiveaway: room.giveaway,
+        isAtomic: room.atomic,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.fogOfWar ? redactedMovesFor(room, color) : room.moves,
@@ -553,6 +579,7 @@ export class RoomManager {
         isSetupChess: room.setupChess,
         isFogOfWar: room.fogOfWar,
         isGiveaway: room.giveaway,
+        isAtomic: room.atomic,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -660,7 +687,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : undefined);
+    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : undefined);
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));

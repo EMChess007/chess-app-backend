@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { generateChess960Position } from './chess960.js';
 import { buildRedactedFen, getFogOfWarWinner, getVisibleSquares, redactMoveHistory } from './fogOfWar.js';
+import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
 import type {
@@ -49,6 +50,7 @@ interface Room {
   threeCheck: boolean;
   setupChess: boolean;
   fogOfWar: boolean;
+  giveaway: boolean;
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -89,9 +91,11 @@ export interface CreateRoomParams {
   threeCheck: boolean;
   setupChess: boolean;
   fogOfWar: boolean;
-  /** Required (and only meaningful) when `setupChess` is true — the merged, already-validated
-   * starting position built by both players' armies. Every other variant still self-generates
-   * its own starting position (classical, or a random Chess960 back rank) as before. */
+  giveaway: boolean;
+  /** Required when `setupChess` is true — the merged, already-validated starting position built by
+   * both players' armies. Every other variant's production caller omits it and still self-generates
+   * its own starting position (classical, or a random Chess960 back rank) as before; the regression
+   * scripts (e.g. scripts/test-giveaway.mjs) pass one to start a room from a hand-built position. */
   initialFen?: string;
   /** See Room.onFinished. */
   onFinished?: (winner: PieceColor | null) => void;
@@ -140,8 +144,8 @@ export class RoomManager {
 
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
-    const initialFen = params.setupChess && params.initialFen ? params.initialFen : params.chess960 ? generateChess960Position() : START_FEN;
-    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen });
+    const initialFen = params.initialFen ?? (params.chess960 ? generateChess960Position() : START_FEN);
+    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen, giveaway: params.giveaway });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
     const blackPlayerToken = randomUUID();
@@ -155,6 +159,7 @@ export class RoomManager {
       threeCheck: params.threeCheck,
       setupChess: params.setupChess,
       fogOfWar: params.fogOfWar,
+      giveaway: params.giveaway,
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -214,9 +219,24 @@ export class RoomManager {
     // redactMoveHistory's own pre/post-visibility-union rationale (mobile app's fogOfWar.ts).
     const opponentVisibleBefore = room.fogOfWar ? getVisibleSquares(room.engine, opponentColor) : null;
 
-    const result = room.fogOfWar
-      ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
-      : room.engine.move(payload.from, payload.to, payload.promotion);
+    // Giveaway: the server is the authority on mandatory capture — a move that is not in the legal
+    // Giveaway set (any non-capturing move while a capture exists, castling, a wrong promotion piece...)
+    // is rejected here BEFORE it can touch the position; chess.js's own move() would also refuse
+    // king captures and king promotion, so Giveaway applies through movePseudoLegal like Fog of War.
+    if (room.giveaway && !isLegalGiveawayMove(room.engine, payload.from, payload.to, payload.promotion)) {
+      return { ok: false, error: describeGiveawayRejection(room.engine) };
+    }
+
+    // A king promotion only exists in Giveaway; chess.js would refuse it for the other variants too, but
+    // rejecting it explicitly keeps the wire type's 'k' from ever reaching move().
+    if (!room.giveaway && payload.promotion === 'k') {
+      return { ok: false, error: 'Invalid move.' };
+    }
+
+    const result =
+      room.fogOfWar || room.giveaway
+        ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
+        : room.engine.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
     if (!result) {
       return { ok: false, error: 'Invalid move.' };
     }
@@ -295,6 +315,16 @@ export class RoomManager {
       } else {
         this.scheduleTimeout(room);
       }
+    } else if (room.giveaway) {
+      // Giveaway has no checkmate/stalemate/draw either — whoever is now to move with no legal move WINS
+      // (see giveaway.ts). Kings are ordinary capturable pieces, so there is no king-capture win; a
+      // game can only otherwise end by clock, resignation, abandonment or an agreed draw.
+      const winner = getGiveawayWinner(room.engine);
+      if (winner) {
+        this.endGame(room, 'giveaway', winner);
+      } else {
+        this.scheduleTimeout(room);
+      }
     } else {
       // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
       // outright regardless of the rest of the position (check/material/etc. don't matter), and
@@ -363,6 +393,7 @@ export class RoomManager {
         isThreeCheck: room.threeCheck,
         isSetupChess: room.setupChess,
         isFogOfWar: room.fogOfWar,
+        isGiveaway: room.giveaway,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.fogOfWar ? redactedMovesFor(room, color) : room.moves,
@@ -521,6 +552,7 @@ export class RoomManager {
         isThreeCheck: room.threeCheck,
         isSetupChess: room.setupChess,
         isFogOfWar: room.fogOfWar,
+        isGiveaway: room.giveaway,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -628,7 +660,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result);
+    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : undefined);
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));

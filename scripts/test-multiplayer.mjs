@@ -730,6 +730,81 @@ async function testFogOfWarRedactionAndWin() {
   dirk.disconnect();
 }
 
+async function testGiveawayMatchmakingAndMandatoryCapture() {
+  console.log('\n=== Giveaway: matchmaking, server-side mandatory capture, flag isolation ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  // A Giveaway seeker must NOT be paired with a classic one (exact variant match only).
+  const giveawaySeeker = await connect('Gia');
+  const classicSeeker = await connect('Clay');
+  check((await emitAck(giveawaySeeker, 'join_queue', { timeControl, isGiveaway: true })).ok === true, 'Gia queues for Giveaway');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Clay queues for a classic game');
+  await new Promise((r) => setTimeout(r, 400));
+  let wronglyPaired = false;
+  giveawaySeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 400));
+  check(!wronglyPaired, 'a Giveaway seeker and a classic seeker are never paired with each other');
+  await emitAck(giveawaySeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  giveawaySeeker.disconnect();
+  classicSeeker.disconnect();
+
+  // Giveaway cannot be combined with another variant — rejected, not silently resolved.
+  const confused = await connect('Confused');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isGiveaway: true, isFogOfWar: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Giveaway + another variant flag is rejected on join_queue');
+  const conflictChallenge = await emitAck(confused, 'create_challenge', { timeControl, isGiveaway: true, isChess960: true });
+  check(conflictChallenge.ok === false, 'Giveaway + another variant flag is rejected on create_challenge too');
+  confused.disconnect();
+
+  const alice = await connect('Gwen');
+  const bob = await connect('Gus');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl, isGiveaway: true });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(bob, 'join_queue', { timeControl, isGiveaway: true });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Giveaway seekers are paired');
+  check(matchA.isGiveaway === true && matchB.isGiveaway === true, 'match_found tells both clients isGiveaway: true');
+  check(matchA.isFogOfWar === false && matchA.isChess960 === false, 'and none of the other variant flags');
+
+  const white = matchA.color === 'w' ? { socket: alice, name: 'Gwen' } : { socket: bob, name: 'Gus' };
+  const black = matchA.color === 'b' ? { socket: alice, name: 'Gwen' } : { socket: bob, name: 'Gus' };
+  const roomId = matchA.roomId;
+
+  const move = async (who, from, to, promotion) => emitAck(who.socket, 'make_move', { roomId, from, to, promotion });
+  check((await move(white, 'e2', 'e4')).ok === true, '1.e4 accepted (no capture exists yet)');
+  check((await move(black, 'd7', 'd5')).ok === true, '1...d5 accepted');
+
+  // Now exd5 is available, so every other move is illegal — the server must refuse it.
+  const refused = await move(white, 'g1', 'f3');
+  check(refused.ok === false && /capture is mandatory/i.test(refused.error), '2.Nf3 is REJECTED by the server while exd5 is available (mandatory capture)');
+  check((await move(white, 'a2', 'a3')).ok === false, '2.a3 is rejected too');
+  const blackSeesCapture = waitFor(black.socket, 'opponent_move');
+  check((await move(white, 'e4', 'd5')).ok === true, '2.exd5 (the mandatory capture) is accepted');
+  const seen = await blackSeesCapture;
+  check(seen.san === 'exd5', 'Black receives exd5');
+
+  // It is now Black's turn with Qxd5 / Nf6... mandatory: Qxd5 is the only capture.
+  check((await move(black, 'g8', 'f6')).ok === false, "Black's non-capturing 2...Nf6 is rejected (Qxd5 is mandatory)");
+  check((await move(black, 'd8', 'd5')).ok === true, '2...Qxd5 accepted');
+
+  const whiteGameOver = waitFor(white.socket, 'game_over');
+  const blackGameOver = waitFor(black.socket, 'game_over');
+  check((await emitAck(white.socket, 'resign', { roomId })).ok === true, 'resignation still works in Giveaway');
+  const [wr, br] = await Promise.all([whiteGameOver, blackGameOver]);
+  check(wr.reason === 'resignation' && br.reason === 'resignation' && wr.winner === 'b', 'game_over reports the resignation (White resigned, so Black wins)');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -745,6 +820,7 @@ async function main() {
   await testSetupChessInvalidMergeAsksBothToRedo();
   await testFogOfWarMatchmaking();
   await testFogOfWarRedactionAndWin();
+  await testGiveawayMatchmakingAndMandatoryCapture();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

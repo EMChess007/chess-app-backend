@@ -12,6 +12,7 @@ export interface PendingChallenge {
   isThreeCheck: boolean;
   isSetupChess: boolean;
   isFogOfWar: boolean;
+  isGiveaway: boolean;
   createdAt: number;
 }
 

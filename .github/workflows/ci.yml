@@ -108,6 +108,10 @@ jobs:
           npm run test:fogOfWarRedactionHistory
           npm run test:fogOfWarVisibilityGroundTruth
 
+      - name: Run Giveaway regression suite (server rules, authority, parity with the mobile app)
+        working-directory: chess-app/backend
+        run: npm run test:giveaway
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

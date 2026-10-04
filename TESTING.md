@@ -24,6 +24,11 @@ Triggers on every push/PR to `main`. One job:
    - `scripts/test-tournament.mjs` (40 checks) — round-robin pairing, standings, variant flags
      threading through lobby → match.
    - The four Fog of War regression scripts (below).
+   - `npm run test:giveaway` (`scripts/test-giveaway.mjs`, no server needed) — Giveaway's rules on the
+     server's own implementation, the server-as-authority checks (`RoomManager.applyMove` rejecting any
+     non-capturing move while a capture is mandatory, declaring the stuck-wins winner, refusing king
+     promotion outside Giveaway), and a parity run replaying random Giveaway games through BOTH the
+     mobile app's and the server's implementation (legal moves, SAN, FEN and winner must agree at every ply).
 
 **This blocks merges only once branch protection is turned on in the GitHub repo settings** — that
 one step needs a human with admin access to this repo (`Settings → Branches → Branch protection
@@ -37,11 +42,15 @@ checkout/Postgres setup as CI, then:
 
 - `scripts/nightly-fuzz-logic.mjs` — **3,000** randomized Fog of War games, up to 80 plies each,
   checking every pseudo-legal candidate at every ply against both `ChessEngine.ts` and
-  `RoomChessEngine.ts`. (CI's own regression tests use far smaller counts — 6-80 games — to stay
+  `RoomChessEngine.ts`, plus the same number of Giveaway games run through both implementations in
+  lockstep (parity of legal moves/SAN/FEN/winner). (CI's own regression tests use far smaller counts — 6-80 games — to stay
   fast on every commit; this is the same methodology at a scale only a schedule can afford.)
-- `scripts/nightly-fuzz-online.mjs` — **200** real games played end-to-end through the actual
-  running server/socket protocol (not a simulation), checking for genuine client/server desyncs
-  (as opposed to the one *expected* class — see §5).
+- `scripts/nightly-fuzz-online.mjs` — **200** real Fog of War games plus **200** real Giveaway games
+  played end-to-end through the actual running server/socket protocol (not a simulation), checking for
+  genuine client/server desyncs (as opposed to the one *expected* class — see §5). In Giveaway every
+  move comes from the mobile app's own legal-move set and must be accepted; ~30% of turns also first
+  submit a deliberately illegal move (a non-capturing move while a capture is mandatory) which the
+  server must refuse, and every `game_over` must match the mobile app's own winner detection.
 
 **Visibility when something fails:**
 - Both scripts write a markdown report (`nightly-fuzz-report.md`, `nightly-fuzz-online-report.md`)

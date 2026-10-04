@@ -14,7 +14,8 @@
     "test:fogOfWarEnPassant": "tsx scripts/test-fogOfWarEnPassant.mjs",
     "test:fogOfWarPerformance": "tsx scripts/test-fogOfWarPerformance.mjs",
     "test:fogOfWarRedactionHistory": "tsx scripts/test-fogOfWarRedactionHistory.mjs",
-    "test:fogOfWarVisibilityGroundTruth": "tsx scripts/test-fogOfWarVisibilityGroundTruth.mjs"
+    "test:fogOfWarVisibilityGroundTruth": "tsx scripts/test-fogOfWarVisibilityGroundTruth.mjs",
+    "test:giveaway": "tsx scripts/test-giveaway.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",

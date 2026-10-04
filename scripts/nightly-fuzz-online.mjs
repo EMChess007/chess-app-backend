@@ -1,24 +1,34 @@
 #!/usr/bin/env node
 /**
- * Extended, nightly-only fuzz test for the REAL server/socket Fog of War path — plays many
- * randomized games end-to-end through the actual running server (not a pure-logic simulation;
- * see nightly-fuzz-logic.mjs for that), two socket.io-client "players" submitting pseudo-legal
- * moves computed from their OWN locally-tracked (server-confirmed) fen. Catches anything the pure
- * logic fuzz can't: a move the client computed as pseudo-legal being rejected by the server (a
- * client/server desync), an unexpected disconnect, or the server throwing mid-game.
+ * Extended, nightly-only fuzz test for the REAL server/socket path of the online-capable variants
+ * — plays many randomized games end-to-end through the actual running server (not a pure-logic
+ * simulation; see nightly-fuzz-logic.mjs for that), two socket.io-client "players" submitting moves
+ * computed from their OWN locally-tracked (server-confirmed) fen. Catches anything the pure logic
+ * fuzz can't: a move the client computed as legal being rejected by the server (a client/server
+ * desync), an unexpected disconnect, or the server throwing mid-game.
+ *
+ * Variants covered (each section reports separately):
+ *  - Fog of War: pseudo-legal moves from each side's own redacted fen.
+ *  - Giveaway: every move comes from the mobile app's own getGiveawayMoves and MUST be accepted; a
+ *    fraction of turns ALSO first submit a deliberately illegal move (a non-capturing move while a
+ *    capture is mandatory) and the server MUST reject it — the "server is the authority" check —
+ *    and every game_over must agree with the mobile app's own winner detection.
  *
  * Usage:
  *   npm run dev                                (in one terminal, from backend/)
- *   node scripts/nightly-fuzz-online.mjs [gameCount] [maxPlies]
- * BACKEND_URL env var overrides the default http://localhost:3000.
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames]
+ * (giveawayGames defaults to the same count as fogGames.) BACKEND_URL env var overrides the
+ * default http://localhost:3000.
  */
 import { writeFileSync } from 'node:fs';
 import { io } from 'socket.io-client';
 import { ChessEngine } from '../../src/logic/ChessEngine.ts';
+import { getGiveawayMoves, getGiveawayWinner } from '../../src/logic/giveaway.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const GAMES = Number(process.argv[2] ?? 100);
 const MAX_PLIES = Number(process.argv[3] ?? 60);
+const GIVEAWAY_GAMES = Number(process.argv[4] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -145,8 +155,102 @@ async function playOneGame(gameIndex) {
   return { plies, issues };
 }
 
+/** One real Giveaway game through the server — see the file header for what is checked. */
+async function playGiveawayGame(gameIndex) {
+  const alice = await connect(`GAlice${gameIndex}`);
+  const bob = await connect(`GBob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl, isGiveaway: true });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      await emitAck(bob, 'join_queue', { timeControl, isGiveaway: true });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: false };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  if (matchA.isGiveaway !== true) issues.push({ kind: 'match-found-missing-isGiveaway', game: gameIndex });
+
+  const newEngine = (f) => new ChessEngine(f, { skipValidation: true, giveaway: true });
+
+  for (; stats.plies < MAX_PLIES; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = newEngine(fen);
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const legal = getGiveawayMoves(engine);
+    if (legal.length === 0) break;
+
+    // Server authority: first try a pseudo-legal move that is NOT a legal Giveaway move (only
+    // exists when a capture is mandatory and a quiet move is also pseudo-legal) — it must bounce.
+    if (Math.random() < 0.3) {
+      const key = (m) => `${m.from}${m.to}${m.promotion ?? ''}`;
+      const legalKeys = new Set(legal.map(key));
+      const illegal = engine.getPseudoLegalMoves(turn).filter((m) => !legalKeys.has(key(m)));
+      if (illegal.length > 0) {
+        const bad = illegal[randInt(illegal.length)];
+        stats.illegalProbes++;
+        const refusal = await emitAck(mover, 'make_move', { roomId, from: bad.from, to: bad.to, promotion: bad.promotion });
+        if (refusal.ok) {
+          issues.push({ kind: 'server-ACCEPTED-illegal-giveaway-move', game: gameIndex, ply: stats.plies, fen, move: bad });
+          break;
+        }
+      }
+    }
+
+    const pick = legal[randInt(legal.length)];
+    const opponentColor = turn === 'w' ? 'b' : 'w';
+    const opponentMove = waitFor(players[opponentColor], 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-giveaway-move', game: gameIndex, ply: stats.plies, fen, pick, error: ack.error });
+      break;
+    }
+    fen = ack.fen;
+    const pushed = await opponentMove;
+    if (pushed && pushed.fen !== ack.fen) {
+      issues.push({ kind: 'opponent-fen-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: ack.fen, pushed: pushed.fen });
+      break;
+    }
+
+    // The server's verdict must match the mobile app's own winner detection for the new position.
+    const winner = getGiveawayWinner(newEngine(fen));
+    if (winner) {
+      stats.finished = true;
+      await new Promise((r) => setTimeout(r, 150));
+      if (!gameOverPayload || gameOverPayload.reason !== 'giveaway' || gameOverPayload.winner !== winner) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile-winner', game: gameIndex, ply: stats.plies, fen, expected: winner, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
 async function main() {
-  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
+  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} real Giveaway games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
@@ -163,15 +267,33 @@ async function main() {
     }
   }
 
+  // --- Giveaway ---
+  const giveaway = { games: 0, plies: 0, probes: 0, finished: 0, issues: [] };
+  for (let g = 0; g < GIVEAWAY_GAMES; g++) {
+    try {
+      const { stats, issues } = await playGiveawayGame(g);
+      giveaway.games++;
+      giveaway.plies += stats.plies;
+      giveaway.probes += stats.illegalProbes;
+      if (stats.finished) giveaway.finished++;
+      giveaway.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${GIVEAWAY_GAMES} Giveaway games played`);
+    } catch (err) {
+      giveaway.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...giveaway.issues.map((i) => ({ ...i, variant: 'giveaway' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
   console.log(`\nCompleted ${completedGames}/${GAMES} games, ${totalPlies} total plies.`);
   console.log(`Expected blind-push-into-fog rejections (not a bug — see script's own doc comment): ${expected.length}`);
+  console.log(`Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused, ${giveaway.finished} games ended by the stuck-wins rule.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online Fog of War fuzz report',
+    '# Nightly online fuzz report (Fog of War + Giveaway)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -179,6 +301,7 @@ async function main() {
     `- Games completed: ${completedGames}/${GAMES}`,
     `- Total plies: ${totalPlies}`,
     `- Expected blind-push-into-fog rejections: ${expected.length} (normal Fog of War Online behavior, not a failure)`,
+    `- Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused by the server, ${giveaway.finished} games ended by the stuck-wins rule`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];
@@ -196,6 +319,6 @@ async function main() {
 
 main().catch((err) => {
   console.error('Fatal error running nightly online fuzz:', err);
-  writeFileSync('nightly-fuzz-online-report.md', `# Nightly online Fog of War fuzz report\n\nFATAL: ${err instanceof Error ? err.stack : String(err)}\n\n## Result: FAIL\n`);
+  writeFileSync('nightly-fuzz-online-report.md', `# Nightly online fuzz report\n\nFATAL: ${err instanceof Error ? err.stack : String(err)}\n\n## Result: FAIL\n`);
   process.exit(1);
 });

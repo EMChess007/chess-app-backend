@@ -16,7 +16,8 @@ export type GameOverReason =
   | 'resignation'
   | 'kingOfTheHill'
   | 'threeCheck'
-  | 'fogOfWar';
+  | 'fogOfWar'
+  | 'giveaway';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -27,6 +28,8 @@ export interface JoinQueuePayload {
   isThreeCheck?: boolean;
   isSetupChess?: boolean;
   isFogOfWar?: boolean;
+  /** Giveaway (Antichess) — see giveaway.ts. Mutually exclusive with every other variant. */
+  isGiveaway?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -40,7 +43,8 @@ export interface MakeMovePayload {
   roomId: string;
   from: string;
   to: string;
-  promotion?: 'n' | 'b' | 'r' | 'q';
+  /** 'k' is only ever legal in Giveaway (a pawn may promote to a king there). */
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
 }
 
 export interface RejoinGamePayload {
@@ -79,6 +83,7 @@ export interface MatchFoundPayload {
   isThreeCheck: boolean;
   isSetupChess: boolean;
   isFogOfWar: boolean;
+  isGiveaway: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -95,7 +100,7 @@ export interface OpponentMovePayload {
    * `visibleSquares`, just not what specifically happened. Always present outside Fog of War. */
   from?: string;
   to?: string;
-  promotion?: 'n' | 'b' | 'r' | 'q';
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
   san?: string;
   fen: string;
   turn: PieceColor;
@@ -130,6 +135,7 @@ export interface RejoinStatePayload {
   isThreeCheck: boolean;
   isSetupChess: boolean;
   isFogOfWar: boolean;
+  isGiveaway: boolean;
   whiteMs: number;
   blackMs: number;
   /** Each entry's fields are all omitted together for a Fog of War move this viewer never
@@ -167,6 +173,7 @@ export interface CreateChallengePayload {
   isThreeCheck?: boolean;
   isSetupChess?: boolean;
   isFogOfWar?: boolean;
+  isGiveaway?: boolean;
   timeControlLabel?: string;
 }
 

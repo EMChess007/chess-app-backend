@@ -294,6 +294,7 @@ export class TournamentManager {
         threeCheck: tournament.threeCheck,
         setupChess: false, // Tournaments don't support Setup Chess yet — see VariantSelector's excludeVariants on TournamentScreen
         fogOfWar: false, // Tournaments don't support Fog of War either — same exclusion
+        giveaway: false, // ...nor Giveaway (Local, Bots and 1v1 Online only)
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;

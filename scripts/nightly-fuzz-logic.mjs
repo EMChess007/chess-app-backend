@@ -23,7 +23,9 @@
  */
 import { writeFileSync } from 'node:fs';
 import { ChessEngine } from '../../src/logic/ChessEngine.ts';
-import { RoomChessEngine } from '../src/game/RoomChessEngine.ts';
+import { getGiveawayMoves as clientGiveawayMoves, getGiveawayWinner as clientGiveawayWinner } from '../../src/logic/giveaway.ts';
+import { RoomChessEngine, START_FEN } from '../src/game/RoomChessEngine.ts';
+import { getGiveawayMoves as serverGiveawayMoves, getGiveawayWinner as serverGiveawayWinner } from '../src/game/giveaway.ts';
 
 const GAMES = Number(process.argv[2] ?? 3000);
 const MAX_PLIES = Number(process.argv[3] ?? 80);
@@ -78,11 +80,67 @@ function fuzzEngine(label, EngineClass) {
   return { label, totalGames, totalPlies, totalChecked, mismatches };
 }
 
-console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations.\n`);
+/**
+ * Giveaway PARITY: every random game is replayed through BOTH implementations (the mobile app's
+ * giveaway.ts + ChessEngine, and the server's giveaway.ts + RoomChessEngine — the server keeps ONE live
+ * engine for the whole game, the mobile app rebuilds from the FEN every ply, exactly as in production)
+ * and they must agree at every ply on the legal move set, the applied move's SAN/capture/promotion, the
+ * resulting FEN and the winner. A disagreement is a client/server desync waiting to happen online.
+ */
+function fuzzGiveawayParity() {
+  const uci = (moves) => moves.map((m) => `${m.from}${m.to}${m.promotion ?? ''}`).sort().join();
+  const mismatches = [];
+  let totalPlies = 0;
+  let totalChecked = 0;
+  let totalGames = 0;
+  for (let g = 0; g < GAMES; g++) {
+    totalGames++;
+    const server = new RoomChessEngine(START_FEN, { giveaway: true });
+    let clientFen = START_FEN;
+    for (let ply = 0; ply < MAX_PLIES * 3; ply++) {
+      const client = new ChessEngine(clientFen, { skipValidation: true, giveaway: true });
+      const serverMoves = serverGiveawayMoves(server);
+      totalChecked++;
+      if (uci(serverMoves) !== uci(clientGiveawayMoves(client))) {
+        mismatches.push({ kind: 'giveaway-legal-moves-differ', game: g, ply, fen: server.getFen() });
+        break;
+      }
+      const winner = serverGiveawayWinner(server);
+      if (winner !== clientGiveawayWinner(client)) {
+        mismatches.push({ kind: 'giveaway-winner-differs', game: g, ply, fen: server.getFen() });
+        break;
+      }
+      if (winner) break;
+      const pick = serverMoves[randInt(serverMoves.length)];
+      let a;
+      let b;
+      try {
+        a = server.movePseudoLegal(pick.from, pick.to, pick.promotion);
+        b = client.movePseudoLegal(pick.from, pick.to, pick.promotion);
+      } catch (err) {
+        mismatches.push({ kind: 'giveaway-apply-threw', game: g, ply, fen: clientFen, pick, error: String(err) });
+        break;
+      }
+      if (!a || !b || a.san !== b.san || a.captured !== b.captured || a.promotion !== b.promotion || server.getFen() !== client.getFen()) {
+        mismatches.push({ kind: 'giveaway-applied-move-differs', game: g, ply, fen: clientFen, pick, server: a, client: b, serverFen: server.getFen(), clientResultFen: client.getFen() });
+        break;
+      }
+      clientFen = client.getFen();
+      totalPlies++;
+    }
+  }
+  return { label: 'Giveaway parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
+}
 
-const results = [fuzzEngine('Mobile app (src/logic/ChessEngine.ts)', ChessEngine), fuzzEngine('Server (backend/src/game/RoomChessEngine.ts)', RoomChessEngine)];
+console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway parity.\n`);
 
-let reportLines = [`# Nightly Fog of War fuzz report`, '', `Run at: ${new Date().toISOString()}`, ''];
+const results = [
+  fuzzEngine('Mobile app (src/logic/ChessEngine.ts)', ChessEngine),
+  fuzzEngine('Server (backend/src/game/RoomChessEngine.ts)', RoomChessEngine),
+  fuzzGiveawayParity(),
+];
+
+let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
 let anyFailure = false;
 
 for (const r of results) {

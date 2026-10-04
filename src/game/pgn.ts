@@ -24,7 +24,7 @@ function formatSanMoves(startTurn: 'w' | 'b', startMoveNumber: number, sanMoves:
 /** Builds a minimal but valid PGN from a finished room's moves — mirrors the mobile app's
  * src/logic/pgn.ts (buildPgn), which every locally-played game already goes through, so online
  * games end up with the exact same PGN shape in game history. */
-export function buildPgn(initialFen: string, moves: AppliedMove[], result: string): string {
+export function buildPgn(initialFen: string, moves: AppliedMove[], result: string, variant?: string): string {
   const fenParts = initialFen.split(' ');
   const startTurn: 'w' | 'b' = fenParts[1] === 'b' ? 'b' : 'w';
   const startMoveNumber = parseInt(fenParts[5], 10) || 1;
@@ -36,6 +36,9 @@ export function buildPgn(initialFen: string, moves: AppliedMove[], result: strin
   );
 
   const tags = [`[Result "${result}"]`];
+  // Mirrors the mobile app's buildPgn: a variant tag makes replay/analysis refuse games whose moves
+  // are not legal ordinary chess (Giveaway is tagged "Antichess", like the mobile app's own saves).
+  if (variant) tags.push(`[Variant "${variant}"]`);
   if (initialFen !== START_FEN) {
     tags.push('[SetUp "1"]', `[FEN "${initialFen}"]`);
   }

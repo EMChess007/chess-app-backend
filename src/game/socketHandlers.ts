@@ -62,6 +62,15 @@ interface PairableEntry {
   isThreeCheck: boolean;
   isSetupChess: boolean;
   isFogOfWar: boolean;
+  isGiveaway: boolean;
+}
+
+/** Giveaway cannot be combined with any other variant (see game/giveaway.ts) — a client that sends
+ * Giveaway together with another flag is misbehaving, so reject it instead of silently picking one. */
+function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown }): string | null {
+  if (!flags.isGiveaway) return null;
+  const others = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar];
+  return others.some(Boolean) ? 'Giveaway cannot be combined with another variant.' : null;
 }
 
 function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
@@ -103,6 +112,7 @@ export function registerSocketHandlers(io: Server): void {
       threeCheck: a.isThreeCheck,
       setupChess: false, // Setup Chess never reaches this path — see the isSetupChess branches below
       fogOfWar: a.isFogOfWar,
+      giveaway: a.isGiveaway,
     });
 
     const basePayload = {
@@ -113,6 +123,7 @@ export function registerSocketHandlers(io: Server): void {
       isThreeCheck: a.isThreeCheck,
       isSetupChess: false,
       isFogOfWar: a.isFogOfWar,
+      isGiveaway: a.isGiveaway,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
     };
@@ -150,6 +161,11 @@ export function registerSocketHandlers(io: Server): void {
         ack?.({ ok: false, error: 'Invalid time control.' });
         return;
       }
+      const conflict = conflictingVariantError(payload);
+      if (conflict) {
+        ack?.({ ok: false, error: conflict });
+        return;
+      }
 
       const entry = {
         socketId: socket.id,
@@ -161,6 +177,7 @@ export function registerSocketHandlers(io: Server): void {
         isThreeCheck: Boolean(payload.isThreeCheck),
         isSetupChess: Boolean(payload.isSetupChess),
         isFogOfWar: Boolean(payload.isFogOfWar),
+        isGiveaway: Boolean(payload.isGiveaway),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -187,6 +204,11 @@ export function registerSocketHandlers(io: Server): void {
         ack?.({ ok: false, error: 'Invalid time control.' });
         return;
       }
+      const conflict = conflictingVariantError(payload);
+      if (conflict) {
+        ack?.({ ok: false, error: conflict });
+        return;
+      }
       const challenge = challenges.create({
         creatorSocketId: socket.id,
         creatorUserId: userId,
@@ -197,6 +219,7 @@ export function registerSocketHandlers(io: Server): void {
         isThreeCheck: Boolean(payload.isThreeCheck),
         isSetupChess: Boolean(payload.isSetupChess),
         isFogOfWar: Boolean(payload.isFogOfWar),
+        isGiveaway: Boolean(payload.isGiveaway),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -235,6 +258,7 @@ export function registerSocketHandlers(io: Server): void {
         isThreeCheck: challenge.isThreeCheck,
         isSetupChess: challenge.isSetupChess,
         isFogOfWar: challenge.isFogOfWar,
+        isGiveaway: challenge.isGiveaway,
       };
       const joinerEntry = {
         socketId: socket.id,
@@ -246,6 +270,7 @@ export function registerSocketHandlers(io: Server): void {
         isThreeCheck: challenge.isThreeCheck,
         isSetupChess: challenge.isSetupChess,
         isFogOfWar: challenge.isFogOfWar,
+        isGiveaway: challenge.isGiveaway,
       };
       // Same "no room until both blind armies are in" branch as join_queue above.
       if (challenge.isSetupChess) {

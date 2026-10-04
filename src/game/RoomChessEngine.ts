@@ -3,6 +3,9 @@ import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './ches
 
 const FILES = 'abcdefgh';
 
+/** chess.js's KSIDE_CASTLE (32) | QSIDE_CASTLE (64) move flags — see RoomChessEngineOptions.giveaway. */
+const CASTLE_FLAGS = 32 | 64;
+
 /** chess.js's own internal move shape — not exported by name, but structurally identical to this
  * (TypeScript matches structurally, so this works wherever chess.js's own unexported
  * `InternalMove` type is expected, e.g. the `Move` class's constructor). See `ChessInternals`
@@ -21,6 +24,55 @@ interface InternalMove {
 interface ChessInternals {
   _moves(options?: { legal?: boolean; square?: ChessJsSquare; piece?: string }): InternalMove[];
   _makeMove(move: InternalMove): void;
+  /** Places a piece on a 0x88 square index with no validation at all — unlike the public put()/load(),
+   * which refuse a second king of one colour. See loadGiveawayFen. */
+  _set(square: number, piece: { type: 'k'; color: PieceColor }): void;
+}
+
+/** Inverse of squareFromIndex: algebraic square to chess.js's 0x88 board index. */
+function indexFromSquare(square: string): number {
+  return (8 - Number(square[1])) * 16 + FILES.indexOf(square[0]);
+}
+
+/**
+ * Loads a Giveaway FEN, keeping a SECOND king of one colour — the server twin of the mobile app's
+ * identical loadGiveawayFen (src/logic/ChessEngine.ts; see its doc comment for the full rationale).
+ * chess.js's load()/put() silently drop all but the first king of a colour, but Giveaway lets a pawn
+ * promote to a king while the side's own king is alive.
+ */
+function loadGiveawayFen(fen: string): Chess {
+  const [placement, ...rest] = fen.split(' ');
+  const seen: Record<PieceColor, boolean> = { w: false, b: false };
+  const extras: { square: string; color: PieceColor }[] = [];
+  const ranks = placement.split('/').map((rank, rankIndex) => {
+    let file = 0;
+    let out = '';
+    for (const ch of rank) {
+      if (ch >= '1' && ch <= '8') {
+        out += ch;
+        file += Number(ch);
+        continue;
+      }
+      if (ch === 'K' || ch === 'k') {
+        const color: PieceColor = ch === 'K' ? 'w' : 'b';
+        if (seen[color]) {
+          extras.push({ square: `${FILES[file]}${8 - rankIndex}`, color });
+          out += '1';
+          file += 1;
+          continue;
+        }
+        seen[color] = true;
+      }
+      out += ch;
+      file += 1;
+    }
+    return out;
+  });
+  const chess = new Chess([ranks.join('/'), ...rest].join(' '), { skipValidation: true });
+  for (const extra of extras) {
+    (chess as unknown as ChessInternals)._set(indexFromSquare(extra.square), { type: 'k', color: extra.color });
+  }
+  return chess;
 }
 
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
@@ -38,7 +90,8 @@ export type GameStatus = 'playing' | 'checkmate' | 'stalemate' | 'draw' | 'check
 export interface AppliedMove {
   from: string;
   to: string;
-  promotion?: 'n' | 'b' | 'r' | 'q';
+  /** 'k' only ever appears in Giveaway (Antichess), where a pawn may promote to a king. */
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
   san: string;
   /** The type of piece captured by this move, if any — only ever populated by movePseudoLegal
    * (Fog of War), which needs it to detect a king capture; the normal move() path has never
@@ -56,6 +109,16 @@ export interface RoomChessEngineOptions {
   /** The FEN the game actually started from — required in Chess960 mode to know which files
    * the king and rooks originally stood on (fixed for the game, unlike the current FEN). */
   initialFen?: string;
+  /**
+   * Giveaway (Antichess) only — the server-side twin of the mobile app's identical ChessEngine
+   * option (see src/logic/ChessEngine.ts and src/logic/giveaway.ts there for the rules). Changes
+   * what getPseudoLegalMoves/movePseudoLegal generate: castling is dropped, a pawn reaching its last
+   * rank may also promote to a KING, and SAN loses its '+'/'#' suffix (chess.js's check detection is
+   * meaningless here). Positions may be kingless or hold two kings of a colour, so the engine is built
+   * through loadGiveawayFen and rebuilt from its own FEN after every move. Every other mode leaves
+   * this off, so its behaviour is untouched.
+   */
+  giveaway?: boolean;
 }
 
 /**
@@ -67,9 +130,11 @@ export class RoomChessEngine {
   private chess: Chess;
   private chess960: boolean;
   private files: { kingFile: number; queenRookFile: number; kingRookFile: number };
+  private giveaway: boolean;
 
   constructor(fen?: string, options?: RoomChessEngineOptions) {
-    this.chess = fen ? new Chess(fen) : new Chess();
+    this.giveaway = options?.giveaway ?? false;
+    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen)) : new Chess();
     this.chess960 = options?.chess960 ?? false;
     this.files = getChess960BackRankFiles(options?.initialFen ?? fen ?? START_FEN);
   }
@@ -158,17 +223,16 @@ export class RoomChessEngine {
   getPseudoLegalMoves(color?: PieceColor): AppliedMove[] {
     const turn = this.chess.turn();
     const source = !color || color === turn ? this.chess : this.cloneWithTurn(color);
-    const internals = source as unknown as ChessInternals;
-    return internals._moves({ legal: false }).map(toAppliedMoveFromRaw);
+    return this.generateRaw(source).map(toAppliedMoveFromRaw);
   }
 
   /** Server-authoritative Fog of War move application — validates `from`/`to`/`promotion`
    * against the current side's own pseudo-legal moves (never trusts the client beyond that) and
    * applies it directly via chess.js's internal _makeMove, bypassing the public move()'s
    * king-safety gate entirely. Returns null if nothing matches. */
-  movePseudoLegal(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q'): AppliedMove | null {
+  movePseudoLegal(from: string, to: string, promotion?: AppliedMove['promotion']): AppliedMove | null {
     const internals = this.chess as unknown as ChessInternals;
-    const candidates = internals._moves({ legal: false });
+    const candidates = this.generateRaw(this.chess);
     // See the mobile app's identical movePseudoLegal — compared off the raw move's own fields,
     // not a chess.js Move wrapper built (at full cost) for every candidate scanned.
     const raw = candidates.find(
@@ -177,7 +241,34 @@ export class RoomChessEngine {
     if (!raw) return null;
     const pretty = new ChessJsMove(this.chess, raw);
     internals._makeMove(raw);
-    return toAppliedMove(pretty);
+    const applied = toAppliedMove(pretty);
+    if (!this.giveaway) return applied;
+    // Giveaway only: unlike Fog of War (where a king capture ends the game on the spot), a Giveaway game
+    // CARRIES ON after a king is captured, and chess.js's live internal state does not cope — its
+    // _kings entry for the captured side keeps pointing at the old square, and its castling rights
+    // survive, so a later castle candidate (built from that stale square) makes _makeMove throw
+    // "Cannot read properties of undefined (reading 'type')" — found by scripts/test-giveaway.mjs's
+    // parity run, which would have taken the whole server process down mid-game. Rebuilding the
+    // engine from its own FEN after every move gives it fresh bookkeeping derived from the actual
+    // board — exactly what the mobile app does implicitly by building a new engine from the FEN on
+    // every ply (and loadGiveawayFen keeps a promoted second king through that rebuild).
+    this.chess = loadGiveawayFen(this.chess.fen({ forceEnpassantSquare: true }));
+    return { ...applied, san: applied.san.replace(/[+#]$/, '') };
+  }
+
+  /** chess.js's raw pseudo-legal candidates for `source`'s side to move, adjusted for Giveaway when
+   * that option is on — the same adjustment as the mobile app's ChessEngine.generateRaw (castling
+   * dropped; each queen promotion also offered as a king promotion). */
+  private generateRaw(source: Chess): InternalMove[] {
+    const raw = (source as unknown as ChessInternals)._moves({ legal: false });
+    if (!this.giveaway) return raw;
+    const out: InternalMove[] = [];
+    for (const m of raw) {
+      if (m.flags & CASTLE_FLAGS) continue;
+      out.push(m);
+      if (m.promotion === 'q') out.push({ ...m, promotion: 'k' });
+    }
+    return out;
   }
 
   private cloneWithTurn(color: PieceColor): Chess {
@@ -284,7 +375,7 @@ function toAppliedMove(pretty: ChessJsMove): AppliedMove {
   return {
     from: pretty.from,
     to: pretty.to,
-    promotion: pretty.promotion as 'n' | 'b' | 'r' | 'q' | undefined,
+    promotion: pretty.promotion as AppliedMove['promotion'],
     san: pretty.san,
     captured: pretty.captured as AppliedMove['captured'],
   };
@@ -307,7 +398,7 @@ function toAppliedMoveFromRaw(raw: InternalMove): AppliedMove {
   return {
     from: squareFromIndex(raw.from),
     to: squareFromIndex(raw.to),
-    promotion: raw.promotion as 'n' | 'b' | 'r' | 'q' | undefined,
+    promotion: raw.promotion as AppliedMove['promotion'],
     san: '',
     captured: raw.captured as AppliedMove['captured'],
   };

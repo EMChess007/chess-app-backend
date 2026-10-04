@@ -42,6 +42,12 @@ Triggers on every push/PR to `main`. One job:
      unchanged duck square refuses the WHOLE turn, moves the duck blocks are refused, king capture = reason
      `duckChess` with no placement, blockade = draw, castling blocked across the duck but not by attacks), and
      parity with the mobile app over 100 random games (legal moves, legal duck squares, SAN, FEN, blockade).
+   - `npm run test:unlimited` (`scripts/test-unlimited.mjs`, no server needed) — "No time limit" (live-only, no clock):
+     time-control validation (finite numbers; an unlimited control may have no increment), an unlimited room's clock
+     never ticks or gains an increment and schedules no timeout (move acks, `opponent_move` and rejoin payloads all
+     carry the untouched sentinel, with a timed room as the control), exact-match pairing, and abandonment still
+     applying (it is not Daily). Mutation-checked: breaking the clock guard, the timer guard or the validator each
+     fails it.
 
 **This blocks merges only once branch protection is turned on in the GitHub repo settings** — that
 one step needs a human with admin access to this repo (`Settings → Branches → Branch protection

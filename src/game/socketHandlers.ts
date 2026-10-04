@@ -41,14 +41,19 @@ function extractUserId(socket: Socket): string | null {
   }
 }
 
-function isValidTimeControl(value: unknown): value is TimeControl {
+export function isValidTimeControl(value: unknown): value is TimeControl {
   if (typeof value !== 'object' || value === null) return false;
   const tc = value as Record<string, unknown>;
   return (
     typeof tc.initialSeconds === 'number' &&
+    Number.isFinite(tc.initialSeconds) &&
     tc.initialSeconds >= 0 &&
     typeof tc.incrementSeconds === 'number' &&
-    tc.incrementSeconds >= 0
+    Number.isFinite(tc.incrementSeconds) &&
+    tc.incrementSeconds >= 0 &&
+    // "No time limit" (initialSeconds 0) has no clock, so an increment would be meaningless — and it
+    // would otherwise never pair with the client's own {0, 0} entries (matchmaking matches exactly).
+    (tc.initialSeconds > 0 || tc.incrementSeconds === 0)
   );
 }
 

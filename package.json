@@ -17,7 +17,8 @@
     "test:fogOfWarVisibilityGroundTruth": "tsx scripts/test-fogOfWarVisibilityGroundTruth.mjs",
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",
-    "test:duck": "tsx scripts/test-duck.mjs"
+    "test:duck": "tsx scripts/test-duck.mjs",
+    "test:unlimited": "tsx scripts/test-unlimited.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",

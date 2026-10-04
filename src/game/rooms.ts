@@ -134,6 +134,12 @@ export interface CreateRoomResult {
   blackView?: { fen: string; visibleSquares: string[] };
 }
 
+/** "No time limit": a live game with no clock at all (initialSeconds <= 0). Not Daily/correspondence —
+ * the abandonment grace below still applies, so both players must stay connected. */
+export function isUnlimitedTimeControl(timeControl: TimeControl): boolean {
+  return timeControl.initialSeconds <= 0;
+}
+
 function initialClockMs(timeControl: TimeControl): number {
   // A non-positive initialSeconds means "no clock" (matches the mobile app's "No time limit"
   // time control) — represented as a very large remaining time rather than 0, and the timeout
@@ -283,12 +289,16 @@ export class RoomManager {
     }
 
     const now = Date.now();
-    const elapsed = now - room.lastMoveAt;
-    const incrementMs = room.timeControl.incrementSeconds * 1000;
-    if (mover === 'w') {
-      room.whiteMs = Math.max(0, room.whiteMs - elapsed) + incrementMs;
-    } else {
-      room.blackMs = Math.max(0, room.blackMs - elapsed) + incrementMs;
+    // An unlimited game's "clock" is a constant sentinel (initialClockMs) that must never tick or gain an
+    // increment — the clients hide it, and a decremented sentinel would only invite precision drift.
+    if (!isUnlimitedTimeControl(room.timeControl)) {
+      const elapsed = now - room.lastMoveAt;
+      const incrementMs = room.timeControl.incrementSeconds * 1000;
+      if (mover === 'w') {
+        room.whiteMs = Math.max(0, room.whiteMs - elapsed) + incrementMs;
+      } else {
+        room.blackMs = Math.max(0, room.blackMs - elapsed) + incrementMs;
+      }
     }
     room.lastMoveAt = now;
     room.moves.push(result);
@@ -693,7 +703,7 @@ export class RoomManager {
       clearTimeout(room.clockTimer);
       room.clockTimer = null;
     }
-    if (room.timeControl.initialSeconds <= 0) return; // unlimited time control — nothing to schedule
+    if (isUnlimitedTimeControl(room.timeControl)) return; // nothing to schedule
 
     const turn = room.engine.getTurn();
     const remaining = turn === 'w' ? room.whiteMs : room.blackMs;

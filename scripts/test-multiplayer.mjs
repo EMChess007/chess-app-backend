@@ -939,6 +939,61 @@ async function testDuckChessOnline() {
   bob.disconnect();
 }
 
+async function testNoTimeLimitOnline() {
+  console.log('\n=== No time limit: live-only game with no clock ===');
+  const unlimited = { initialSeconds: 0, incrementSeconds: 0 };
+
+  const bad = await connect('Bad-tc');
+  check((await emitAck(bad, 'join_queue', { timeControl: { initialSeconds: 0, incrementSeconds: 5 } })).ok === false, 'an unlimited control with an increment is rejected on join_queue');
+  check((await emitAck(bad, 'join_queue', { timeControl: { initialSeconds: null, incrementSeconds: 0 } })).ok === false, '...as is a non-numeric time (Infinity serialises to null)');
+  bad.disconnect();
+
+  const timedSeeker = await connect('Timed');
+  const unlimitedSeeker = await connect('Free');
+  await emitAck(timedSeeker, 'join_queue', { timeControl: { initialSeconds: 300, incrementSeconds: 0 } });
+  await emitAck(unlimitedSeeker, 'join_queue', { timeControl: unlimited });
+  let wronglyPaired = false;
+  timedSeeker.once('match_found', () => (wronglyPaired = true));
+  unlimitedSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a timed seeker and a no-time-limit seeker are never paired');
+  await emitAck(timedSeeker, 'leave_queue', {});
+  await emitAck(unlimitedSeeker, 'leave_queue', {});
+  timedSeeker.disconnect();
+  unlimitedSeeker.disconnect();
+
+  const alice = await connect('Nora');
+  const bob = await connect('Nico');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      await emitAck(alice, 'join_queue', { timeControl: unlimited });
+      return waitFor(alice, 'match_found');
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      await emitAck(bob, 'join_queue', { timeControl: unlimited });
+      return waitFor(bob, 'match_found');
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two no-time-limit seekers are paired');
+  check(matchA.timeControl.initialSeconds === 0, 'match_found carries timeControl.initialSeconds 0 (how the clients know to hide the clock)');
+  const white = matchA.color === 'w' ? { socket: alice, match: matchA } : { socket: bob, match: matchB };
+  const black = matchA.color === 'w' ? { socket: bob, match: matchB } : { socket: alice, match: matchA };
+  const sentinel = white.match.whiteMs;
+  check(sentinel === Number.MAX_SAFE_INTEGER && white.match.blackMs === sentinel, 'both clocks start at the constant "no clock" value');
+
+  const seen = waitFor(black.socket, 'opponent_move');
+  const first = await emitAck(white.socket, 'make_move', { roomId: white.match.roomId, from: 'e2', to: 'e4' });
+  check(first.ok === true && first.whiteMs === sentinel && first.blackMs === sentinel, "White's move is accepted with the clocks untouched");
+  const relayed = await seen;
+  check(relayed.whiteMs === sentinel && relayed.blackMs === sentinel, "Black is told the move with the clocks untouched");
+  await new Promise((r) => setTimeout(r, 1300));
+  const reply = await emitAck(black.socket, 'make_move', { roomId: white.match.roomId, from: 'e7', to: 'e5' });
+  check(reply.ok === true && reply.whiteMs === sentinel && reply.blackMs === sentinel, 'after 1.3 s of thinking the clocks are still untouched (nothing ticks)');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -957,6 +1012,7 @@ async function main() {
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
   await testDuckChessOnline();
+  await testNoTimeLimitOnline();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

@@ -120,6 +120,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:duck
 
+      - name: Run No time limit regression suite (unlimited clock, validation, pairing)
+        working-directory: chess-app/backend
+        run: npm run test:unlimited
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

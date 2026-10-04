@@ -19,6 +19,12 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
 
+    # The failure-tracking steps below open/update/close an issue; without issues: write they died with
+    # "Resource not accessible by integration" and no tracking issue was ever created.
+    permissions:
+      contents: read
+      issues: write
+
     services:
       postgres:
         image: postgres:16
@@ -72,7 +78,10 @@ jobs:
       - name: Pure-logic fuzz (3000 games, both ChessEngine implementations)
         id: logic_fuzz
         working-directory: chess-app/backend
-        run: node scripts/nightly-fuzz-logic.mjs 3000 80
+        # tsx, not plain node: the script imports the frontend's chess engine as .ts, which Node 20
+        # cannot load (ERR_UNKNOWN_FILE_EXTENSION) — that crashed every nightly run before it could
+        # write a report. Same runner the package.json test scripts use.
+        run: npx tsx scripts/nightly-fuzz-logic.mjs 3000 80
         continue-on-error: true
 
       - name: Start dev server (for the online fuzz below)
@@ -91,7 +100,7 @@ jobs:
       - name: Online fuzz (200 real games through the live server/socket protocol)
         id: online_fuzz
         working-directory: chess-app/backend
-        run: node scripts/nightly-fuzz-online.mjs 200 80
+        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 # tsx for the same reason as the logic fuzz above
         continue-on-error: true
 
       - name: Upload fuzz reports

@@ -36,6 +36,12 @@ Triggers on every push/PR to `main`. One job:
      stalemate/insufficient material/50-move/threefold from the room's FEN history, forged king promotion
      refused, castling next to the enemy king), and parity with the mobile app over 100 random capture-biased
      games. (The rules themselves are verified against chessops by the mobile suite.)
+   - `npm run test:duck` (`scripts/test-duck.mjs`, no server needed) — Duck Chess's server side: a **no-drift
+     check** of the shared rules block in `src/game/duckChess.ts` against the mobile `src/logic/duckChess.ts`,
+     `RoomManager.applyMove` as the authority (a turn is a move AND the duck's square: a missing, occupied or
+     unchanged duck square refuses the WHOLE turn, moves the duck blocks are refused, king capture = reason
+     `duckChess` with no placement, blockade = draw, castling blocked across the duck but not by attacks), and
+     parity with the mobile app over 100 random games (legal moves, legal duck squares, SAN, FEN, blockade).
 
 **This blocks merges only once branch protection is turned on in the GitHub repo settings** — that
 one step needs a human with admin access to this repo (`Settings → Branches → Branch protection
@@ -50,16 +56,18 @@ checkout/Postgres setup as CI, then:
 - `scripts/nightly-fuzz-logic.mjs` — **3,000** randomized Fog of War games, up to 80 plies each,
   checking every pseudo-legal candidate at every ply against both `ChessEngine.ts` and
   `RoomChessEngine.ts`, plus the same number of Giveaway games run through both implementations in
-  lockstep (parity of legal moves/SAN/FEN/winner), and the same for Atomic. (CI's own regression tests use far smaller counts — 6-80 games — to stay
+  lockstep (parity of legal moves/SAN/FEN/winner), and the same for Atomic and Duck Chess. (CI's own regression tests use far smaller counts — 6-80 games — to stay
   fast on every commit; this is the same methodology at a scale only a schedule can afford.)
 - `scripts/nightly-fuzz-online.mjs` — **200** real Fog of War games plus **200** real Giveaway games
-  plus **200** real Atomic games played end-to-end through the actual running server/socket protocol (not a simulation), checking for
+  plus **200** real Atomic games plus **200** real Duck Chess games played end-to-end through the actual running server/socket protocol (not a simulation), checking for
   genuine client/server desyncs (as opposed to the one *expected* class — see §5). In Giveaway every
   move comes from the mobile app's own legal-move set and must be accepted; ~30% of turns also first
   submit a deliberately illegal move (a non-capturing move while a capture is mandatory) which the
   server must refuse, and every `game_over` must match the mobile app's own winner detection. Atomic is
   fuzzed the same way (illegal probes are pseudo-legal moves Atomic forbids; `game_over` reasons `atomic`/
-  `checkmate`/`stalemate`/`draw` must match the mobile app's own judgement).
+  `checkmate`/`stalemate`/`draw` must match the mobile app's own judgement). Duck Chess's probes are a move the
+  duck blocks and a legal move with a bad duck (missing, occupied, or its own square) — each must be refused with the
+  room left untouched — and every ack / `opponent_move` must carry the duck square the mobile app expects.
 
 **Visibility when something fails:**
 - Both scripts write a markdown report (`nightly-fuzz-report.md`, `nightly-fuzz-online-report.md`)
@@ -143,3 +151,41 @@ Nothing above claims equal depth everywhere — chess engine correctness and Fog
 deepest investment this round because that's where every bug this project has actually found so
 far has lived; the rest is covered to the extent a focused pass could reach, with gaps named
 rather than hidden.
+
+## 9. Duck Chess (server side) — design, decisions and known limits
+
+The rules are in `src/game/duckChess.ts` (a verbatim mirror of the mobile app's rules block, guarded by
+`test-duck.mjs`'s no-drift check) on top of `RoomChessEngine`'s opt-in `duckChess`/`duckSquare` options. The mobile
+app's `TESTING.md` §8 describes the rules and the UI.
+
+**How a turn is validated (`RoomManager.applyMove`).** The duck's square is not in the FEN, so the room keeps it
+(`room.duckSquare`) and a turn arrives as `make_move { from, to, promotion?, duckTo? }`:
+1. The move is tried on a SCRATCH engine built from `{ room FEN, room.duckSquare }`. Anything the duck blocks, or that is
+   not pseudo-legal, is refused ("Invalid move.").
+2. Unless that move captures a king, `duckTo` must be a legal placement on the post-move position: an empty square that is
+   not the one the duck already stands on. Missing, occupied, unchanged or malformed values refuse the **whole turn**; the
+   room (engine, duck, clocks, move list) is untouched, so the player can resubmit.
+3. Only then does the scratch engine replace `room.engine`, the duck moves, and the move is recorded with `duck`.
+4. A king capture ends the game (reason `duckChess`, winner = mover) and ignores any `duckTo`; if the side to move has no
+   regular move at all, the game is a draw. Clocks/increment are applied once per turn, at the end.
+
+**Decisions worth knowing**
+- No check anywhere: moving into attack and ignoring a "check" are legal. Castling therefore has no attack restriction
+  (`RoomChessEngine.generateRaw` adds back the castles chess.js withholds) but IS blocked when the duck sits on a square the
+  king or rook crosses. This differs from Fog of War, which keeps chess.js's attack-based castling rule.
+- Wire format: `opponent_move` / `spectator_move` carry `duck` (this turn's placement; absent after a king capture) and
+  `duckSquare` (where it stands now); the ack carries `duckSquare`; `rejoin`/spectate state carries `isDuckChess`,
+  `duckSquare` and a `duck` per move. Saved PGNs get `[Variant "Duck"]` and a `{@sq}` comment after each move.
+- Duck Chess cannot combine with any other variant (rejected on `join_queue`/`create_challenge`); tournaments and Setup
+  Chess never create Duck rooms.
+
+**How it is tested:** see §1 (`test:duck`, the Duck Chess block of `test-multiplayer.mjs` — a real socket game ending in a
+king capture) and §2 (nightly logic parity + online fuzz with blocked-move and bad-duck probes). Mutation-checked: seven
+deliberate breakages (no duck required, the duck allowed to stay put, sliding over the duck, castling across it, the wrong
+game-over reason, attack-restricted castling, blockade not a draw) each fail at least one check.
+
+**Known limits**
+- `scripts/test-duck.mjs` drives `RoomManager` with a stub socket server, and the socket test covers one full game; reconnect
+  mid-turn is covered only by reasoning (a turn is atomic, so a rejoin never sees half of one), not by a dedicated test.
+- SAN disambiguation comes from chess.js's own legal-move list (king safety, no duck), so a move can occasionally carry an
+  unnecessary disambiguator — cosmetic only.

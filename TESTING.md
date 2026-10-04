@@ -48,6 +48,10 @@ Triggers on every push/PR to `main`. One job:
      carry the untouched sentinel, with a timed room as the control), exact-match pairing, and abandonment still
      applying (it is not Daily). Mutation-checked: breaking the clock guard, the timer guard or the validator each
      fails it.
+   - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
+     checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
+     `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
+     through the real server with the mobile app's own move generation. Two instances can play each other as a smoke test.
 
 **This blocks merges only once branch protection is turned on in the GitHub repo settings** — that
 one step needs a human with admin access to this repo (`Settings → Branches → Branch protection

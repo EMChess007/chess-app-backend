@@ -86,6 +86,15 @@ checkout/Postgres setup as CI, then:
   both reports embedded — and closes it automatically the next time the run passes.
 - GitHub also emails the workflow file's last editor whenever a scheduled run fails, with no
   extra setup, as a second, zero-config signal.
+- **Harness trap (the 2026-10-05 failure, `timed out waiting for "match_found"` in one Giveaway game of 800 pairings):**
+  a test harness must attach its `match_found` listener *before* emitting `join_queue`. The second player's
+  join gets its ack and `match_found` back to back; on a busy runner both frames are parsed in one pass, the ack only
+  *queues* the awaiting code, and `match_found` fires with no listener — so `await emitAck(...); return waitFor(...)`
+  loses it. It was a harness race, not a server or rules bug (the same run's logic fuzz had 0 mismatches). Fixed in
+  every pairing site of the nightly online fuzz and `test-multiplayer.mjs`; `test-multiplayer.mjs` also has a
+  per-commit section that stalls a client's event loop for 150 ms while it is paired, which the old pattern loses
+  every time. Earlier nightly failures (2026-10-03/04) were unrelated infrastructure problems (tsx/ESM loading and the
+  workflow's issue permission) — see the run history; issue #1 is the first one the workflow could open.
 
 ## 3. The permanent regression test suite (`scripts/test-fogOfWar*.mjs`)
 

@@ -68,6 +68,17 @@ function emitAck(socket, event, payload) {
   });
 }
 
+/**
+ * Resolves with the next `event` on `socket` — and, because `socket.once` only sees events that arrive AFTER it is
+ * called, THE LISTENER MUST BE ATTACHED BEFORE the emit that provokes the event.
+ *
+ * THE TRAP (it failed the nightly once in ~800 pairings, as 'timed out waiting for "match_found"'): the second
+ * player's join_queue makes the server send the ack and match_found back to back. If both frames arrive in one network
+ * read (a busy CI runner), the socket parses them in a single synchronous pass: the ack callback only QUEUES the
+ * awaiting code, and match_found fires before it runs — with nobody listening yet. Writing
+ * `await emitAck(join_queue); return waitFor(match_found)` is therefore a race; register the listener first.
+ * (Not a server bug: the real app keeps a permanent match_found listener.)
+ */
 function waitFor(socket, event, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`timed out waiting for "${event}"`)), timeoutMs);
@@ -89,13 +100,17 @@ async function playOneGame(gameIndex) {
 
   const [matchA, matchB] = await Promise.all([
     (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(alice, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
-      return waitFor(alice, 'match_found');
+      return matchFound;
     })(),
     (async () => {
       await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(bob, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
-      return waitFor(bob, 'match_found');
+      return matchFound;
     })(),
   ]);
 
@@ -177,13 +192,17 @@ async function playGiveawayGame(gameIndex) {
 
   const [matchA, matchB] = await Promise.all([
     (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(alice, 'join_queue', { timeControl, isGiveaway: true });
-      return waitFor(alice, 'match_found');
+      return matchFound;
     })(),
     (async () => {
       await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(bob, 'join_queue', { timeControl, isGiveaway: true });
-      return waitFor(bob, 'match_found');
+      return matchFound;
     })(),
   ]);
 
@@ -271,13 +290,17 @@ async function playAtomicGame(gameIndex) {
 
   const [matchA] = await Promise.all([
     (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(alice, 'join_queue', { timeControl, isAtomic: true });
-      return waitFor(alice, 'match_found');
+      return matchFound;
     })(),
     (async () => {
       await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(bob, 'join_queue', { timeControl, isAtomic: true });
-      return waitFor(bob, 'match_found');
+      return matchFound;
     })(),
   ]);
 
@@ -376,13 +399,17 @@ async function playDuckGame(gameIndex) {
 
   const [matchA] = await Promise.all([
     (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(alice, 'join_queue', { timeControl, isDuckChess: true });
-      return waitFor(alice, 'match_found');
+      return matchFound;
     })(),
     (async () => {
       await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {}); // no unhandled rejection if the join fails first; the caller still sees it
       await emitAck(bob, 'join_queue', { timeControl, isDuckChess: true });
-      return waitFor(bob, 'match_found');
+      return matchFound;
     })(),
   ]);
 

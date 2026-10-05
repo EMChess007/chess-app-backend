@@ -165,6 +165,53 @@ export function activeJumpSquare(state: SpellChessState): string | null {
   return state.pendingJump?.square ?? null;
 }
 
+/**
+ * Everything one Spell Chess turn needs to VALIDATE or REPLAY its move, derived in the one place that knows which
+ * state each input must be read from. Every call site (RoomManager.applyMove, OnlineGameScreen's live and rejoin
+ * replays) goes through this so the order of operations cannot be re-derived wrongly.
+ *
+ * THE TRAP (it let a frozen player escape their own freeze): castFreeze overwrites `pendingFreeze`, and the pending
+ * freeze that restricts the mover RIGHT NOW is exactly the one it overwrites. So:
+ *  - `frozenSquares` is read from the state BEFORE this turn's cast. Freeze only ever restricts the opponent's NEXT
+ *    move; read it after the cast and a mover who is frozen and casts their own Freeze finds nothing frozen.
+ *  - `jumpSquare` is read from the state AFTER the cast: a Jump takes effect at once, for the caster's own move.
+ *  - `freezeZone` is the zone being cast THIS turn (null when no Freeze was cast, or the cast was not allowed). It —
+ *    never `frozenSquares` — is what may waive check (checkIsWaivedByFreeze).
+ * Expiry itself is separate and correct: a freeze lives until its restricted color has moved (afterSpellChessMove).
+ */
+export interface SpellTurnContext {
+  stateAfterCast: SpellChessState;
+  frozenSquares: string[];
+  jumpSquare: string | null;
+  freezeZone: string[] | null;
+}
+
+export function spellTurnContext(
+  state: SpellChessState,
+  mover: PieceColor,
+  cast: { type: 'freeze'; center: string } | { type: 'jump'; square: string } | null | undefined
+): SpellTurnContext {
+  const stateAfterCast = !cast ? state : cast.type === 'freeze' ? castFreeze(state, mover, cast.center) : castJump(state, mover, cast.square);
+  return {
+    stateAfterCast,
+    frozenSquares: frozenSquaresFor(state, mover),
+    jumpSquare: activeJumpSquare(stateAfterCast),
+    freezeZone: cast && cast.type === 'freeze' && stateAfterCast !== state ? getFreezeZoneSquares(cast.center) : null,
+  };
+}
+
+/** For a standard castling move — a king travelling two files along its home rank — the square of the rook that
+ * castling moves as well; null for anything else. (Spell Chess excludes Chess960, so the rooks are on the a/h files.)
+ * A frozen piece cannot move, and castling moves the rook too: a Freeze covering that rook forbids castling even when
+ * the king itself is free. */
+export function castlingRookOrigin(from: string, to: string, pieceType: string): string | null {
+  if (pieceType !== 'k' || fileOf(from) !== 4 || rankOf(to) !== rankOf(from)) return null;
+  if (rankOf(from) !== 0 && rankOf(from) !== 7) return null;
+  if (fileOf(to) === 6) return nameOf(7, rankOf(from));
+  if (fileOf(to) === 2) return nameOf(0, rankOf(from));
+  return null;
+}
+
 // --- End of the shared rules block --------------------------------------------------------------------------------
 
 // --- Server-only helpers --------------------------------------------------------------------------------------

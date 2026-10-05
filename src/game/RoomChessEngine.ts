@@ -14,7 +14,7 @@ import {
 } from './atomic.js';
 import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './chess960.js';
 import { isCastleBlockedByDuck, isMoveBlockedByDuck } from './duckChess.js';
-import { getJumpAugmentedCaptures } from './spellChess.js';
+import { castlingRookOrigin, getJumpAugmentedCaptures } from './spellChess.js';
 
 const FILES = 'abcdefgh';
 
@@ -393,6 +393,15 @@ export class RoomChessEngine {
 
   // --- Spell Chess (see spellChess.ts) -----------------------------------
 
+  /** True when from->to is a castling move whose ROOK sits in a frozen square — the server-side twin of the mobile
+   * app's identical ChessEngine.castlesWithFrozenRook (castling moves the rook as well as the king). */
+  private castlesWithFrozenRook(from: string, to: string): boolean {
+    if (this.frozenSquares.length === 0) return false;
+    const piece = this.getPieceAt(from);
+    const rook = piece ? castlingRookOrigin(from, to, piece.type) : null;
+    return rook !== null && this.frozenSquares.includes(rook);
+  }
+
   /** Applies a Spell Chess move — the server-side twin of the mobile app's identical
    * ChessEngine.moveSpellChess (see that file for the full rationale): a frozen origin is always
    * rejected; a Jump-augmented capture (if one matches `from`/`to` exactly) is force-applied via
@@ -402,6 +411,7 @@ export class RoomChessEngine {
    * normal. See RoomChessEngineOptions.spellChess. */
   private moveSpellChess(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q'): AppliedMove | null {
     if (this.frozenSquares.includes(from)) return null;
+    if (this.castlesWithFrozenRook(from, to)) return null;
 
     if (this.jumpSquare) {
       const match = getJumpAugmentedCaptures(this, this.jumpSquare, this.chess.turn()).find((m) => m.from === from && m.to === to);

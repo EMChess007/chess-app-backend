@@ -18,6 +18,7 @@
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",
     "test:duck": "tsx scripts/test-duck.mjs",
+    "test:spell": "tsx scripts/test-spell.mjs",
     "test:unlimited": "tsx scripts/test-unlimited.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs"
   },

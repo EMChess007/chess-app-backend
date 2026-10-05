@@ -42,6 +42,13 @@ Triggers on every push/PR to `main`. One job:
      unchanged duck square refuses the WHOLE turn, moves the duck blocks are refused, king capture = reason
      `duckChess` with no placement, blockade = draw, castling blocked across the duck but not by attacks), and
      parity with the mobile app over 100 random games (legal moves, legal duck squares, SAN, FEN, blockade).
+   - `npm run test:spell` (`scripts/test-spell.mjs`, no server needed) — Spell Chess's server side: a **no-drift check** of the
+     shared rules block in `src/game/spellChess.ts` against the mobile `src/logic/spellChess.ts`, `RoomManager.applyMove` as
+     the authority for a spell turn (cast, then move), and parity with the mobile engine over random games. Regression
+     cases: a Freeze lasts exactly the victim's next move; a FROZEN player who casts their own Freeze is still frozen that
+     turn (the server used to read the frozen squares after the cast overwrote them); freezing every checking piece waives
+     check (the server used to pass the wrong zone); castling is refused when the rook it moves is frozen. Mutation-checked
+     against each of those three server defects.
    - `npm run test:unlimited` (`scripts/test-unlimited.mjs`, no server needed) — "No time limit" (live-only, no clock):
      time-control validation (finite numbers; an unlimited control may have no increment), an unlimited room's clock
      never ticks or gains an increment and schedules no timeout (move acks, `opponent_move` and rejoin payloads all

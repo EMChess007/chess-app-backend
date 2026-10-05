@@ -12,9 +12,8 @@ import {
   castFreeze,
   castJump,
   checkIsWaivedByFreeze,
-  activeJumpSquare,
-  frozenSquaresFor,
   getFreezeZoneSquares,
+  spellTurnContext,
   getSpellChessWinner,
   initialSpellChessState,
   type SpellChessState,
@@ -335,9 +334,10 @@ export class RoomManager {
         return { ok: false, error: 'Invalid spell cast.' };
       }
 
-      const frozenSquares = frozenSquaresFor(stateAfterCast, mover);
-      const jumpSquare = activeJumpSquare(stateAfterCast);
-      const freezeEscapeActive = checkIsWaivedByFreeze(room.engine, mover, frozenSquares);
+      // Through spellTurnContext, which reads the frozen squares from the state BEFORE this cast (a frozen mover who
+      // casts their own Freeze must stay frozen) and the check-waiver from the zone cast now — see its doc comment.
+      const { frozenSquares, jumpSquare, freezeZone } = spellTurnContext(room.spellState, mover, appliedCast);
+      const freezeEscapeActive = freezeZone ? checkIsWaivedByFreeze(room.engine, mover, freezeZone) : false;
       const scratch = new RoomChessEngine(room.engine.getFen(), { spellChess: true, frozenSquares, jumpSquare, freezeEscapeActive });
       const probe = scratch.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
       if (!probe) return { ok: false, error: 'Invalid move.' };

@@ -14,6 +14,7 @@ import {
 } from './atomic.js';
 import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './chess960.js';
 import { isCastleBlockedByDuck, isMoveBlockedByDuck } from './duckChess.js';
+import { HORDE_FIRST_RANK_DOUBLE_STEP_ALLOWS_EN_PASSANT, getHordeWinnerFromFen, hordeFirstRankDoubleStep } from './horde.js';
 import { castlingRookOrigin, getJumpAugmentedCaptures } from './spellChess.js';
 
 const FILES = 'abcdefgh';
@@ -172,6 +173,16 @@ export interface RoomChessEngineOptions {
   frozenSquares?: string[];
   jumpSquare?: string | null;
   freezeEscapeActive?: boolean;
+  /**
+   * Horde only -- the server-side twin of the mobile app's identical ChessEngine option (see src/logic/horde.ts there,
+   * mirrored in ./horde.ts). chess.js's own legality stays authoritative (it tolerates a missing White king when loaded
+   * with skipValidation -- implied by this option -- and applies no king-safety filter to a side that has none), plus
+   * ONE synthesized move: the rank-1 double step (rank 1 -> 3), applied through chess.js's unvalidated _makeMove.
+   * getStatus()/isGameOver() are overridden because chess.js gets two Horde cases wrong: it calls "Black king + one
+   * White bishop" insufficient material (a draw), and a White side with nothing left "stalemate" (that is Black's WIN,
+   * which RoomManager checks first via getHordeWinnerFromFen). Not combinable with any other variant.
+   */
+  horde?: boolean;
 }
 
 /**
@@ -188,6 +199,7 @@ export class RoomChessEngine {
   private duckChess: boolean;
   private duckSquare: string | null;
   private spellChess: boolean;
+  private horde: boolean;
   private frozenSquares: string[];
   private jumpSquare: string | null;
   private freezeEscapeActive: boolean;
@@ -202,10 +214,11 @@ export class RoomChessEngine {
     this.duckChess = options?.duckChess ?? false;
     this.duckSquare = options?.duckChess ? (options.duckSquare ?? null) : null;
     this.spellChess = options?.spellChess ?? false;
+    this.horde = options?.horde ?? false;
     this.frozenSquares = options?.spellChess ? (options.frozenSquares ?? []) : [];
     this.jumpSquare = options?.spellChess ? (options.jumpSquare ?? null) : null;
     this.freezeEscapeActive = options?.spellChess ? (options.freezeEscapeActive ?? false) : false;
-    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic || this.duckChess || this.spellChess })) : new Chess();
+    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic || this.duckChess || this.spellChess || this.horde })) : new Chess();
     this.atomicCurrentFen = fen ?? START_FEN;
     this.chess960 = options?.chess960 ?? false;
     this.files = getChess960BackRankFiles(options?.initialFen ?? fen ?? START_FEN);
@@ -218,6 +231,7 @@ export class RoomChessEngine {
   move(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q'): AppliedMove | null {
     if (this.atomic) return this.moveAtomic(from, to, promotion);
     if (this.spellChess) return this.moveSpellChess(from, to, promotion);
+    if (this.horde && this.hordeDoubleStepTarget(from) === to) return this.applyHordeDoubleStep(from, to);
     if (this.chess960) {
       const side = this.matchChess960CastleAttempt(from, to);
       if (side) {
@@ -239,6 +253,15 @@ export class RoomChessEngine {
 
   getStatus(): GameStatus {
     if (this.atomic) return getAtomicStatus(this.getAtomicPosition(), this.getAtomicLegal());
+    if (this.horde) {
+      // Never chess.js's isDraw(): its insufficient-material rule misreads Horde (see RoomChessEngineOptions.horde). The
+      // fifty-move rule is the only automatic draw besides stalemate; "White has nothing left" is RoomManager's win check.
+      if (this.chess.isCheckmate()) return 'checkmate';
+      if (this.chess.isStalemate()) return 'stalemate';
+      if (this.chess.isDrawByFiftyMoves()) return 'draw';
+      if (this.chess.isCheck()) return 'check';
+      return 'playing';
+    }
     if (this.chess.isCheckmate()) return 'checkmate';
     if (this.chess.isStalemate()) return 'stalemate';
     if (this.chess.isDraw()) return 'draw';
@@ -249,6 +272,11 @@ export class RoomChessEngine {
   isGameOver(): boolean {
     if (this.atomic) {
       if (getAtomicKingWinner(this.getAtomicPosition())) return true;
+      const status = this.getStatus();
+      return status === 'checkmate' || status === 'stalemate' || status === 'draw';
+    }
+    if (this.horde) {
+      if (getHordeWinnerFromFen(this.getFen())) return true;
       const status = this.getStatus();
       return status === 'checkmate' || status === 'stalemate' || status === 'draw';
     }
@@ -389,6 +417,27 @@ export class RoomChessEngine {
     // every ply (and loadGiveawayFen keeps a promoted second king through that rebuild).
     this.chess = loadGiveawayFen(this.chess.fen({ forceEnpassantSquare: true }));
     return { ...applied, san: applied.san.replace(/[+#]$/, '') };
+  }
+
+  // --- Horde (see horde.ts) ----------------------------------------------
+
+  /** Where the White pawn on `square` may go with the Horde-only rank-1 double step, or null -- the server-side twin of the
+   * mobile app's identical ChessEngine.hordeDoubleStepTarget. Also null unless it is White's turn and the pawn really stands there. */
+  private hordeDoubleStepTarget(square: string): string | null {
+    const piece = this.chess.get(square as ChessJsSquare);
+    if (!piece || piece.type !== 'p' || piece.color !== 'w' || this.chess.turn() !== 'w') return null;
+    return hordeFirstRankDoubleStep(square, (sq) => this.chess.get(sq as ChessJsSquare) !== undefined);
+  }
+
+  /** Plays the rank-1 double step chess.js cannot generate: a hand-built move with chess.js's BIG_PAWN flag (4) through the
+   * unvalidated _makeMove, so the en passant square is set like any double step (HORDE_FIRST_RANK_DOUBLE_STEP_ALLOWS_EN_PASSANT
+   * picks the flag). White has no king to leave in check and the squares were checked empty, so no legality filter is needed. */
+  private applyHordeDoubleStep(from: string, to: string): AppliedMove | null {
+    const raw: InternalMove = { color: 'w', from: indexFromSquare(from), to: indexFromSquare(to), piece: 'p', flags: HORDE_FIRST_RANK_DOUBLE_STEP_ALLOWS_EN_PASSANT ? 4 /* BIG_PAWN: sets the en passant square */ : 1 /* NORMAL: no en passant */ };
+    const internals = this.chess as unknown as ChessInternals;
+    const pretty = new ChessJsMove(this.chess, raw);
+    internals._makeMove(raw);
+    return toAppliedMove(pretty);
   }
 
   // --- Spell Chess (see spellChess.ts) -----------------------------------

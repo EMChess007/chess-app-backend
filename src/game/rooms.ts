@@ -18,6 +18,7 @@ import {
   initialSpellChessState,
   type SpellChessState,
 } from './spellChess.js';
+import { HORDE_START_FEN, getHordeWinnerFromFen } from './horde.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
@@ -71,6 +72,8 @@ interface Room {
   /** Duck Chess only: where the duck stands now (null before White's first move) — see duckChess.ts. */
   duckSquare: string | null;
   spellChess: boolean;
+  /** Horde -- see horde.ts. */
+  horde: boolean;
   /** Spell Chess only: charges/cooldowns/pending Freeze+Jump effects — see spellChess.ts. */
   spellState: SpellChessState;
   /** Atomic only: the FEN of the starting position and after every move, for the history-based threefold
@@ -120,6 +123,8 @@ export interface CreateRoomParams {
   atomic: boolean;
   duckChess: boolean;
   spellChess: boolean;
+  /** Horde -- see horde.ts: the room starts from HORDE_START_FEN (36 White pawns, no White king). */
+  horde: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
    * both players' armies. Every other variant's production caller omits it and still self-generates
    * its own starting position (classical, or a random Chess960 back rank) as before; the regression
@@ -178,7 +183,7 @@ export class RoomManager {
 
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
-    const initialFen = params.initialFen ?? (params.chess960 ? generateChess960Position() : START_FEN);
+    const initialFen = params.initialFen ?? (params.horde ? HORDE_START_FEN : params.chess960 ? generateChess960Position() : START_FEN);
     const engine = new RoomChessEngine(initialFen, {
       chess960: params.chess960,
       initialFen,
@@ -186,6 +191,7 @@ export class RoomManager {
       atomic: params.atomic,
       duckChess: params.duckChess,
       spellChess: params.spellChess,
+      horde: params.horde,
     });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
@@ -205,6 +211,7 @@ export class RoomManager {
       duckChess: params.duckChess,
       duckSquare: null,
       spellChess: params.spellChess,
+      horde: params.horde,
       spellState: initialSpellChessState(),
       atomicFens: [initialFen],
       timeControl: params.timeControl,
@@ -504,6 +511,21 @@ export class RoomManager {
       } else {
         this.scheduleTimeout(room);
       }
+    } else if (room.horde) {
+      // Horde: Black wins the instant White has no pieces left -- checked FIRST, because chess.js reports that position as
+      // STALEMATE (a draw): White to move, no moves, no check. Everything else is chess.js's own judgement via the horde-aware
+      // getStatus()/isGameOver(): White wins by checkmating Black's king, stalemate is a draw, and insufficient material never
+      // ends a Horde game.
+      const hordeWinner = getHordeWinnerFromFen(room.engine.getFen());
+      if (hordeWinner) {
+        this.endGame(room, 'horde', hordeWinner);
+      } else if (room.engine.isGameOver()) {
+        const status = room.engine.getStatus();
+        const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
+        this.endGame(room, reason, status === 'checkmate' ? mover : null);
+      } else {
+        this.scheduleTimeout(room);
+      }
     } else {
       // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
       // outright regardless of the rest of the position (check/material/etc. don't matter), and
@@ -587,6 +609,7 @@ export class RoomManager {
         isDuckChess: room.duckChess,
         duckSquare: room.duckChess ? room.duckSquare : undefined,
         isSpellChess: room.spellChess,
+        isHorde: room.horde,
         spellState: room.spellChess ? room.spellState : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
@@ -751,6 +774,7 @@ export class RoomManager {
         isDuckChess: room.duckChess,
         duckSquare: room.duckChess ? room.duckSquare : undefined,
         isSpellChess: room.spellChess,
+        isHorde: room.horde,
         spellState: room.spellChess ? room.spellState : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
@@ -859,7 +883,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : undefined);
+    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : undefined);
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));

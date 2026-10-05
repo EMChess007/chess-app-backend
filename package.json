@@ -19,6 +19,7 @@
     "test:atomic": "tsx scripts/test-atomic.mjs",
     "test:duck": "tsx scripts/test-duck.mjs",
     "test:spell": "tsx scripts/test-spell.mjs",
+    "test:horde": "tsx scripts/test-horde.mjs",
     "test:unlimited": "tsx scripts/test-unlimited.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs"
   },

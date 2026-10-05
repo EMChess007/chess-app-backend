@@ -30,7 +30,8 @@ export type GameOverReason =
   | 'giveaway'
   | 'atomic'
   | 'duckChess'
-  | 'spellChess';
+  | 'spellChess'
+  | 'horde';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -49,6 +50,8 @@ export interface JoinQueuePayload {
   isDuckChess?: boolean;
   /** Spell Chess — see spellChess.ts. Mutually exclusive with every other variant. */
   isSpellChess?: boolean;
+  /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
+  isHorde?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -112,6 +115,7 @@ export interface MatchFoundPayload {
   isAtomic: boolean;
   isDuckChess: boolean;
   isSpellChess: boolean;
+  isHorde: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -176,6 +180,7 @@ export interface RejoinStatePayload {
   /** Duck Chess only — where the duck stands now. */
   duckSquare?: string | null;
   isSpellChess: boolean;
+  isHorde: boolean;
   /** Spell Chess only — charges/cooldowns/pending effects right now. */
   spellState?: SpellChessState;
   whiteMs: number;
@@ -219,6 +224,8 @@ export interface CreateChallengePayload {
   isAtomic?: boolean;
   isDuckChess?: boolean;
   isSpellChess?: boolean;
+  /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
+  isHorde?: boolean;
   timeControlLabel?: string;
 }
 

@@ -49,6 +49,14 @@ Triggers on every push/PR to `main`. One job:
      turn (the server used to read the frozen squares after the cast overwrote them); freezing every checking piece waives
      check (the server used to pass the wrong zone); castling is refused when the rook it moves is frozen. Mutation-checked
      against each of those three server defects.
+   - `npm run test:horde` (`scripts/test-horde.mjs`, no server needed) — Horde's server side: a **no-drift check** of the shared
+     rules block in `src/game/horde.ts` against the mobile `src/logic/horde.ts`, `RoomManager.applyMove` as the authority
+     (the 36-pawn start; the positional double step — rank 1 AND rank 2 may double-step, blocked squares refuse it, rank 3
+     never may, a pawn that stepped 1->2 may still double-step later; White wins by checkmate; Black wins by capturing
+     every White piece with reason `horde` rather than the "stalemate" chess.js reports for it; a stalemate is a draw;
+     "Black king vs a lone bishop" is not an insufficient-material draw; the saved PGN is tagged `[Variant "Horde"]`), and
+     parity with the mobile engine over 10 random games (every offered move accepted with the same FEN, 43k sampled
+     moves refused, same game-over verdicts). Mutation-checked against six server defects.
    - `npm run test:unlimited` (`scripts/test-unlimited.mjs`, no server needed) — "No time limit" (live-only, no clock):
      time-control validation (finite numbers; an unlimited control may have no increment), an unlimited room's clock
      never ticks or gains an increment and schedules no timeout (move acks, `opponent_move` and rejoin payloads all
@@ -215,3 +223,35 @@ game-over reason, attack-restricted castling, blockade not a draw) each fail at 
   mid-turn is covered only by reasoning (a turn is atomic, so a rejoin never sees half of one), not by a dedicated test.
 - SAN disambiguation comes from chess.js's own legal-move list (king safety, no duck), so a move can occasionally carry an
   unnecessary disambiguator — cosmetic only.
+
+## 10. Horde (server side) — design, decisions and known limits
+
+The rules are in `src/game/horde.ts` (a verbatim mirror of the mobile app's rules block, guarded by `test-horde.mjs`'s no-drift
+check) on top of `RoomChessEngine`'s opt-in `horde` option. The mobile app's `src/logic/horde.ts` header has the full rules
+(chess.com: 36 White pawns, no White king; White wins by checkmate, Black by capturing everything; stalemate is a draw).
+
+**Much less custom than Giveaway/Atomic/Duck Chess.** chess.js (loaded with skipValidation, which `horde` implies) already
+tolerates a missing White king and plays Black's legal moves, checkmate and stalemate correctly. The server adds exactly:
+- the **rank-1 double step** (rank 1 -> 3), the one move chess.js cannot generate (it already does rank 2 -> 4), applied through
+  chess.js's unvalidated `_makeMove` with its BIG_PAWN flag;
+- overrides of the two things chess.js gets wrong: `isInsufficientMaterial` (it calls "Black king + a lone White bishop" a
+  draw), and a White side with no pieces left ("stalemate" to chess.js, but Black's WIN) — `RoomManager.applyMove` checks
+  `getHordeWinnerFromFen` BEFORE asking the engine whether the game is over, and the game ends with reason `horde`.
+
+**Decisions worth knowing**
+- **En passant after a rank-1 double step is allowed** (`HORDE_FIRST_RANK_DOUBLE_STEP_ALLOWS_EN_PASSANT`, shared block). chess.com
+  says only "en passant captures are allowed"; Lichess (and the chessops library the mobile tests use as an oracle) forbids
+  it for this one case. Flip the constant in BOTH copies to follow Lichess.
+- Black keeps its castling rights (the start FEN is `... w kq - 0 1`); White has none to lose.
+- No threefold repetition (same as every non-Atomic mode); the fifty-move rule is read from the FEN's halfmove clock.
+- Wire format: `isHorde` on `join_queue`/`create_challenge`/`match_found`/rejoin/spectate state, `horde` as a `game_over`
+  reason. Horde cannot combine with any other variant (rejected on `join_queue`/`create_challenge`); tournaments and Setup Chess
+  never create Horde rooms. Saved PGNs get `[Variant "Horde"]` plus the SetUp/FEN headers (the start is not standard).
+
+**How it is tested:** see §1 (`test:horde`, the Horde block of `test-multiplayer.mjs` — a real socket game from the 36-pawn
+start to a resignation) and §2 (nightly logic parity — at most 400 games, since Horde games are long — and online fuzz with
+illegal-move probes, checking every `game_over` against the mobile verdict).
+
+**Known limits**
+- The socket test plays only a short game; the endings (mate, capture-everything, stalemate) are covered through
+  `RoomManager` with a stub socket server in `test-horde.mjs` and by the nightly online fuzz, not by a scripted socket game.

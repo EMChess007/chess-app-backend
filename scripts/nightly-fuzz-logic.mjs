@@ -30,6 +30,7 @@ import { getGiveawayMoves as serverGiveawayMoves, getGiveawayWinner as serverGiv
 import { generateAtomicMoves, getAtomicKingWinner, squareName } from '../src/game/atomic.ts';
 import { getLegalDuckPlacementSquares as clientDuckSquares, hasNoDuckMoves as clientDuckBlockade } from '../../src/logic/duckChess.ts';
 import { emptySquares, hasNoDuckMoves as serverDuckBlockade } from '../src/game/duckChess.ts';
+import { HORDE_START_FEN, getHordeMoves as clientHordeMoves } from '../../src/logic/horde.ts';
 
 const GAMES = Number(process.argv[2] ?? 3000);
 const MAX_PLIES = Number(process.argv[3] ?? 80);
@@ -247,7 +248,80 @@ function fuzzDuckParity() {
   return { label: 'Duck Chess parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
 }
 
-console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway, Atomic and Duck Chess parity.\n`);
+/**
+ * Horde PARITY: random games from the 36-pawn start through BOTH implementations. At every ply every move the mobile
+ * engine offers (getHordeMoves — including the rank-1 double step chess.js cannot generate) must be accepted by the server
+ * engine with the same resulting FEN, a sample of moves the mobile engine does NOT offer must be refused by the server, and
+ * both must agree on the game-over verdict and status. Horde games are long (36 pawns), and every ply costs a fresh engine per
+ * candidate, so this section plays at most 400 games however many the other sections play.
+ */
+function fuzzHordeParity() {
+  const mismatches = [];
+  let totalPlies = 0;
+  let totalChecked = 0;
+  let totalGames = 0;
+  const squares = [];
+  for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) squares.push(`${f}${r}`);
+  const gameCount = Math.min(GAMES, 400);
+  for (let g = 0; g < gameCount; g++) {
+    totalGames++;
+    let fen = HORDE_START_FEN;
+    for (let ply = 0; ply < MAX_PLIES * 2; ply++) {
+      const client = new ChessEngine(fen, { horde: true });
+      const server = new RoomChessEngine(fen, { horde: true });
+      if (server.isGameOver() !== client.isGameOver() || server.getStatus() !== client.getStatus()) {
+        mismatches.push({ kind: 'horde-verdict-differs', game: g, ply, fen, server: [server.getStatus(), server.isGameOver()], client: [client.getStatus(), client.isGameOver()] });
+        break;
+      }
+      if (client.isGameOver()) break;
+      const candidates = clientHordeMoves(client);
+      if (candidates.length === 0) break;
+      let broken = false;
+      for (const m of candidates) {
+        totalChecked++;
+        const s = new RoomChessEngine(fen, { horde: true });
+        const c = new ChessEngine(fen, { horde: true });
+        let a;
+        let b;
+        try {
+          a = s.move(m.from, m.to, m.promotion);
+          b = c.move(m.from, m.to, m.promotion);
+        } catch (err) {
+          mismatches.push({ kind: 'horde-apply-threw', game: g, ply, fen, move: m, error: String(err) });
+          broken = true;
+          break;
+        }
+        if (!a || !b || a.san !== b.san || s.getFen() !== c.getFen()) {
+          mismatches.push({ kind: 'horde-move-differs', game: g, ply, fen, move: m, server: a, client: b });
+          broken = true;
+          break;
+        }
+      }
+      if (broken) break;
+      const offered = new Set(candidates.map((m) => `${m.from}${m.to}`));
+      for (let probe = 0; probe < 20; probe++) {
+        const from = squares[randInt(64)];
+        const to = squares[randInt(64)];
+        if (from === to || offered.has(`${from}${to}`)) continue;
+        totalChecked++;
+        if (new RoomChessEngine(fen, { horde: true }).move(from, to, 'q')) {
+          mismatches.push({ kind: 'horde-server-accepts-illegal-move', game: g, ply, fen, move: { from, to } });
+          broken = true;
+          break;
+        }
+      }
+      if (broken) break;
+      const pick = candidates[randInt(candidates.length)];
+      const next = new ChessEngine(fen, { horde: true });
+      next.move(pick.from, pick.to, pick.promotion);
+      fen = next.getFen();
+      totalPlies++;
+    }
+  }
+  return { label: 'Horde parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
+}
+
+console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway, Atomic, Duck Chess and Horde parity.\n`);
 
 const results = [
   fuzzEngine('Mobile app (src/logic/ChessEngine.ts)', ChessEngine),
@@ -255,9 +329,10 @@ const results = [
   fuzzGiveawayParity(),
   fuzzAtomicParity(),
   fuzzDuckParity(),
+  fuzzHordeParity(),
 ];
 
-let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic + Duck Chess parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
+let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + Horde parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
 let anyFailure = false;
 
 for (const r of results) {

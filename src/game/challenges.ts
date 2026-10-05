@@ -16,6 +16,7 @@ export interface PendingChallenge {
   isAtomic: boolean;
   isDuckChess: boolean;
   isSpellChess: boolean;
+  isHorde: boolean;
   createdAt: number;
 }
 

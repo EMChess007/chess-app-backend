@@ -144,6 +144,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:spell
 
+      - name: Run Horde regression suite (server rules authority, no-drift check, parity with the mobile app)
+        working-directory: chess-app/backend
+        run: npm run test:horde
+
       - name: Run No time limit regression suite (unlimited clock, validation, pairing)
         working-directory: chess-app/backend
         run: npm run test:unlimited

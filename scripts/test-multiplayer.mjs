@@ -986,6 +986,77 @@ async function testDuckChessOnline() {
   bob.disconnect();
 }
 
+async function testHordeOnline() {
+  console.log('\n=== Horde: matchmaking, the 36-pawn start, a few turns, resignation ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const HORDE_FEN = 'rnbqkbnr/pppppppp/8/1PP2PP1/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP w kq - 0 1';
+
+  const hordeSeeker = await connect('Hilda');
+  const classicSeeker = await connect('Cyril');
+  check((await emitAck(hordeSeeker, 'join_queue', { timeControl, isHorde: true })).ok === true, 'Hilda queues for Horde');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Cyril queues for a classic game');
+  let wronglyPaired = false;
+  hordeSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Horde seeker and a classic seeker are never paired with each other');
+  await emitAck(hordeSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  hordeSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused4');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isHorde: true, isDuckChess: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Horde + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isHorde: true, isSpellChess: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  const alice = await connect('Hera');
+  const bob = await connect('Horace');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isHorde: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isHorde: true });
+      return matchFound;
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Horde seekers are paired');
+  check(matchA.isHorde === true && matchB.isHorde === true && matchA.isDuckChess === false && matchA.isAtomic === false, 'match_found tells both clients isHorde: true');
+  check(matchA.fen === HORDE_FEN && matchB.fen === HORDE_FEN, 'both start from the standard Horde position (36 White pawns, no White king)');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to) => emitAck(who.socket, 'make_move', { roomId, from, to });
+
+  check((await turn(white, 'e4', 'e6')).ok === false, 'e4-e6 is refused: a double step needs rank 1 or 2');
+  check((await turn(white, 'a1', 'a3')).ok === false, 'a1-a3 is refused: the pawn on a2 is in the way');
+  const blackSees = waitFor(black.socket, 'opponent_move');
+  const first = await turn(white, 'a4', 'a5');
+  check(first.ok === true && first.san === 'a5', '1.a5 is accepted');
+  const seen = await blackSees;
+  check(seen.san === 'a5' && seen.fen === 'rnbqkbnr/pppppppp/8/PPP2PP1/1PPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP b kq - 0 1', 'Black receives the move and the exact resulting position');
+  check((await turn(black, 'a7', 'a6')).ok === true, '1...a6');
+  check((await turn(white, 'd4', 'd5')).ok === true, '2.d5');
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  const resign = await emitAck(black.socket, 'resign', { roomId });
+  check(resign.ok === true, 'Black resigns');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'resignation' && wr.winner === 'w' && br.reason === 'resignation', 'both players get game_over {resignation, winner: white}');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function testNoTimeLimitOnline() {
   console.log('\n=== No time limit: live-only game with no clock ===');
   const unlimited = { initialSeconds: 0, incrementSeconds: 0 };
@@ -1107,6 +1178,7 @@ async function main() {
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
   await testDuckChessOnline();
+  await testHordeOnline();
   await testNoTimeLimitOnline();
   await testPairingSurvivesABusyClient();
 

@@ -1,6 +1,16 @@
 import type { PieceColor } from './RoomChessEngine.js';
+import type { SpellChessState } from './spellChess.js';
 
 export type { PieceColor };
+
+/** Client-submitted Spell Chess cast — the minimal shape; the server recomputes `squares` (Freeze) itself
+ * rather than trusting whatever the client sends, exactly like every other move input here. */
+export type SpellCastInput = { type: 'freeze'; center: string } | { type: 'jump'; square: string };
+
+/** The fuller, server-validated shape echoed back out on wire payloads — includes Freeze's `squares` (the
+ * server's own getFreezeZoneSquares(center), never the client's) so a recipient can highlight the zone without
+ * recomputing it. Mirrors the mobile app's SpellCast (src/types/chess.ts). */
+export type SpellCastWire = { type: 'freeze'; center: string; squares: string[] } | { type: 'jump'; square: string };
 
 export interface TimeControl {
   initialSeconds: number;
@@ -19,7 +29,8 @@ export type GameOverReason =
   | 'fogOfWar'
   | 'giveaway'
   | 'atomic'
-  | 'duckChess';
+  | 'duckChess'
+  | 'spellChess';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -36,6 +47,8 @@ export interface JoinQueuePayload {
   isAtomic?: boolean;
   /** Duck Chess — see duckChess.ts. Mutually exclusive with every other variant. */
   isDuckChess?: boolean;
+  /** Spell Chess — see spellChess.ts. Mutually exclusive with every other variant. */
+  isSpellChess?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -54,6 +67,9 @@ export interface MakeMovePayload {
   /** Duck Chess only — where the duck goes as the second half of the turn. Required with every move that does not
    * capture a king; the whole turn is refused if it is missing or not a legal placement. */
   duckTo?: string;
+  /** Spell Chess only — the spell (if any) cast immediately before this move, see spellChess.ts. At most one per
+   * turn; omitted on a turn that casts nothing. */
+  spell?: SpellCastInput;
 }
 
 export interface RejoinGamePayload {
@@ -95,6 +111,7 @@ export interface MatchFoundPayload {
   isGiveaway: boolean;
   isAtomic: boolean;
   isDuckChess: boolean;
+  isSpellChess: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -116,6 +133,10 @@ export interface OpponentMovePayload {
   /** Duck Chess only — the square the duck was just placed on (absent after a king capture) and where it stands now. */
   duck?: string;
   duckSquare?: string | null;
+  /** Spell Chess only — the spell (if any) cast immediately before this move, and the full resulting state
+   * (charges/cooldowns/pending effects) — see spellChess.ts. */
+  spell?: SpellCastWire;
+  spellState?: SpellChessState;
   fen: string;
   turn: PieceColor;
   whiteMs: number;
@@ -154,11 +175,14 @@ export interface RejoinStatePayload {
   isDuckChess: boolean;
   /** Duck Chess only — where the duck stands now. */
   duckSquare?: string | null;
+  isSpellChess: boolean;
+  /** Spell Chess only — charges/cooldowns/pending effects right now. */
+  spellState?: SpellChessState;
   whiteMs: number;
   blackMs: number;
   /** Each entry's fields are all omitted together for a Fog of War move this viewer never
    * witnessed (see redactMoveHistory) — always fully populated outside Fog of War. */
-  moves: { from?: string; to?: string; promotion?: string; san?: string; duck?: string }[];
+  moves: { from?: string; to?: string; promotion?: string; san?: string; duck?: string; spell?: SpellCastWire }[];
   /** Fog of War only — see MatchFoundPayload.visibleSquares; recomputed fresh for whoever's
    * rejoining/spectating. */
   visibleSquares?: string[];
@@ -194,6 +218,7 @@ export interface CreateChallengePayload {
   isGiveaway?: boolean;
   isAtomic?: boolean;
   isDuckChess?: boolean;
+  isSpellChess?: boolean;
   timeControlLabel?: string;
 }
 

@@ -70,16 +70,17 @@ interface PairableEntry {
   isGiveaway: boolean;
   isAtomic: boolean;
   isDuckChess: boolean;
+  isSpellChess: boolean;
 }
 
-/** Giveaway, Atomic and Duck Chess cannot be combined with any other variant (see game/giveaway.ts, atomic.ts,
- * duckChess.ts) — a client that sends one of them together with another flag is misbehaving, so reject it
- * instead of silently picking one. */
-function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown; isDuckChess?: unknown }): string | null {
-  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic, flags.isDuckChess];
-  if (!flags.isGiveaway && !flags.isAtomic && !flags.isDuckChess) return null;
+/** Giveaway, Atomic, Duck Chess and Spell Chess cannot be combined with any other variant (see game/giveaway.ts,
+ * atomic.ts, duckChess.ts, spellChess.ts) — a client that sends one of them together with another flag is
+ * misbehaving, so reject it instead of silently picking one. */
+function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown; isDuckChess?: unknown; isSpellChess?: unknown }): string | null {
+  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic, flags.isDuckChess, flags.isSpellChess];
+  if (!flags.isGiveaway && !flags.isAtomic && !flags.isDuckChess && !flags.isSpellChess) return null;
   if (all.filter(Boolean).length < 2) return null;
-  return `${flags.isGiveaway ? 'Giveaway' : flags.isAtomic ? 'Atomic' : 'Duck Chess'} cannot be combined with another variant.`;
+  return `${flags.isGiveaway ? 'Giveaway' : flags.isAtomic ? 'Atomic' : flags.isDuckChess ? 'Duck Chess' : 'Spell Chess'} cannot be combined with another variant.`;
 }
 
 function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
@@ -124,6 +125,7 @@ export function registerSocketHandlers(io: Server): void {
       giveaway: a.isGiveaway,
       atomic: a.isAtomic,
       duckChess: a.isDuckChess,
+      spellChess: a.isSpellChess,
     });
 
     const basePayload = {
@@ -137,6 +139,7 @@ export function registerSocketHandlers(io: Server): void {
       isGiveaway: a.isGiveaway,
       isAtomic: a.isAtomic,
       isDuckChess: a.isDuckChess,
+      isSpellChess: a.isSpellChess,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
     };
@@ -193,6 +196,7 @@ export function registerSocketHandlers(io: Server): void {
         isGiveaway: Boolean(payload.isGiveaway),
         isAtomic: Boolean(payload.isAtomic),
         isDuckChess: Boolean(payload.isDuckChess),
+        isSpellChess: Boolean(payload.isSpellChess),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -237,6 +241,7 @@ export function registerSocketHandlers(io: Server): void {
         isGiveaway: Boolean(payload.isGiveaway),
         isAtomic: Boolean(payload.isAtomic),
         isDuckChess: Boolean(payload.isDuckChess),
+        isSpellChess: Boolean(payload.isSpellChess),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -278,6 +283,7 @@ export function registerSocketHandlers(io: Server): void {
         isGiveaway: challenge.isGiveaway,
         isAtomic: challenge.isAtomic,
         isDuckChess: challenge.isDuckChess,
+        isSpellChess: challenge.isSpellChess,
       };
       const joinerEntry = {
         socketId: socket.id,
@@ -292,6 +298,7 @@ export function registerSocketHandlers(io: Server): void {
         isGiveaway: challenge.isGiveaway,
         isAtomic: challenge.isAtomic,
         isDuckChess: challenge.isDuckChess,
+        isSpellChess: challenge.isSpellChess,
       };
       // Same "no room until both blind armies are in" branch as join_queue above.
       if (challenge.isSetupChess) {

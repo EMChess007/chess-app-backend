@@ -33,8 +33,15 @@ export function buildPgn(initialFen: string, moves: AppliedMove[], result: strin
     startTurn,
     startMoveNumber,
     // Duck Chess: where the duck went rides along as a standard PGN comment, "e4 {@g6}" — mirrors the mobile
-    // app's buildPgn.
-    moves.map((m) => (m.duck ? `${m.san} {@${m.duck}}` : m.san))
+    // app's buildPgn. Spell Chess: the cast (if any) rides along the same way, prefixed before the move instead
+    // of after it, matching the mobile app's spellMoveNotation (e.g. "{F@e4} Nf3", "{J@d5} Rxd8").
+    moves.map((m) =>
+      m.duck
+        ? `${m.san} {@${m.duck}}`
+        : m.spell
+          ? `{${m.spell.type === 'freeze' ? 'F' : 'J'}@${m.spell.type === 'freeze' ? m.spell.center : m.spell.square}} ${m.san}`
+          : m.san
+    )
   );
 
   const tags = [`[Result "${result}"]`];

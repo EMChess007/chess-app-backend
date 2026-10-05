@@ -5,6 +5,20 @@ import { generateChess960Position } from './chess960.js';
 import { buildRedactedFen, getFogOfWarWinner, getVisibleSquares, redactMoveHistory } from './fogOfWar.js';
 import { getAtomicKingWinner, isAtomicThreefoldRepetition } from './atomic.js';
 import { hasNoDuckMoves, isLegalDuckPlacement } from './duckChess.js';
+import {
+  afterSpellChessMove,
+  canCastFreeze,
+  canCastJump,
+  castFreeze,
+  castJump,
+  checkIsWaivedByFreeze,
+  activeJumpSquare,
+  frozenSquaresFor,
+  getFreezeZoneSquares,
+  getSpellChessWinner,
+  initialSpellChessState,
+  type SpellChessState,
+} from './spellChess.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
@@ -57,6 +71,9 @@ interface Room {
   duckChess: boolean;
   /** Duck Chess only: where the duck stands now (null before White's first move) — see duckChess.ts. */
   duckSquare: string | null;
+  spellChess: boolean;
+  /** Spell Chess only: charges/cooldowns/pending Freeze+Jump effects — see spellChess.ts. */
+  spellState: SpellChessState;
   /** Atomic only: the FEN of the starting position and after every move, for the history-based threefold
    * repetition draw (chess.js cannot see repetitions here — the Atomic engine is not chess.js). */
   atomicFens: string[];
@@ -103,6 +120,7 @@ export interface CreateRoomParams {
   giveaway: boolean;
   atomic: boolean;
   duckChess: boolean;
+  spellChess: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
    * both players' armies. Every other variant's production caller omits it and still self-generates
    * its own starting position (classical, or a random Chess960 back rank) as before; the regression
@@ -162,7 +180,14 @@ export class RoomManager {
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
     const initialFen = params.initialFen ?? (params.chess960 ? generateChess960Position() : START_FEN);
-    const engine = new RoomChessEngine(initialFen, { chess960: params.chess960, initialFen, giveaway: params.giveaway, atomic: params.atomic, duckChess: params.duckChess });
+    const engine = new RoomChessEngine(initialFen, {
+      chess960: params.chess960,
+      initialFen,
+      giveaway: params.giveaway,
+      atomic: params.atomic,
+      duckChess: params.duckChess,
+      spellChess: params.spellChess,
+    });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
     const blackPlayerToken = randomUUID();
@@ -180,6 +205,8 @@ export class RoomManager {
       atomic: params.atomic,
       duckChess: params.duckChess,
       duckSquare: null,
+      spellChess: params.spellChess,
+      spellState: initialSpellChessState(),
       atomicFens: [initialFen],
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
@@ -219,7 +246,16 @@ export class RoomManager {
   applyMove(
     socketId: string,
     payload: MakeMovePayload
-  ): Ack<{ fen: string; san: string; turn: PieceColor; whiteMs: number; blackMs: number; visibleSquares?: string[]; duckSquare?: string | null }> {
+  ): Ack<{
+    fen: string;
+    san: string;
+    turn: PieceColor;
+    whiteMs: number;
+    blackMs: number;
+    visibleSquares?: string[];
+    duckSquare?: string | null;
+    spellState?: SpellChessState;
+  }> {
     const location = this.socketToRoom.get(socketId);
     if (!location || location.roomId !== payload.roomId) {
       return { ok: false, error: 'No active game found for this connection.' };
@@ -272,11 +308,53 @@ export class RoomManager {
       duckTurn = { engine: scratch, result: duckTo ? { ...probe, duck: duckTo } : probe, duckTo };
     }
 
+    // Spell Chess: a TURN is an OPTIONAL cast (at most one, before the move) then the move, applied as one unit.
+    // The cast is validated against the room's own SpellChessState first (an illegal cast refuses the whole turn
+    // before touching the room), then the move is tried on a scratch engine built with the resulting
+    // frozenSquares/jumpSquare/freezeEscapeActive — the same two-part-turn shape Duck Chess uses above, just
+    // with "cast is optional, move is mandatory" instead of duck's "move is mandatory, placement is mandatory
+    // unless it was a king capture".
+    let spellTurn: { engine: RoomChessEngine; result: AppliedMove; state: SpellChessState } | null = null;
+    if (room.spellChess) {
+      const cast = payload.spell;
+      let stateAfterCast = room.spellState;
+      let appliedCast: { type: 'freeze'; center: string; squares: string[] } | { type: 'jump'; square: string } | null = null;
+      if (cast && cast.type === 'freeze') {
+        if (typeof cast.center !== 'string' || !canCastFreeze(room.spellState, mover)) {
+          return { ok: false, error: 'Freeze is not available right now.' };
+        }
+        stateAfterCast = castFreeze(room.spellState, mover, cast.center);
+        appliedCast = { type: 'freeze', center: cast.center, squares: getFreezeZoneSquares(cast.center) };
+      } else if (cast && cast.type === 'jump') {
+        if (typeof cast.square !== 'string' || !canCastJump(room.spellState, mover) || !room.engine.getPieceAt(cast.square)) {
+          return { ok: false, error: 'Jump is not available right now.' };
+        }
+        stateAfterCast = castJump(room.spellState, mover, cast.square);
+        appliedCast = { type: 'jump', square: cast.square };
+      } else if (cast) {
+        return { ok: false, error: 'Invalid spell cast.' };
+      }
+
+      const frozenSquares = frozenSquaresFor(stateAfterCast, mover);
+      const jumpSquare = activeJumpSquare(stateAfterCast);
+      const freezeEscapeActive = checkIsWaivedByFreeze(room.engine, mover, frozenSquares);
+      const scratch = new RoomChessEngine(room.engine.getFen(), { spellChess: true, frozenSquares, jumpSquare, freezeEscapeActive });
+      const probe = scratch.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
+      if (!probe) return { ok: false, error: 'Invalid move.' };
+      spellTurn = {
+        engine: scratch,
+        result: appliedCast ? { ...probe, spell: appliedCast } : probe,
+        state: afterSpellChessMove(stateAfterCast, mover),
+      };
+    }
+
     const result = duckTurn
       ? duckTurn.result
-      : room.fogOfWar || room.giveaway
-        ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
-        : room.engine.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
+      : spellTurn
+        ? spellTurn.result
+        : room.fogOfWar || room.giveaway
+          ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
+          : room.engine.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
     if (!result) {
       return { ok: false, error: 'Invalid move.' };
     }
@@ -286,6 +364,10 @@ export class RoomManager {
         room.engine.setDuckSquare(duckTurn.duckTo);
         room.duckSquare = duckTurn.duckTo;
       }
+    }
+    if (spellTurn) {
+      room.engine = spellTurn.engine;
+      room.spellState = spellTurn.state;
     }
 
     const now = Date.now();
@@ -344,6 +426,7 @@ export class RoomManager {
         promotion: result.promotion,
         san: result.san,
         ...(room.duckChess ? { duck: result.duck, duckSquare: room.duckSquare } : {}),
+        ...(room.spellChess ? { spell: result.spell, spellState: room.spellState } : {}),
         fen: room.engine.getFen(),
         turn: newTurn,
         whiteMs: room.whiteMs,
@@ -405,6 +488,22 @@ export class RoomManager {
       } else {
         this.scheduleTimeout(room);
       }
+    } else if (room.spellChess) {
+      // Spell Chess: checkmate/stalemate/draw all still apply exactly as normal (judged by chess.js via
+      // getStatus()/isGameOver()), PLUS capturing the enemy king outright via a Jump-augmented move ends the
+      // game immediately — checked FIRST so isGameOver()/getStatus() are never consulted on the resulting
+      // kingless position (both would otherwise misreport it, e.g. as a stalemate draw, exactly like LocalGameScreen's
+      // identical chessStatus short-circuit on the mobile app).
+      const spellWinner = getSpellChessWinner(result, mover);
+      if (spellWinner) {
+        this.endGame(room, 'spellChess', spellWinner);
+      } else if (room.engine.isGameOver()) {
+        const status = room.engine.getStatus();
+        const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
+        this.endGame(room, reason, status === 'checkmate' ? mover : null);
+      } else {
+        this.scheduleTimeout(room);
+      }
     } else {
       // Checked before the normal chess.js-driven end-of-game logic — reaching the center wins
       // outright regardless of the rest of the position (check/material/etc. don't matter), and
@@ -439,6 +538,7 @@ export class RoomManager {
       blackMs: room.blackMs,
       visibleSquares: moverVisibleSquares,
       duckSquare: room.duckChess ? room.duckSquare : undefined,
+      spellState: room.spellChess ? room.spellState : undefined,
     };
   }
 
@@ -486,6 +586,8 @@ export class RoomManager {
         isAtomic: room.atomic,
         isDuckChess: room.duckChess,
         duckSquare: room.duckChess ? room.duckSquare : undefined,
+        isSpellChess: room.spellChess,
+        spellState: room.spellChess ? room.spellState : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.fogOfWar ? redactedMovesFor(room, color) : room.moves,
@@ -648,6 +750,8 @@ export class RoomManager {
         isAtomic: room.atomic,
         isDuckChess: room.duckChess,
         duckSquare: room.duckChess ? room.duckSquare : undefined,
+        isSpellChess: room.spellChess,
+        spellState: room.spellChess ? room.spellState : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -755,7 +859,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : undefined);
+    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : undefined);
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));

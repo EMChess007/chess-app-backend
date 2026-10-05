@@ -10,6 +10,11 @@ name: CI
 # layout: chess-app/ (frontend) with chess-app/backend/ (this repo) nested inside it. Since this
 # is a separate GitHub repo, that layout is recreated here by checking out EM-Chess first and this
 # repo into chess-app/backend afterward, rather than at the default location.
+# Which frontend branch? The same-named one if EM-Chess has it, else its default branch. A backend feature
+# branch that depends on frontend code not merged yet (e.g. spell-chess: scripts/test-spell.mjs imports the new
+# src/logic/spellChess.ts) is therefore tested against its own matching frontend branch instead of failing on a
+# default branch that has never heard of the feature. Push the two branches under the same name to pair them;
+# main (and any branch without a frontend twin) is tested against the frontend's default branch, as before.
 # Pushes to ANY branch run CI too (not just main): with branch protection requiring the `test`
 # check on main, a commit can only reach main once that exact commit already has a passing check —
 # so it has to be validated on a branch first.
@@ -44,10 +49,25 @@ jobs:
       PORT: 3000
 
     steps:
+      - name: Pick the frontend ref — the same-named EM-Chess branch if there is one, else its default branch
+        id: frontend_ref
+        env:
+          # Passed through the environment, never interpolated into the script: a branch name is untrusted input.
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if git ls-remote --exit-code --heads https://github.com/EMChess007/EM-Chess.git "refs/heads/$BRANCH" > /dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "Using EM-Chess branch '$BRANCH'"
+          else
+            echo "ref=" >> "$GITHUB_OUTPUT"
+            echo "EM-Chess has no branch '$BRANCH' — using its default branch"
+          fi
+
       - name: Checkout frontend (EM-Chess) — several test scripts import its chess logic directly
         uses: actions/checkout@v4
         with:
           repository: EMChess007/EM-Chess
+          ref: ${{ steps.frontend_ref.outputs.ref }}
           path: chess-app
 
       - name: Checkout backend (this repo) into chess-app/backend — matches local dev layout

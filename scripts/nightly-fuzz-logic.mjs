@@ -31,6 +31,7 @@ import { generateAtomicMoves, getAtomicKingWinner, squareName } from '../src/gam
 import { getLegalDuckPlacementSquares as clientDuckSquares, hasNoDuckMoves as clientDuckBlockade } from '../../src/logic/duckChess.ts';
 import { emptySquares, hasNoDuckMoves as serverDuckBlockade } from '../src/game/duckChess.ts';
 import { HORDE_START_FEN, getHordeMoves as clientHordeMoves } from '../../src/logic/horde.ts';
+import { getCrazyhouseMoves as clientCrazyhouseMoves, initialCrazyhouseState, RESERVE_PIECE_TYPES } from '../../src/logic/crazyhouse.ts';
 
 const GAMES = Number(process.argv[2] ?? 3000);
 const MAX_PLIES = Number(process.argv[3] ?? 80);
@@ -321,7 +322,106 @@ function fuzzHordeParity() {
   return { label: 'Horde parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
 }
 
-console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway, Atomic, Duck Chess and Horde parity.\n`);
+/**
+ * Crazyhouse PARITY: random games through BOTH implementations, carrying the reserves/promoted squares ply to ply. At every ply
+ * every turn the mobile engine offers (ordinary moves incl. promotions, and every legal drop) must be accepted by the server
+ * engine with the same SAN, FEN and CrazyhouseState; sampled moves AND drops the mobile engine does not offer must be refused by
+ * the server; and both must agree on the verdict. The walk is biased toward drops, captures and promotions so reserves fill up
+ * and promoted pieces get captured. Every ply costs a fresh engine per candidate (up to ~100 with drops), so this section plays
+ * at most 100 games however many the other sections play.
+ */
+function fuzzCrazyhouseParity() {
+  const mismatches = [];
+  let totalPlies = 0;
+  let totalChecked = 0;
+  let totalGames = 0;
+  const squares = [];
+  for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) squares.push(`${f}${r}`);
+  const gameCount = Math.min(GAMES, 100);
+  for (let g = 0; g < gameCount; g++) {
+    totalGames++;
+    let fen = START_FEN;
+    let state = initialCrazyhouseState();
+    for (let ply = 0; ply < MAX_PLIES * 2; ply++) {
+      const client = new ChessEngine(fen, { crazyhouse: true, crazyhouseState: state });
+      const server = new RoomChessEngine(fen, { crazyhouse: true, crazyhouseState: state });
+      if (server.isGameOver() !== client.isGameOver() || server.getStatus() !== client.getStatus()) {
+        mismatches.push({ kind: 'crazyhouse-verdict-differs', game: g, ply, fen, server: [server.getStatus(), server.isGameOver()], client: [client.getStatus(), client.isGameOver()] });
+        break;
+      }
+      if (client.isGameOver()) break;
+      const moves = clientCrazyhouseMoves(client);
+      const drops = client.getLegalDrops();
+      const sample = [...moves, ...drops.map((d) => ({ drop: d.piece, from: d.square, to: d.square }))];
+      if (sample.length === 0) break;
+      let broken = false;
+      for (const m of sample) {
+        totalChecked++;
+        const s = new RoomChessEngine(fen, { crazyhouse: true, crazyhouseState: state });
+        const c = new ChessEngine(fen, { crazyhouse: true, crazyhouseState: state });
+        let a;
+        let b;
+        try {
+          a = m.drop ? s.drop(m.drop, m.to) : s.move(m.from, m.to, m.promotion);
+          b = m.drop ? c.drop(m.drop, m.to) : c.move(m.from, m.to, m.promotion);
+        } catch (err) {
+          mismatches.push({ kind: 'crazyhouse-apply-threw', game: g, ply, fen, move: m, error: String(err) });
+          broken = true;
+          break;
+        }
+        if (!a || !b || a.san !== b.san || s.getFen() !== c.getFen() || JSON.stringify(s.getCrazyhouseState()) !== JSON.stringify(c.getCrazyhouseState())) {
+          mismatches.push({ kind: 'crazyhouse-turn-differs', game: g, ply, fen, move: m, server: a, client: b });
+          broken = true;
+          break;
+        }
+      }
+      if (broken) break;
+      const offeredMoves = new Set(moves.map((m) => `${m.from}${m.to}`));
+      const offeredDrops = new Set(drops.map((d) => `${d.piece}${d.square}`));
+      for (let probe = 0; probe < 20; probe++) {
+        const from = squares[randInt(64)];
+        const to = squares[randInt(64)];
+        if (from !== to && !offeredMoves.has(`${from}${to}`)) {
+          totalChecked++;
+          if (new RoomChessEngine(fen, { crazyhouse: true, crazyhouseState: state }).move(from, to, 'q')) {
+            mismatches.push({ kind: 'crazyhouse-server-accepts-illegal-move', game: g, ply, fen, move: { from, to } });
+            broken = true;
+            break;
+          }
+        }
+        const piece = RESERVE_PIECE_TYPES[randInt(5)];
+        if (!offeredDrops.has(`${piece}${to}`)) {
+          totalChecked++;
+          if (new RoomChessEngine(fen, { crazyhouse: true, crazyhouseState: state }).drop(piece, to)) {
+            mismatches.push({ kind: 'crazyhouse-server-accepts-illegal-drop', game: g, ply, fen, drop: { piece, square: to } });
+            broken = true;
+            break;
+          }
+        }
+      }
+      if (broken) break;
+      const capturing = moves.filter((m) => m.captured || m.promotion === 'q');
+      let pick;
+      if (drops.length > 0 && Math.random() < 0.45) {
+        const d = drops[randInt(drops.length)];
+        pick = { drop: d.piece, from: d.square, to: d.square };
+      } else if (capturing.length > 0 && Math.random() < 0.6) {
+        pick = capturing[randInt(capturing.length)];
+      } else {
+        const plain = moves.filter((m) => !m.promotion || m.promotion === 'q');
+        pick = plain.length > 0 ? plain[randInt(plain.length)] : sample[randInt(sample.length)];
+      }
+      if (pick.drop) client.drop(pick.drop, pick.to);
+      else client.move(pick.from, pick.to, pick.promotion);
+      fen = client.getFen();
+      state = client.getCrazyhouseState();
+      totalPlies++;
+    }
+  }
+  return { label: 'Crazyhouse parity (mobile app vs server)', totalGames, totalPlies, totalChecked, mismatches };
+}
+
+console.log(`Nightly fuzz: ${GAMES} games x up to ${MAX_PLIES} plies, two engine implementations (Fog of War) + Giveaway, Atomic, Duck Chess, Horde and Crazyhouse parity.\n`);
 
 const results = [
   fuzzEngine('Mobile app (src/logic/ChessEngine.ts)', ChessEngine),
@@ -330,9 +430,10 @@ const results = [
   fuzzAtomicParity(),
   fuzzDuckParity(),
   fuzzHordeParity(),
+  fuzzCrazyhouseParity(),
 ];
 
-let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + Horde parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
+let reportLines = [`# Nightly logic fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + Horde + Crazyhouse parity)`, '', `Run at: ${new Date().toISOString()}`, ''];
 let anyFailure = false;
 
 for (const r of results) {

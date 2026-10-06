@@ -20,6 +20,7 @@
     "test:duck": "tsx scripts/test-duck.mjs",
     "test:spell": "tsx scripts/test-spell.mjs",
     "test:horde": "tsx scripts/test-horde.mjs",
+    "test:crazyhouse": "tsx scripts/test-crazyhouse.mjs",
     "test:unlimited": "tsx scripts/test-unlimited.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs"
   },

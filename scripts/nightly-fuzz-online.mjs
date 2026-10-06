@@ -26,7 +26,7 @@
  *
  * Usage:
  *   npm run dev                                (in one terminal, from backend/)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [hordeGames]
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [hordeGames] [crazyhouseGames]
  * (the others default to the same count as fogGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
@@ -37,6 +37,7 @@ import { getGiveawayMoves, getGiveawayWinner } from '../../src/logic/giveaway.ts
 import { getAtomicMoves, getAtomicWinner, isAtomicThreefoldRepetition } from '../../src/logic/atomic.ts';
 import { getLegalDuckPlacementSquares, hasNoDuckMoves } from '../../src/logic/duckChess.ts';
 import { HORDE_START_FEN, getHordeMoves, getHordeWinnerFromFen } from '../../src/logic/horde.ts';
+import { getCrazyhouseMoves, initialCrazyhouseState, RESERVE_PIECE_TYPES } from '../../src/logic/crazyhouse.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const GAMES = Number(process.argv[2] ?? 100);
@@ -45,6 +46,7 @@ const GIVEAWAY_GAMES = Number(process.argv[4] ?? GAMES);
 const ATOMIC_GAMES = Number(process.argv[5] ?? GAMES);
 const DUCK_GAMES = Number(process.argv[6] ?? GAMES);
 const HORDE_GAMES = Number(process.argv[7] ?? GAMES);
+const CRAZYHOUSE_GAMES = Number(process.argv[8] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -635,8 +637,147 @@ async function playHordeGame(gameIndex) {
   return { stats, issues };
 }
 
+/**
+ * One real Crazyhouse game through the server: two socket clients, every turn chosen from the mobile app's own legal moves AND
+ * legal drops (biased toward drops and captures so reserves fill and promoted pieces get taken) and MUST be accepted with exactly
+ * the position and CrazyhouseState the mobile engine computes; a fraction of turns first submit a move or a drop the mobile
+ * engine does not offer, which the server MUST refuse. Every game_over must match the mobile app's verdict (checkmate/mover or
+ * stalemate|draw/null — never an insufficient-material draw).
+ */
+async function playCrazyhouseGame(gameIndex) {
+  const alice = await connect(`CAlice${gameIndex}`);
+  const bob = await connect(`CBob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isCrazyhouse: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isCrazyhouse: true });
+      return matchFound;
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, drops: 0, finished: false };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  let state = initialCrazyhouseState();
+  if (matchA.isCrazyhouse !== true) issues.push({ kind: 'match-found-missing-isCrazyhouse', game: gameIndex });
+
+  const squares = [];
+  for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) squares.push(`${f}${r}`);
+
+  for (; stats.plies < MAX_PLIES * 2; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = new ChessEngine(fen, { crazyhouse: true, crazyhouseState: state });
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const moves = getCrazyhouseMoves(engine);
+    const drops = engine.getLegalDrops();
+    if (moves.length + drops.length === 0) break;
+
+    // Server authority: a move or a drop the mobile engine does not offer must bounce.
+    if (Math.random() < 0.25) {
+      const to = squares[randInt(64)];
+      if (Math.random() < 0.5) {
+        const piece = RESERVE_PIECE_TYPES[randInt(5)];
+        if (!drops.some((d) => d.piece === piece && d.square === to)) {
+          stats.illegalProbes++;
+          const refusal = await emitAck(mover, 'make_move', { roomId, from: to, to, drop: piece });
+          if (refusal.ok) {
+            issues.push({ kind: 'server-ACCEPTED-illegal-crazyhouse-drop', game: gameIndex, ply: stats.plies, fen, drop: { piece, square: to } });
+            break;
+          }
+        }
+      } else {
+        const from = squares[randInt(64)];
+        if (from !== to && !moves.some((m) => m.from === from && m.to === to)) {
+          stats.illegalProbes++;
+          const refusal = await emitAck(mover, 'make_move', { roomId, from, to, promotion: 'q' });
+          if (refusal.ok) {
+            issues.push({ kind: 'server-ACCEPTED-illegal-crazyhouse-move', game: gameIndex, ply: stats.plies, fen, move: { from, to } });
+            break;
+          }
+        }
+      }
+    }
+
+    const capturing = moves.filter((m) => m.captured || m.promotion === 'q');
+    let pick;
+    if (drops.length > 0 && Math.random() < 0.45) {
+      const d = drops[randInt(drops.length)];
+      pick = { drop: d.piece, from: d.square, to: d.square };
+    } else if (capturing.length > 0 && Math.random() < 0.6) {
+      pick = capturing[randInt(capturing.length)];
+    } else {
+      const plain = moves.filter((m) => !m.promotion || m.promotion === 'q');
+      pick = plain.length > 0 ? plain[randInt(plain.length)] : moves.length > 0 ? moves[randInt(moves.length)] : { drop: drops[0].piece, from: drops[0].square, to: drops[0].square };
+    }
+    const after = new ChessEngine(fen, { crazyhouse: true, crazyhouseState: state });
+    if (pick.drop) {
+      after.drop(pick.drop, pick.to);
+      stats.drops++;
+    } else {
+      after.move(pick.from, pick.to, pick.promotion);
+    }
+    const opponent = players[turn === 'w' ? 'b' : 'w'];
+    const opponentMove = waitFor(opponent, 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion, ...(pick.drop ? { drop: pick.drop } : {}) });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-crazyhouse-turn', game: gameIndex, ply: stats.plies, fen, pick, error: ack.error });
+      break;
+    }
+    const mobileState = after.getCrazyhouseState();
+    if (ack.fen !== after.getFen() || JSON.stringify(ack.crazyhouse) !== JSON.stringify(mobileState)) {
+      issues.push({ kind: 'crazyhouse-position-or-state-differs-from-mobile', game: gameIndex, ply: stats.plies, fen, pick, server: [ack.fen, ack.crazyhouse], mobile: [after.getFen(), mobileState] });
+      break;
+    }
+    fen = ack.fen;
+    state = mobileState;
+    const pushed = await opponentMove;
+    if (pushed && (pushed.fen !== ack.fen || JSON.stringify(pushed.crazyhouse) !== JSON.stringify(ack.crazyhouse))) {
+      issues.push({ kind: 'opponent-state-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: [ack.fen, ack.crazyhouse], pushed: [pushed.fen, pushed.crazyhouse] });
+      break;
+    }
+
+    const status = after.getStatus();
+    const expected = status === 'checkmate' ? { reason: 'checkmate', winner: turn } : status === 'stalemate' || status === 'draw' ? { reason: status, winner: null } : null;
+    if (expected) {
+      stats.finished = true;
+      await new Promise((r) => setTimeout(r, 150));
+      if (!gameOverPayload || gameOverPayload.reason !== expected.reason || gameOverPayload.winner !== expected.winner) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile', game: gameIndex, ply: stats.plies, fen, expected, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
 async function main() {
-  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess + ${HORDE_GAMES} Horde games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
+  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess + ${HORDE_GAMES} Horde + ${CRAZYHOUSE_GAMES} Crazyhouse games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
@@ -724,6 +865,24 @@ async function main() {
   }
   allIssues.push(...hordeStats.issues.map((i) => ({ ...i, variant: 'horde' })));
 
+  // --- Crazyhouse ---
+  const czStats = { games: 0, plies: 0, probes: 0, drops: 0, finished: 0, issues: [] };
+  for (let g = 0; g < CRAZYHOUSE_GAMES; g++) {
+    try {
+      const { stats, issues } = await playCrazyhouseGame(g);
+      czStats.games++;
+      czStats.plies += stats.plies;
+      czStats.probes += stats.illegalProbes;
+      czStats.drops += stats.drops;
+      if (stats.finished) czStats.finished++;
+      czStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${CRAZYHOUSE_GAMES} Crazyhouse games played`);
+    } catch (err) {
+      czStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...czStats.issues.map((i) => ({ ...i, variant: 'crazyhouse' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
@@ -733,10 +892,11 @@ async function main() {
   console.log(`Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king).`);
   console.log(`Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture).`);
   console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
+  console.log(`Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused, ${czStats.finished} games ended.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + Horde)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + Horde + Crazyhouse)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -748,6 +908,7 @@ async function main() {
     `- Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused by the server, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king)`,
     `- Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused by the server, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture)`,
     `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
+    `- Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused by the server, ${czStats.finished} games ended`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];

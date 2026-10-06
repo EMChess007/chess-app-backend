@@ -57,6 +57,16 @@ Triggers on every push/PR to `main`. One job:
      "Black king vs a lone bishop" is not an insufficient-material draw; the saved PGN is tagged `[Variant "Horde"]`), and
      parity with the mobile engine over 10 random games (every offered move accepted with the same FEN, 43k sampled
      moves refused, same game-over verdicts). Mutation-checked against six server defects.
+   - `npm run test:crazyhouse` (`scripts/test-crazyhouse.mjs`, no server needed) — Crazyhouse's server side: a **no-drift check** of the
+     shared rules block in `src/game/crazyhouse.ts` against the mobile `src/logic/crazyhouse.ts`, `RoomManager.applyMove` as the
+     authority (a capture banks the piece for the CAPTURER, a captured promoted piece banks a pawn; a drop is refused for a missing
+     reserve piece, an occupied square, a pawn on rank 1/8, the wrong turn, a non-reserve piece type, a check it does not answer, a
+     knight or double check, or outside a Crazyhouse room — each leaving the room untouched; a drop can mate (`Q@f8#`) and a "mate" a
+     drop can answer is only check; stalemate with a droppable piece is not stalemate; king versus king is not a draw; a captured rook
+     re-dropped on h1 does not restore castling; a dropped pawn gives no en passant; rejoin and spectate carry the reserves; the
+     saved PGN is tagged `[Variant "Crazyhouse"]` with `P@e5` drops), and parity with the mobile engine over 12 random games
+     biased to drops and captures (every offered move AND drop accepted with the same SAN, FEN and reserve/promoted state, ~75k
+     sampled turns refused, same verdicts). Mutation-checked against server defects (see §11).
    - `npm run test:unlimited` (`scripts/test-unlimited.mjs`, no server needed) — "No time limit" (live-only, no clock):
      time-control validation (finite numbers; an unlimited control may have no increment), an unlimited room's clock
      never ticks or gains an increment and schedules no timeout (move acks, `opponent_move` and rejoin payloads all
@@ -81,7 +91,7 @@ checkout/Postgres setup as CI, then:
 - `scripts/nightly-fuzz-logic.mjs` — **3,000** randomized Fog of War games, up to 80 plies each,
   checking every pseudo-legal candidate at every ply against both `ChessEngine.ts` and
   `RoomChessEngine.ts`, plus the same number of Giveaway games run through both implementations in
-  lockstep (parity of legal moves/SAN/FEN/winner), and the same for Atomic and Duck Chess. (CI's own regression tests use far smaller counts — 6-80 games — to stay
+  lockstep (parity of legal moves/SAN/FEN/winner), and the same for Atomic, Duck Chess, Horde and Crazyhouse (the last two capped at 400 / 100 games, since their games are long and each ply builds an engine per candidate turn). (CI's own regression tests use far smaller counts — 6-80 games — to stay
   fast on every commit; this is the same methodology at a scale only a schedule can afford.)
 - `scripts/nightly-fuzz-online.mjs` — **200** real Fog of War games plus **200** real Giveaway games
   plus **200** real Atomic games plus **200** real Duck Chess games played end-to-end through the actual running server/socket protocol (not a simulation), checking for
@@ -255,3 +265,46 @@ illegal-move probes, checking every `game_over` against the mobile verdict).
 **Known limits**
 - The socket test plays only a short game; the endings (mate, capture-everything, stalemate) are covered through
   `RoomManager` with a stub socket server in `test-horde.mjs` and by the nightly online fuzz, not by a scripted socket game.
+
+## 11. Crazyhouse (server side) — design, decisions and known limits
+
+The rules are in `src/game/crazyhouse.ts` (a verbatim mirror of the mobile app's rules block, guarded by `test-crazyhouse.mjs`'s no-drift
+check) on top of `RoomChessEngine`'s opt-in `crazyhouse` option. The mobile app's `src/logic/crazyhouse.ts` header has the full rules and the
+promoted-piece tracking (chess.com: captured pieces change colour into the capturer's reserve; a turn is one move OR one drop; a captured
+promoted piece is banked as a pawn; drops may give mate; notation `N@f3`).
+
+**What the server adds on top of chess.js** (which stays authoritative for every ordinary move, castling, en passant and promotion):
+- `drop(piece, square)`: legality from the shared geometry (`legalDropSquares`: reserve has the piece, empty square, no pawn on rank 1/8,
+  and — in check — only a block of a single sliding check), then the FEN is edited (piece placed, turn flipped, en passant cleared,
+  halfmove clock reset, fullmove advanced) and chess.js reloaded. Castling rights are flags chess.js keeps, so a re-dropped rook does
+  not restore them.
+- The **reserve + promoted-squares state lives INSIDE `room.engine`** and is updated by every `move()`/`drop()` (so the server needs no
+  second copy to keep in sync, unlike Duck Chess's `room.duckSquare`); `getCrazyhouseState()` exposes it for the wire.
+- `getStatus()`/`isGameOver()` overrides: checkmate/stalemate only when the side also has no legal drop; chess.js's insufficient-material
+  draw is never used; the fifty-move rule stays. Because of this, **`RoomManager.applyMove` needs no Crazyhouse-specific end-of-game
+  branch**: the generic `isGameOver()`/`getStatus()` path is already right (and no new `GameOverReason` exists).
+
+**Wire format.** `make_move` carries `drop` (a reserve piece type; `from` and `to` are both the target square). The server validates it at
+the door (must be one of the five reserve types, in a Crazyhouse room, with a target square) and then by the engine. `opponent_move` /
+`spectator_move` carry `drop` and the full `crazyhouse` state; the mover's ack carries the state too; `rejoin_game` and `spectate_game`
+carry the state plus `drop` on each move-list entry. `isCrazyhouse` is on `join_queue`/`create_challenge`/`match_found`/rejoin. It cannot be
+combined with any other variant (`conflictingVariantError`), and tournaments and Setup Chess never create Crazyhouse rooms.
+
+**How it is tested:** `test:crazyhouse` (§1), the Crazyhouse block of `test-multiplayer.mjs` (a real socket game: pairing is separate from classic,
+combining flags is rejected, a capture's state reaches the opponent, an illegal drop is refused, a legal drop is acked and pushed with the
+state, resignation), and the nightly logic parity (≤100 games) and online fuzz (illegal move AND illegal drop probes, every ack and
+`opponent_move` compared with the mobile engine's position and state, every `game_over` with its verdict).
+
+**Mutation testing (46 mutants over the shared block, the server engine and `RoomManager`)**: 35 were killed on the first run; the rest
+exposed genuine gaps in the authority tests, all closed (a flipped pawn-check direction, a queen not checking along a diagonal, one
+wrong knight step, a stale promoted mark, any captured piece banked as a pawn, castling not carrying a promoted rook, shared clone
+arrays, the fifty-move rule, the move ack omitting the state, the PGN variant tag). Seven survivors are equivalent: a double check is
+excluded twice (`crazyhouseCheckInfo` and `legalDropSquares`), a king can never be banked, an en passant victim is a pawn and never
+marked, chess.js's `put()` already clears the en passant square, and `RoomManager`'s door check on `drop` duplicates what
+`legalDropSquares` and `put()` refuse anyway (kept as defence in depth). Shared-block mutants are applied to BOTH copies so the
+no-drift check cannot be what kills them.
+
+**Known limits**
+- The socket test plays a short game; the endings (mate by drop, answerable mate, stalemate with a droppable piece) are covered through
+  `RoomManager` with a stub socket server in `test-crazyhouse.mjs` and by the nightly online fuzz, not by a scripted socket game.
+- No threefold repetition (as in every non-Atomic mode); the fifty-move rule is read from the FEN's halfmove clock.

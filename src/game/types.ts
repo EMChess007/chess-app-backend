@@ -1,3 +1,4 @@
+import type { CrazyhouseState, ReservePieceType } from './crazyhouse.js';
 import type { PieceColor } from './RoomChessEngine.js';
 import type { SpellChessState } from './spellChess.js';
 
@@ -52,6 +53,8 @@ export interface JoinQueuePayload {
   isSpellChess?: boolean;
   /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
   isHorde?: boolean;
+  /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
+  isCrazyhouse?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
    * to the saved game history row so online games show the same labels Local/Bot games do,
    * without duplicating the client's preset table server-side. Optional for backward
@@ -73,6 +76,9 @@ export interface MakeMovePayload {
   /** Spell Chess only — the spell (if any) cast immediately before this move, see spellChess.ts. At most one per
    * turn; omitted on a turn that casts nothing. */
   spell?: SpellCastInput;
+  /** Crazyhouse only -- a DROP: place this reserve piece on `to` (`from` is ignored; clients send the same square). Validated
+   * against the room's own reserve and the drop-legality rules (crazyhouse.ts), exactly like a move; refused outside Crazyhouse. */
+  drop?: ReservePieceType;
 }
 
 export interface RejoinGamePayload {
@@ -116,6 +122,7 @@ export interface MatchFoundPayload {
   isDuckChess: boolean;
   isSpellChess: boolean;
   isHorde: boolean;
+  isCrazyhouse: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
@@ -141,6 +148,10 @@ export interface OpponentMovePayload {
    * (charges/cooldowns/pending effects) — see spellChess.ts. */
   spell?: SpellCastWire;
   spellState?: SpellChessState;
+  /** Crazyhouse only -- set when the move was a DROP (from === to === the square), and the full state afterwards (reserves +
+   * promoted squares), authoritative from the server like duckSquare. */
+  drop?: ReservePieceType;
+  crazyhouse?: CrazyhouseState;
   fen: string;
   turn: PieceColor;
   whiteMs: number;
@@ -181,13 +192,16 @@ export interface RejoinStatePayload {
   duckSquare?: string | null;
   isSpellChess: boolean;
   isHorde: boolean;
+  isCrazyhouse: boolean;
   /** Spell Chess only — charges/cooldowns/pending effects right now. */
   spellState?: SpellChessState;
+  /** Crazyhouse only -- reserves and promoted squares right now. */
+  crazyhouse?: CrazyhouseState;
   whiteMs: number;
   blackMs: number;
   /** Each entry's fields are all omitted together for a Fog of War move this viewer never
    * witnessed (see redactMoveHistory) — always fully populated outside Fog of War. */
-  moves: { from?: string; to?: string; promotion?: string; san?: string; duck?: string; spell?: SpellCastWire }[];
+  moves: { from?: string; to?: string; promotion?: string; san?: string; duck?: string; spell?: SpellCastWire; drop?: ReservePieceType }[];
   /** Fog of War only — see MatchFoundPayload.visibleSquares; recomputed fresh for whoever's
    * rejoining/spectating. */
   visibleSquares?: string[];
@@ -226,6 +240,8 @@ export interface CreateChallengePayload {
   isSpellChess?: boolean;
   /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
   isHorde?: boolean;
+  /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
+  isCrazyhouse?: boolean;
   timeControlLabel?: string;
 }
 

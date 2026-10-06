@@ -1057,6 +1057,82 @@ async function testHordeOnline() {
   bob.disconnect();
 }
 
+async function testCrazyhouseOnline() {
+  console.log('\n=== Crazyhouse: matchmaking, a capture, a drop over the wire, an illegal drop, resignation ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const czSeeker = await connect('Czara');
+  const classicSeeker = await connect('Cyrus');
+  check((await emitAck(czSeeker, 'join_queue', { timeControl, isCrazyhouse: true })).ok === true, 'Czara queues for Crazyhouse');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Cyrus queues for a classic game');
+  let wronglyPaired = false;
+  czSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Crazyhouse seeker and a classic seeker are never paired with each other');
+  await emitAck(czSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  czSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused5');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isCrazyhouse: true, isHorde: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Crazyhouse + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isCrazyhouse: true, isAtomic: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  const alice = await connect('Zoe');
+  const bob = await connect('Zed');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isCrazyhouse: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isCrazyhouse: true });
+      return matchFound;
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Crazyhouse seekers are paired');
+  check(matchA.isCrazyhouse === true && matchB.isCrazyhouse === true && matchA.isHorde === false && matchA.isAtomic === false, 'match_found tells both clients isCrazyhouse: true');
+  check(matchA.fen === 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', 'both start from the ordinary position');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to) => emitAck(who.socket, 'make_move', { roomId, from, to });
+  const drop = (who, piece, square) => emitAck(who.socket, 'make_move', { roomId, from: square, to: square, drop: piece });
+
+  check((await turn(white, 'e2', 'e4')).ok === true && (await turn(black, 'd7', 'd5')).ok === true, '1.e4 d5');
+  const blackSeesCapture = waitFor(black.socket, 'opponent_move');
+  check((await turn(white, 'e4', 'd5')).ok === true, '2.exd5');
+  const capture = await blackSeesCapture;
+  check(capture.crazyhouse && capture.crazyhouse.reserve.w.p === 1, 'Black is told the new state: White now holds a pawn in reserve');
+  check((await turn(black, 'g8', 'f6')).ok === true, '2...Nf6');
+
+  check((await drop(white, 'n', 'e5')).ok === false, 'dropping a knight is refused: White only holds a pawn');
+  check((await drop(white, 'p', 'e1')).ok === false, 'dropping a pawn on rank 1 is refused');
+  const blackSeesDrop = waitFor(black.socket, 'opponent_move');
+  const dropped = await drop(white, 'p', 'e5');
+  check(dropped.ok === true && dropped.san === 'P@e5' && dropped.crazyhouse && dropped.crazyhouse.reserve.w.p === 0, '3.P@e5 is accepted and acked with the new state');
+  const seenDrop = await blackSeesDrop;
+  check(seenDrop.drop === 'p' && seenDrop.san === 'P@e5' && seenDrop.to === 'e5', 'Black receives the drop (drop: p, P@e5)');
+  check(seenDrop.fen.split(' ')[0].split('/')[3] === '3PP3' && seenDrop.crazyhouse.reserve.w.p === 0, '...with the dropped pawn on the board and the reserve one smaller');
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  check((await emitAck(black.socket, 'resign', { roomId })).ok === true, 'Black resigns');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'resignation' && wr.winner === 'w' && br.reason === 'resignation', 'both players get game_over {resignation, winner: white}');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function testNoTimeLimitOnline() {
   console.log('\n=== No time limit: live-only game with no clock ===');
   const unlimited = { initialSeconds: 0, incrementSeconds: 0 };
@@ -1179,6 +1255,7 @@ async function main() {
   await testAtomicOnline();
   await testDuckChessOnline();
   await testHordeOnline();
+  await testCrazyhouseOnline();
   await testNoTimeLimitOnline();
   await testPairingSurvivesABusyClient();
 

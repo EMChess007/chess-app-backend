@@ -48,6 +48,8 @@ Triggers on every push/PR to `main`. One job:
      carry the untouched sentinel, with a timed room as the control), exact-match pairing, and abandonment still
      applying (it is not Daily). Mutation-checked: breaking the clock guard, the timer guard or the validator each
      fails it.
+   - `npm run test:rejoinFinished` (`scripts/test-rejoin-finished.mjs`, no server needed) — rejoin after the game ended (see
+     "Rejoin after the game ended" below); the real-socket half lives in `scripts/test-multiplayer.mjs`.
    - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
      checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
      `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
@@ -208,3 +210,41 @@ game-over reason, attack-restricted castling, blockade not a draw) each fail at 
   mid-turn is covered only by reasoning (a turn is atomic, so a rejoin never sees half of one), not by a dedicated test.
 - SAN disambiguation comes from chess.js's own legal-move list (king safety, no duck), so a move can occasionally carry an
   unnecessary disambiguator — cosmetic only.
+
+
+## Rejoin after the game ended — finished-room retention
+
+**The bug.** A player whose connection dropped while the game *ended* (checkmate, a flag, resignation, or the abandonment their own
+absence caused) reconnected to a room that no longer existed. `rejoin_game` answered "The game was not found or has already ended."
+and the client sat on "Reconnecting…" for ever, never learning the result.
+
+**The fix (`src/game/rooms.ts`).** `endGame` now records `{ gameOver, tokens: [whiteToken, blackToken], finishedAt }` in
+`RoomManager.finishedRooms` before the room is deleted. `rejoin` on a room that is gone looks there: if the caller holds one of the
+two tokens and the record is at most `FINISHED_RETENTION_MS` (5 minutes) old it answers
+`{ ok: false, error: 'The game has already ended.', finished: true, gameOver }` (`RejoinFinishedAck` / `RejoinAck` in `types.ts`);
+anything else is still the plain "not found". A periodic, `unref()`'d sweep (`sweepFinishedRooms`, every 60 s) drops expired records.
+The socket is deliberately **not** seated or registered anywhere (it cannot move, resign or offer a draw; the opponent is not told
+anyone "reconnected"), and nothing is emitted: the result travels in the ack. Tokens are required so a bare roomId never reveals a
+result. A live game rejoins exactly as before (the answer has `state`, no `finished`).
+
+**Why the finished answer is `ok: false` (backward compatibility).** App builds already in the wild only know `ok` / `error` / `state`
+and do `if (ack.ok) { setFen(ack.state.fen) … }`. An `ok: true` answer with no `state` would make them throw inside the socket callback —
+a crash in a release build — where today they merely stay on "Reconnecting…". As a refusal carrying the result they behave exactly as
+they always did, and a client that knows the new field checks `finished` before `ok`. This was caught while verifying the first version
+in a real browser against a running server, not by a test; section 5 of the script now pins it (a copy of the pre-fix client handler
+must not throw), and the "ok: true" mutant is in the mutation set.
+
+**Tests.** `scripts/test-rejoin-finished.mjs` (39 checks, Node mock timers so the 45 s grace and 5 min retention are deterministic):
+the result for resignation, checkmate, a flag fall, an agreed draw and abandonment (the motivating case), identical to the live
+`game_over`; a wrong/missing/other-room token and an unknown room get "not found" and no result; the late socket is registered
+nowhere; retention is inclusive at exactly 5 minutes and gone one millisecond later; the periodic sweep (nobody calling it) empties
+the store; 50 finished rooms do not accumulate; a live rejoin is the control; a pre-fix client handler survives a finished answer.
+`scripts/test-multiplayer.mjs` adds the real-socket version (a player drops, the opponent resigns, the first reconnects on a new socket
+and gets the result; bogus token refused; late socket cannot move) — 186 checks pass against a running server. Mutation-checked
+(13 mutants: not recording, any token, no retention check, retention boundary, no periodic sweep, wrong payload, only one token
+remembered, an extra `game_over` emit, an unknown room reporting a result, a late socket registered in `socketToRoom`, the answer
+being `ok: true`, the `finished` flag dropped, the sweep boundary — all killed; the sweep-boundary mutant is *not* equivalent
+because the interval can fire exactly at the boundary).
+
+**Known limits.** Records live in memory like the rooms themselves, so a server restart forgets them (the client then correctly shows
+"no longer available"). The client side is in the mobile app (`OnlineGameScreen`, `src/logic/onlineRejoin.ts`).

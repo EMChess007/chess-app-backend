@@ -144,6 +144,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:unlimited
 
+      - name: Run rejoin-after-game-ended regression suite (finished-room retention)
+        working-directory: chess-app/backend
+        run: npm run test:rejoinFinished
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

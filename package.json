@@ -19,6 +19,7 @@
     "test:atomic": "tsx scripts/test-atomic.mjs",
     "test:duck": "tsx scripts/test-duck.mjs",
     "test:unlimited": "tsx scripts/test-unlimited.mjs",
+    "test:rejoinFinished": "tsx scripts/test-rejoin-finished.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs"
   },
   "dependencies": {

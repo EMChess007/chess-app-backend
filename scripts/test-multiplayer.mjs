@@ -1089,6 +1089,61 @@ async function testPairingSurvivesABusyClient() {
   second.disconnect();
 }
 
+// A player whose connection drops while the game ENDS used to reconnect to "game not found" and hang on "Reconnecting..." for ever.
+// The server now keeps the result for a few minutes and hands it to anyone holding one of the room's player tokens (real sockets, the
+// real rejoin_game handler — scripts/test-rejoin-finished.mjs covers every end reason and the retention window against RoomManager).
+async function testRejoinAfterGameEnded() {
+  console.log('\n=== Rejoin after the game ended: the result, not "game not found" ===');
+  const gina = await connect('Gina');
+  const hugo = await connect('Hugo');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const [matchG, matchH] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(gina, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(gina, 'join_queue', { timeControl, isChess960: false });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(hugo, 'match_found');
+      matchFound.catch(() => {});
+      await emitAck(hugo, 'join_queue', { timeControl, isChess960: false });
+      return matchFound;
+    })(),
+  ]);
+  const roomId = matchG.roomId;
+
+  // Gina drops off the network; while she is away Hugo resigns, so the game ends without her.
+  const hugoSeesDisconnect = waitFor(hugo, 'opponent_disconnected');
+  gina.disconnect();
+  await hugoSeesDisconnect;
+  const hugoGameOver = waitFor(hugo, 'game_over');
+  check((await emitAck(hugo, 'resign', { roomId })).ok === true, 'Hugo resigns while Gina is offline');
+  const live = await hugoGameOver;
+  check(live.reason === 'resignation' && live.winner === matchG.color, "the live game_over says Gina (the offline player) won by resignation");
+
+  // Gina comes back on a brand new socket with the token she was given at match_found.
+  const ginaBack = await connect('Gina (reconnected)');
+  const late = await emitAck(ginaBack, 'rejoin_game', { roomId, playerToken: matchG.playerToken });
+  check(late.ok === false && late.finished === true, 'rejoin_game after the game ended is a refusal that carries finished: true (not a bare "game not found")');
+  check(late.error === 'The game has already ended.', '...whose error text an older client would log: "The game has already ended."');
+  check(late.gameOver.reason === live.reason && late.gameOver.winner === live.winner, "...and carries the same result the opponent was sent live");
+  check(late.state === undefined, '...with no live state to resume');
+
+  const hugoLate = await emitAck(hugo, 'rejoin_game', { roomId, playerToken: matchH.playerToken });
+  check(hugoLate.ok === false && hugoLate.finished === true, "the opponent's own token gets the result too");
+
+  // A bare roomId must not reveal anything, and a finished room cannot be played in.
+  const bogus = await emitAck(ginaBack, 'rejoin_game', { roomId, playerToken: 'not-a-real-token' });
+  check(bogus.ok === false && bogus.finished === undefined, 'a bogus token is refused for a finished room and learns nothing');
+  const move = await emitAck(ginaBack, 'make_move', { roomId, from: 'e2', to: 'e4' });
+  check(move.ok === false, 'the late-rejoined socket is not seated: make_move is refused');
+
+  ginaBack.disconnect();
+  hugo.disconnect();
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testMatchmakingAndMoveSync();
@@ -1108,6 +1163,7 @@ async function main() {
   await testAtomicOnline();
   await testDuckChessOnline();
   await testNoTimeLimitOnline();
+  await testRejoinAfterGameEnded();
   await testPairingSurvivesABusyClient();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);

@@ -170,6 +170,25 @@ export interface RejoinStatePayload {
  * opponent is connected) — a spectator has neither. */
 export type SpectateStatePayload = Omit<RejoinStatePayload, 'color' | 'opponentConnected'>;
 
+/** What `rejoin_game` answers when the room has already ENDED (within FINISHED_RETENTION_MS, rooms.ts) and the caller holds one of its
+ * two player tokens: the result, so a player who was offline when the game ended learns it instead of just being told the game "was
+ * not found". Nothing is attached to the socket — it is not seated in a finished game.
+ *
+ * DELIBERATELY `ok: false`: clients already in the wild (released app builds) only know `ok` / `error` / `state` and do
+ * `if (ack.ok) { ack.state.fen … }`. Answering a finished game with `ok: true` and no `state` would make them throw inside the socket
+ * callback — a crash — where today they merely stay on "Reconnecting…". As a refusal they behave exactly as before, and a client that
+ * knows about this field checks `finished` first. */
+export interface RejoinFinishedAck {
+  ok: false;
+  error: string;
+  finished: true;
+  gameOver: GameOverPayload;
+}
+
+/** The ack to `rejoin_game`: the live state of a game still in progress, a refusal, or the (refused, but informative) result of a game
+ * that just ended. */
+export type RejoinAck = Ack<{ state: RejoinStatePayload }> | RejoinFinishedAck;
+
 export interface SpectatorMovePayload extends OpponentMovePayload {
   /** Which side actually made this move — a spectator, unlike a player, has no fixed "opponent"
    * color to infer it from. */

@@ -759,6 +759,15 @@ export class RoomManager {
 
   private endGame(room: Room, reason: GameOverReason, winner: PieceColor | null): void {
     room.status = 'finished';
+    const gameOverPayload: GameOverPayload = { reason, winner };
+    // Remembered for a late rejoin (see FINISHED_RETENTION_MS). Deliberately the FIRST thing after the status flips: once the room is
+    // 'finished' a rejoin can no longer reach it, so if anything below threw (an emit to a dying socket, a spectator broadcast) the
+    // player would be back to "game not found" with no record to find.
+    this.finishedRooms.set(room.id, {
+      gameOver: gameOverPayload,
+      tokens: [room.players.w.playerToken, room.players.b.playerToken],
+      finishedAt: Date.now(),
+    });
     if (room.clockTimer) clearTimeout(room.clockTimer);
 
     for (const color of ['w', 'b'] as const) {
@@ -771,13 +780,6 @@ export class RoomManager {
       }
     }
 
-    const gameOverPayload: GameOverPayload = { reason, winner };
-    // Remembered for a late rejoin (see FINISHED_RETENTION_MS) — recorded before anything below can throw or return.
-    this.finishedRooms.set(room.id, {
-      gameOver: gameOverPayload,
-      tokens: [room.players.w.playerToken, room.players.b.playerToken],
-      finishedAt: Date.now(),
-    });
     this.broadcastToSpectators(room, 'game_over', gameOverPayload);
     for (const spectatorSocketId of room.spectators) {
       this.socketToSpectatingRoom.delete(spectatorSocketId);

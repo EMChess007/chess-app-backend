@@ -192,6 +192,47 @@ console.log('\n=== 5. Old clients (released app builds) are not broken by a fini
   check(legacyClientHandler(liveAck).startsWith('resumed'), 'and a live rejoin still resumes for it (control)');
 }
 
+console.log('\n=== 6. The record is made before anything else in endGame can fail ===');
+{
+  // An emit to a socket that is going away can throw. endGame has already flipped the room to 'finished' by then, so a rejoin can no
+  // longer reach it - the record has to exist regardless, or the player is back to "game not found".
+  const io = stubIo();
+  io.to = (id) => ({
+    emit: (event, payload) => {
+      if (id === 'B' && event === 'game_over') throw new Error('socket went away');
+      io.events.push({ id, event, payload });
+    },
+  });
+  const manager = new RoomManager(io);
+  const created = manager.createRoom({
+    white: { socketId: 'W', userId: null },
+    black: { socketId: 'B', userId: null },
+    timeControl: { initialSeconds: 60, incrementSeconds: 0 },
+    chess960: false, kingOfTheHill: false, threeCheck: false, setupChess: false, fogOfWar: false, giveaway: false, atomic: false, duckChess: false,
+  });
+  let threw = false;
+  try {
+    manager.resign('W', created.roomId);
+  } catch {
+    threw = true;
+  }
+  check(threw, 'precondition: the emit to Black really threw inside endGame');
+  const r = manager.rejoin('W2', { roomId: created.roomId, playerToken: created.whitePlayerToken });
+  check(r.ok === false && r.finished === true && r.gameOver.reason === 'resignation' && r.gameOver.winner === 'b', 'the late rejoin still gets the result even though endGame threw part-way');
+}
+
+console.log('\n=== 7. The sweep interval is unref()d: a real process must be able to exit on its own ===');
+{
+  // A mock timer cannot show this, so use a real process. If the 60 s interval kept the event loop alive, it would never exit by itself
+  // and the timeout would kill it (status null).
+  const { spawnSync } = await import('node:child_process');
+  const code = "import('./src/game/rooms.ts').then(({ RoomManager }) => { new RoomManager({ to: () => ({ emit() {} }) }); console.log('constructed'); });";
+  const started = Number(process.hrtime.bigint() / 1_000_000n);
+  const res = spawnSync(process.execPath, ['--import', 'tsx', '-e', code], { cwd: new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'), encoding: 'utf8', timeout: 25_000 });
+  const took = Number(process.hrtime.bigint() / 1_000_000n) - started;
+  check(res.status === 0 && res.stdout.includes('constructed'), `the process constructed a RoomManager and exited by itself (status ${res.status}, ${took} ms${res.error ? `, ${res.error.code}` : ''})`);
+}
+
 mock.timers.reset();
 console.log(`\nAll ${passed} checks passed.`);
 process.exit(0);

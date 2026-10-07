@@ -234,17 +234,22 @@ they always did, and a client that knows the new field checks `finished` before 
 in a real browser against a running server, not by a test; section 5 of the script now pins it (a copy of the pre-fix client handler
 must not throw), and the "ok: true" mutant is in the mutation set.
 
-**Tests.** `scripts/test-rejoin-finished.mjs` (39 checks, Node mock timers so the 45 s grace and 5 min retention are deterministic):
+**Tests.** `scripts/test-rejoin-finished.mjs` (42 checks, Node mock timers so the 45 s grace and 5 min retention are deterministic):
 the result for resignation, checkmate, a flag fall, an agreed draw and abandonment (the motivating case), identical to the live
 `game_over`; a wrong/missing/other-room token and an unknown room get "not found" and no result; the late socket is registered
 nowhere; retention is inclusive at exactly 5 minutes and gone one millisecond later; the periodic sweep (nobody calling it) empties
-the store; 50 finished rooms do not accumulate; a live rejoin is the control; a pre-fix client handler survives a finished answer.
+the store; 50 finished rooms do not accumulate; a live rejoin is the control; a pre-fix client handler survives a finished answer;
+the record exists even when `endGame` throws part-way (an `emit` to a dying socket) because it is made right after the status flips,
+before any emit; and — in a REAL child process, since a mock timer cannot show it — a `RoomManager` constructed on its own lets the
+process exit by itself, i.e. the 60 s sweep interval is `unref()`d.
 `scripts/test-multiplayer.mjs` adds the real-socket version (a player drops, the opponent resigns, the first reconnects on a new socket
 and gets the result; bogus token refused; late socket cannot move) — 186 checks pass against a running server. Mutation-checked
 (13 mutants: not recording, any token, no retention check, retention boundary, no periodic sweep, wrong payload, only one token
 remembered, an extra `game_over` emit, an unknown room reporting a result, a late socket registered in `socketToRoom`, the answer
 being `ok: true`, the `finished` flag dropped, the sweep boundary — all killed; the sweep-boundary mutant is *not* equivalent
-because the interval can fire exactly at the boundary).
+because the interval can fire exactly at the boundary). Two more, added in a review pass: the record moved back below the emit loop
+(killed by the "endGame threw part-way" check) and the interval no longer `unref()`d (killed: the child process times out instead of
+exiting).
 
 **Known limits.** Records live in memory like the rooms themselves, so a server restart forgets them (the client then correctly shows
 "no longer available"). The client side is in the mobile app (`OnlineGameScreen`, `src/logic/onlineRejoin.ts`).

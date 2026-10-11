@@ -168,6 +168,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:fourplayerRooms
 
+      - name: Run 4 Player bot / takeover / abandonment tests (bot driver, ELO clamp, retake, all-gone, fast-forward, replay parity)
+        working-directory: chess-app/backend
+        run: npm run test:fourplayerBots
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

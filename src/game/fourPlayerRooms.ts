@@ -25,9 +25,23 @@
  * must neither skip the other recipients nor leave the room half-updated: `emit()` catches, logs and moves on. (Lesson from the 2-player
  * `endGame`, where the result record had to be written BEFORE anything that could fail.)
  *
- * NOT HERE (later workstreams, each has its seam): bot seats' moves, takeover after a disconnect, the all-humans-gone rule and the
- * fast-forward (W3 - a bot seat or a disconnected seat simply keeps its clock running until then, and flags like anyone); the queue,
- * seat assignment and the socket event registration (W4). A room is created with its four seats already decided.
+ * BOTS (W3). A seat is `controller: 'human' | 'bot'`. After every commit - and when a room is created - `scheduleBot()` arms ONE bot timer
+ * if the seat on move is a bot's; when it fires the bot's move goes through the same funnel as anyone's (actor 'bot': time charged, move
+ * played, increment added). The callback re-checks the room, the `seq` it was armed for, the seat's controller and that it is still the
+ * seat's turn, so a callback that outlived a retake is a no-op. Bots run on their OWN random stream (`botRng`), so the engine's randomness
+ * (dead kings' walks) does not depend on what a bot decided - which is what lets a test replay a game on an independent engine. A bot
+ * decision is synchronous on the shared event loop, so every bot is clamped to FOUR_SERVER_BOT_MAX_ELO (the "careful" tier, ~20 ms worst case).
+ *
+ * DISCONNECT -> TAKEOVER -> RETAKE. A disconnected human's seat keeps its clock running and, after FOUR_TAKEOVER_GRACE_MS, is taken over by a
+ * bot (named as the human, elo FOUR_BOT_ELO, `botReason: 'takeover'`) - but only if the seat is still active, still disconnected and some
+ * ORIGINAL human is still connected: a bot is never handed an empty room. The human may retake the seat by rejoining at ANY time until the
+ * game ends: the seat becomes human again, its grace timer and pending bot move are cancelled.
+ *
+ * EVERY HUMAN LEAVES. When no original human has a live socket an FOUR_ALL_GONE_MS timer starts (any rejoin cancels it); at expiry the game
+ * ends with reason 'abandoned' and no winners. And when no human-controlled seat is still ACTIVE but a human is still watching (eliminated
+ * seats place by score, so the game is finished for them), bots FAST-FORWARD: no think delay, one ply per timer tick.
+ *
+ * NOT HERE (W4): the queue, seat assignment and the socket event registration. A room is created with its four seats already decided.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -66,10 +80,12 @@ import {
   QUEEN,
   ROOK,
   addIncrement,
+  chooseBotMove,
   clockTick,
   createClock,
   findLegalMove,
   initialState,
+  legalMoves,
   moveLabel,
   parseSquare,
   playMove,
@@ -80,9 +96,25 @@ import {
   type FourPlayerClock,
   type FourPlayerState,
   type GameEvent,
+  type Move,
   type Seat,
 } from './fourPlayer/index.js';
-import { FOUR_CHAT_MIN_INTERVAL_MS, FOUR_FINISHED_RETENTION_MS, FOUR_FINISHED_SWEEP_INTERVAL_MS, FOUR_MOVE_RATE_LIMIT, FOUR_NAME_MAX_LENGTH } from './fourPlayerConfig.js';
+import {
+  FOUR_ALL_GONE_MS,
+  FOUR_BOT_ELO,
+  FOUR_CHAT_MIN_INTERVAL_MS,
+  FOUR_FAST_FORWARD_DELAY_MS,
+  FOUR_FINISHED_RETENTION_MS,
+  FOUR_FINISHED_SWEEP_INTERVAL_MS,
+  FOUR_MOVE_RATE_LIMIT,
+  FOUR_NAME_MAX_LENGTH,
+  FOUR_SERVER_BOT_MAX_ELO,
+  FOUR_TAKEOVER_GRACE_MS,
+  fourBotThinkMs,
+} from './fourPlayerConfig.js';
+
+/** What a bot decision needs from the engine: given a position, a strength and a random stream, a move (or null). Injectable for tests. */
+export type FourBotChooser = (state: FourPlayerState, elo: number, rng: () => number) => Move | null;
 
 /** One seat as the matchmaker (W4) hands it over; `seats[i]` is seat i (Red, Blue, Yellow, Green), already in the random order decided. */
 export interface FourSeatSetup {
@@ -124,6 +156,8 @@ interface FourSeatRuntime {
   lastChatAt: number | null;
   /** Timestamps of this seat's recent `four_make_move` calls (rate limit). */
   moveCalls: number[];
+  /** A disconnected human's countdown to the bot takeover (see FOUR_TAKEOVER_GRACE_MS); null when there is none. */
+  graceTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface FourRoom {
@@ -141,6 +175,10 @@ interface FourRoom {
   timeControl: FourTimeControl;
   timeControlLabel: string;
   clockTimer: ReturnType<typeof setTimeout> | null;
+  /** At most one: the pending move of the bot on move (see scheduleBot). */
+  botTimer: ReturnType<typeof setTimeout> | null;
+  /** Running while NO original human has a live socket; at expiry the game ends with no result. */
+  allGoneTimer: ReturnType<typeof setTimeout> | null;
   /** The randomness the ENGINE uses (dead kings' walks); injectable for tests. */
   rng: () => number;
 }
@@ -173,9 +211,17 @@ export class FourRoomManager {
   private socketToSeat = new Map<string, { roomId: string; seat: Seat }>();
   private socketToSpectating = new Map<string, string>();
   private readonly rng: () => number;
+  private readonly botRng: () => number;
+  private readonly chooseBot: FourBotChooser;
 
-  constructor(private io: Server, options: { rng?: () => number } = {}) {
+  /**
+   * `rng` is the ENGINE's randomness (dead kings' walks), `botRng` the BOTS' (kept separate so a bot's decision never shifts the engine's
+   * stream), `chooseBotMove` the decision function (the engine's own; a test can inject a recording or faulty one).
+   */
+  constructor(private io: Server, options: { rng?: () => number; botRng?: () => number; chooseBotMove?: FourBotChooser } = {}) {
     this.rng = options.rng ?? Math.random;
+    this.botRng = options.botRng ?? Math.random;
+    this.chooseBot = options.chooseBotMove ?? chooseBotMove;
     // Without a sweep a long-running process would keep every finished game's tiny record until a late rejoin happened to look at it.
     // unref()'d so it never keeps the process alive on its own (same as the 2-player manager).
     setInterval(() => this.sweepFinishedRooms(), FOUR_FINISHED_SWEEP_INTERVAL_MS).unref();
@@ -215,6 +261,7 @@ export class FourRoomManager {
         disconnectedAt: null,
         lastChatAt: null,
         moveCalls: [],
+        graceTimer: null,
       };
     }) as FourRoom['seats'];
 
@@ -231,6 +278,8 @@ export class FourRoomManager {
       timeControl: timeControl.value,
       timeControlLabel: params.timeControlLabel ?? defaultLabel(timeControl.value),
       clockTimer: null,
+      botTimer: null,
+      allGoneTimer: null,
       rng: this.rng,
     };
     this.rooms.set(id, room);
@@ -253,6 +302,7 @@ export class FourRoomManager {
       this.emit(runtime.socketId, 'four_match_found', payload);
     }
     this.armClockTimer(room);
+    this.scheduleBot(room); // Red may be a bot
     return { roomId: id, tokens: seats.map((s) => s.playerToken) };
   }
 
@@ -280,7 +330,10 @@ export class FourRoomManager {
     };
     this.broadcast(room, 'four_state', payload);
     if (room.state.result) this.endGame(room);
-    else this.armClockTimer(room);
+    else {
+      this.armClockTimer(room);
+      this.scheduleBot(room);
+    }
   }
 
   /**
@@ -312,6 +365,113 @@ export class FourRoomManager {
     else this.armClockTimer(room); // not actually out of time (cannot happen with force; kept so a stale timer can never stall a room)
   }
 
+  // --- Bots, takeover and abandonment ---------------------------------------------------------------------------------------------
+
+  /** Original humans that currently have a live socket: the ones who can still watch or play (a seat a bot has taken over does not count). */
+  private connectedHumans(room: FourRoom): number {
+    return room.seats.filter((s) => s.originalHuman && s.socketId !== null).length;
+  }
+
+  /**
+   * True when no human-controlled seat is still ACTIVE but at least one human is still connected: those humans are eliminated and only
+   * waiting for the final placing, so the bots finish the game without think delays. A disconnected ACTIVE human still counts as playing
+   * (it may come back) until its seat is taken over.
+   */
+  private isFastForward(room: FourRoom): boolean {
+    const humanStillPlaying = room.seats.some((s, seat) => s.controller === 'human' && room.state.status[seat] === 'active');
+    return !humanStillPlaying && this.connectedHumans(room) > 0;
+  }
+
+  /** (Re)arms the room's ONE bot timer: it fires when the bot on move should play. Called after every commit and after a takeover or a
+   * retake, so it also CANCELS a pending move whose seat is no longer a bot's. */
+  private scheduleBot(room: FourRoom): void {
+    if (room.botTimer) clearTimeout(room.botTimer);
+    room.botTimer = null;
+    if (room.status !== 'active' || room.state.result) return;
+    const seat = room.state.turn;
+    if (room.seats[seat].controller !== 'bot' || room.state.status[seat] !== 'active') return;
+    const delay = this.isFastForward(room) ? FOUR_FAST_FORWARD_DELAY_MS : fourBotThinkMs(room.timeControl.initialSeconds);
+    const armedFor = room.seq;
+    room.botTimer = setTimeout(() => this.playBotTurn(room, armedFor), delay);
+  }
+
+  /** The bot on move plays - through the same funnel as any move (time charged, increment added), but nothing about it is trusted: the
+   * decision is clamped to FOUR_SERVER_BOT_MAX_ELO and checked against the legal moves, and a faulty bot can never stall a room. */
+  private playBotTurn(room: FourRoom, armedFor: number): void {
+    room.botTimer = null;
+    if (room.status !== 'active' || room.seq !== armedFor) return; // stale: the position moved on since this was armed
+    const seat = room.state.turn;
+    const runtime = room.seats[seat];
+    if (runtime.controller !== 'bot' || room.state.status[seat] !== 'active') return; // a human retook the seat
+
+    const tick = this.charge(room, false);
+    if (tick.events.length > 0) {
+      this.commit(room, { actor: 'clock', state: tick.state, clock: tick.clock, events: tick.events, move: null });
+      return;
+    }
+    const legal = legalMoves(tick.state, seat);
+    if (legal.length === 0) {
+      console.error(`[fourRooms] seat ${seat} of room ${room.id} is on move with no legal move`); // the engine never hands out such a turn
+      return;
+    }
+    const elo = Math.min(runtime.elo ?? FOUR_BOT_ELO, FOUR_SERVER_BOT_MAX_ELO);
+    // An exception inside a timer callback would be an uncaught exception - it would take down EVERY game on this process - so a bot that
+    // throws is treated like one that returns nothing: log it and play the first legal move.
+    let move: Move | null = null;
+    let fault = 'no move';
+    try {
+      move = this.chooseBot(tick.state, elo, this.botRng);
+    } catch (err) {
+      fault = `an error (${err instanceof Error ? err.message : String(err)})`;
+    }
+    if (move && !legal.some((m) => m.from === move!.from && m.to === move!.to && m.flags === move!.flags)) {
+      fault = 'an illegal move';
+      move = null;
+    }
+    if (!move) {
+      console.error(`[fourRooms] the bot of seat ${seat} in room ${room.id} returned ${fault}; playing the first legal move instead`);
+      move = legal[0];
+    }
+    const applied = playMove(tick.state, move, room.rng);
+    this.commit(room, {
+      actor: 'bot',
+      state: applied.state,
+      clock: addIncrement(tick.clock, seat, applied.state),
+      events: applied.events,
+      move: describeMove(seat, move),
+      log: { seat, text: moveLabel(move) },
+    });
+  }
+
+  /** The grace period of a disconnected human ran out. Takes the seat over with a bot - unless it came back, was eliminated meanwhile,
+   * or nobody is left (then the all-gone timer decides: a bot is never handed an empty room). */
+  private onGraceExpired(room: FourRoom, seat: Seat): void {
+    const runtime = room.seats[seat];
+    runtime.graceTimer = null;
+    if (room.status !== 'active') return;
+    if (runtime.controller !== 'human' || runtime.connected) return;
+    if (room.state.status[seat] !== 'active') return;
+    if (this.connectedHumans(room) === 0) return;
+    runtime.controller = 'bot';
+    runtime.botReason = 'takeover';
+    runtime.elo = FOUR_BOT_ELO;
+    this.broadcastSeats(room);
+    this.scheduleBot(room); // if it is this seat's turn, the bot plays it
+  }
+
+  /** Starts the all-gone countdown if no original human is connected (and none is running). */
+  private checkAllGone(room: FourRoom): void {
+    if (room.allGoneTimer || this.connectedHumans(room) > 0) return;
+    room.allGoneTimer = setTimeout(() => this.endAbandoned(room), FOUR_ALL_GONE_MS);
+  }
+
+  /** Nobody came back: the game ends with NO RESULT (no winners; nothing was ever persisted for 4-player). */
+  private endAbandoned(room: FourRoom): void {
+    room.allGoneTimer = null;
+    if (room.status !== 'active' || this.connectedHumans(room) > 0) return;
+    this.finish(room, { roomId: room.id, reason: 'abandoned', winners: [], scores: [...room.state.score], state: serialize(room.state) });
+  }
+
   // --- Moves and resignation ------------------------------------------------------------------------------------------------
 
   /** `four_make_move`. The seat is the socket's own; an illegal / out-of-turn / late move leaves the room untouched (a LATE one also
@@ -337,13 +497,12 @@ export class FourRoomManager {
       return { ok: false, error: 'Your time ran out.' };
     }
     const applied = playMove(tick.state, move, room.rng);
-    const promotion = promotionOf(move);
     this.commit(room, {
       actor: 'human',
       state: applied.state,
       clock: addIncrement(tick.clock, seat, applied.state),
       events: applied.events,
-      move: { seat, from: squareName(move.from), to: squareName(move.to), ...(promotion ? { promotion: PROMOTION_LETTER[promotion] } : {}), label: moveLabel(move) },
+      move: describeMove(seat, move),
       log: { seat, text: moveLabel(move) },
     });
     return { ok: true, seq: room.seq };
@@ -381,18 +540,26 @@ export class FourRoomManager {
 
   // --- End of game ----------------------------------------------------------------------------------------------------------
 
-  /**
-   * Ends a game the engine has decided: the result is recorded for late rejoins FIRST (so nothing below can lose it), then timers are
-   * cleared, `four_game_over` goes to every seat and spectator, sockets are released and the room is removed.
-   */
+  /** Ends a game the ENGINE has decided (the last non-eliminated seat, the dead position, the ply cap). */
   private endGame(room: FourRoom): void {
     const result = room.state.result;
     if (!result) throw new Error('endGame: the engine has not ended this game');
+    this.finish(room, { roomId: room.id, reason: result.reason, winners: [...result.winners], scores: [...room.state.score], state: serialize(room.state) });
+  }
+
+  /**
+   * Ends a game for any reason: the result is recorded for late rejoins FIRST (so nothing below can lose it), then EVERY timer the room
+   * owns is cleared (clock, bot, all-gone, each seat's grace - a timer left behind would keep the whole room alive), `four_game_over`
+   * goes to every seat and spectator, sockets are released and the room is removed.
+   */
+  private finish(room: FourRoom, gameOver: FourGameOverPayload): void {
     room.status = 'finished';
-    const gameOver: FourGameOverPayload = { roomId: room.id, reason: result.reason, winners: [...result.winners], scores: [...room.state.score], state: serialize(room.state) };
     this.finishedRooms.set(room.id, { gameOver, tokens: room.seats.map((s) => s.playerToken).filter((t): t is string => t !== null), finishedAt: Date.now() });
-    if (room.clockTimer) clearTimeout(room.clockTimer);
+    for (const timer of [room.clockTimer, room.botTimer, room.allGoneTimer, ...room.seats.map((s) => s.graceTimer)]) if (timer) clearTimeout(timer);
     room.clockTimer = null;
+    room.botTimer = null;
+    room.allGoneTimer = null;
+    for (const seat of room.seats) seat.graceTimer = null;
 
     this.broadcast(room, 'four_game_over', gameOver);
     for (const seat of room.seats) if (seat.socketId) this.socketToSeat.delete(seat.socketId);
@@ -444,6 +611,19 @@ export class FourRoomManager {
     runtime.connected = true;
     runtime.disconnectedAt = null;
     this.socketToSeat.set(socketId, { roomId: room.id, seat });
+    // Back in: the grace countdown and the all-gone countdown (if this was the last human) are over...
+    if (runtime.graceTimer) clearTimeout(runtime.graceTimer);
+    runtime.graceTimer = null;
+    if (room.allGoneTimer) clearTimeout(room.allGoneTimer);
+    room.allGoneTimer = null;
+    // ...and a seat a bot had taken over is the human's again (RETAKE, at any time until the game ends). scheduleBot also cancels a bot
+    // move that was already pending for this seat.
+    if (runtime.controller === 'bot') {
+      runtime.controller = 'human';
+      runtime.botReason = undefined;
+      runtime.elo = undefined;
+    }
+    this.scheduleBot(room);
     this.broadcastSeats(room);
 
     const state: FourRejoinState = { ...this.roomState(room), seat };
@@ -464,7 +644,13 @@ export class FourRoomManager {
     runtime.socketId = null;
     runtime.connected = false;
     runtime.disconnectedAt = Date.now();
+    // An ACTIVE human's seat is taken over by a bot if it stays away for the grace period (an eliminated one has nothing left to play).
+    if (runtime.controller === 'human' && room.state.status[located.seat] === 'active' && !runtime.graceTimer) {
+      runtime.graceTimer = setTimeout(() => this.onGraceExpired(room, located.seat), FOUR_TAKEOVER_GRACE_MS);
+    }
     this.broadcastSeats(room);
+    this.checkAllGone(room);
+    this.scheduleBot(room); // the room may have just become a fast-forward one (the last human left while only eliminated ones watched)
   }
 
   // --- Spectating and chat --------------------------------------------------------------------------------------------------
@@ -546,6 +732,8 @@ export class FourRoomManager {
         name: s.name,
         ...(s.elo !== undefined ? { elo: s.elo } : {}),
         connected: s.controller === 'bot' ? true : s.connected,
+        // A disconnected human whose seat is still waiting to be taken over: how long it has left (the client counts down from this).
+        ...(s.graceTimer && s.disconnectedAt !== null ? { graceMsLeft: Math.max(0, FOUR_TAKEOVER_GRACE_MS - (Date.now() - s.disconnectedAt)) } : {}),
       };
     }) as FourSeats;
   }
@@ -591,6 +779,12 @@ export class FourRoomManager {
       console.error(`[fourRooms] failed to send ${event} to ${socketId}:`, err);
     }
   }
+}
+
+/** A played move as the wire carries it (squares as names, the promotion piece as a letter, the coordinate label). */
+function describeMove(seat: Seat, move: Move): FourMoveInfo {
+  const promotion = promotionOf(move);
+  return { seat, from: squareName(move.from), to: squareName(move.to), ...(promotion ? { promotion: PROMOTION_LETTER[promotion] } : {}), label: moveLabel(move) };
 }
 
 function defaultLabel(tc: FourTimeControl): string {

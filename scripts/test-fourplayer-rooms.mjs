@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import { mock } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { FourRoomManager } from '../src/game/fourPlayerRooms.ts';
+import { KINGS, TC, UUID, eventsOf, mulberry32, newGame, startFakeTimers, stubIo } from './fourplayer-test-kit.mjs';
 import { FOUR_CHAT_MIN_INTERVAL_MS, FOUR_FINISHED_RETENTION_MS, FOUR_FINISHED_SWEEP_INTERVAL_MS, FOUR_MOVE_RATE_LIMIT } from '../src/game/fourPlayerConfig.ts';
 import { FINISHED_RETENTION_MS as TWO_PLAYER_RETENTION_MS } from '../src/game/rooms.ts';
 import * as E from '../src/game/fourPlayer/index.ts';
@@ -26,93 +27,7 @@ function check(condition, message) {
   console.log(`  ok  ${message}`);
 }
 
-mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
-
-// Count the timeouts that are actually pending (the mocked setTimeout offers no such count): each active room must own exactly ONE, and a
-// finished game none - a timer left behind would keep the whole room object alive until it fired, up to an hour after every game.
-const liveTimeouts = new Set();
-{
-  const mockedSet = globalThis.setTimeout;
-  const mockedClear = globalThis.clearTimeout;
-  globalThis.setTimeout = (fn, ms, ...args) => {
-    const handle = mockedSet(() => {
-      liveTimeouts.delete(handle);
-      fn(...args);
-    }, ms);
-    liveTimeouts.add(handle);
-    return handle;
-  };
-  globalThis.clearTimeout = (handle) => {
-    liveTimeouts.delete(handle);
-    mockedClear(handle);
-  };
-}
-
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function stubIo() {
-  const events = [];
-  const failing = new Set(); // 'socketId' (every event) or 'socketId:event'
-  return {
-    events,
-    failing,
-    to: (id) => ({
-      emit: (event, payload) => {
-        if (failing.has(id) || failing.has(`${id}:${event}`)) throw new Error(`stub: send to ${id} failed`);
-        events.push({ id, event, payload });
-      },
-    }),
-  };
-}
-const eventsOf = (io, event, id) => io.events.filter((e) => e.event === event && (id === undefined || e.id === id));
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const TC = { initialSeconds: 600, incrementSeconds: 0 };
-
-/** A game of four humans (S0..S3, "P0".."P3"), or with `bots` bot seats at the end. Returns handles and white-box accessors. */
-function newGame({ tc = TC, rng, bots = 0, label, names } = {}) {
-  const io = stubIo();
-  const mgr = new FourRoomManager(io, rng ? { rng } : {});
-  const seats = [0, 1, 2, 3].map((i) =>
-    i < 4 - bots ? { kind: 'human', socketId: `S${i}`, name: names?.[i] ?? `P${i}` } : { kind: 'bot', socketId: null, name: 'Bot', elo: 1200, botReason: 'fill' }
-  );
-  const created = mgr.createRoom({ seats, timeControl: tc, timeControlLabel: label });
-  const g = { io, mgr, id: created.roomId, tokens: created.tokens, room: () => mgr.rooms.get(created.roomId) };
-  g.state = () => g.room().state;
-  g.fp = () => E.serialize(g.room().state);
-  g.seq = () => g.room().seq;
-  g.mv = (seat, from, to, promotion) => mgr.makeMove(`S${seat}`, { roomId: g.id, from, to, ...(promotion ? { promotion } : {}) });
-  g.resign = (seat) => mgr.resign(`S${seat}`, { roomId: g.id });
-  /** The first legal move of the seat on move, as square names. */
-  g.firstMove = (seat = g.state().turn) => {
-    const m = E.legalMoves(g.state(), seat)[0];
-    return { from: E.squareName(m.from), to: E.squareName(m.to) };
-  };
-  g.playFirst = (seat = g.state().turn) => {
-    const { from, to } = g.firstMove(seat);
-    return g.mv(seat, from, to);
-  };
-  /** White-box: replace the position (test set-up only; production code can only change it through commit()). */
-  g.setPosition = (pieces, options = {}) => {
-    const room = g.room();
-    room.state = E.stateFromPieces(pieces, options);
-  };
-  g.stopTimer = () => {
-    const room = g.room();
-    clearTimeout(room.clockTimer);
-    room.clockTimer = null;
-  };
-  g.clear = () => (io.events.length = 0);
-  return g;
-}
-const KINGS = ['rK@h1', 'bK@a8', 'yK@g14', 'gK@n7'];
+const { liveTimeouts } = startFakeTimers(); // fake timers + a count of the timeouts still pending (see the kit)
 
 console.log('\n=== 0. The configured numbers are the decided ones (pinned as literals: the boundary tests below follow the constants) ===');
 {
@@ -774,7 +689,8 @@ console.log('\n=== 11. commit() is the only thing that changes a game (source-le
   check(['room.state =', 'room.clock =', 'room.turnStartedAt =', 'room.seq++'].every((s) => body.includes(s)), 'commit() assigns the position, the clocks, the turn timer base and seq');
   check(inside.length === 4 && elsewhere.length === 0, `no other code assigns room.state / clock / seq / turnStartedAt (inside commit: ${inside.length}, anywhere else: ${elsewhere.length})`);
   check((outside.match(/this\.io\.to\(/g) ?? []).length === 1, 'every send goes through the one emit() helper (a failing socket cannot abort a funnel)');
-  check(/status = 'finished';[\s\S]{0,400}this\.finishedRooms\.set\([\s\S]{0,400}this\.broadcast\(room, 'four_game_over'/.test(src), 'endGame records the result BEFORE it sends anything');
+  check(/private finish\([\s\S]{0,200}status = 'finished';[\s\S]{0,400}this\.finishedRooms\.set\([\s\S]{0,700}this\.broadcast\(room, 'four_game_over'/.test(src), 'finish() records the result BEFORE it sends anything');
+  check((src.match(/'four_game_over'/g) ?? []).length === 1, 'four_game_over is sent from exactly ONE place, so no way of ending a game can skip the record-first rule');
 }
 
 console.log('\n=== 12. Random full games, move by move against an independent engine replay ===');

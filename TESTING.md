@@ -59,6 +59,9 @@ Triggers on every push/PR to `main`. One job:
    - `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, no server needed) — the 4 Player room manager: the commit funnel,
      clocks (fake timers), rejoin and finished-result retention, disconnects, chat, spectating, rate limits, hostile input, and seeded random
      games checked move by move against an independent engine replay (§11).
+   - `npm run test:fourplayerBots` (`scripts/test-fourplayer-bots.mjs`, no server needed) — the 4 Player bot driver, takeover and retake, the
+     all-humans-gone rule, fast-forward, every pending timer counted, and seeded games with bots and random disconnects replayed on an
+     independent engine (§12).
    - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
      checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
      `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
@@ -351,9 +354,8 @@ devDependency). (4) `index.ts` is the only generated file that is not a copy; it
 
 Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §4. W2 is the server's authority over a 4-seat game: `src/game/fourPlayerRooms.ts` (`FourRoomManager`) and its
 tunables `src/game/fourPlayerConfig.ts`. **Nothing loads them yet** — no socket handler is registered (W4) and `index.ts` / `socketHandlers.ts`
-are untouched (verified by grep), so the running server behaves exactly as before. Out of scope here, each with its seam: bot seats' moves, takeover
-after a disconnect, the all-humans-gone rule and fast-forward (W3: until then a bot seat or a disconnected seat just keeps its clock running and
-flags like anyone); the queue, seat assignment and event registration (W4: a room is created with its four seats already decided).
+are untouched (verified by grep), so the running server behaves exactly as before. Out of scope for W2 (bot moves, takeover after a disconnect, the all-humans-gone rule and fast-forward are W3, §12; the queue, seat
+assignment and event registration are W4: a room is created with its four seats already decided).
 
 **The design in five rules** (the doc comment at the top of the file has the long version):
 1. **One funnel.** Every state change - a move, a resignation, a flag fall - ends in `commit()`, the ONLY place `room.state`, `room.clock`,
@@ -378,7 +380,7 @@ flags like anyone); the queue, seat assignment and event registration (W4: a roo
 2-player chat, one message per seat per second), `spectate` / `stopSpectating` / `listActiveGames` (names and kinds only), `sweepFinishedRooms`
 (an `unref()`'d interval). `four_make_move` is limited to 10 calls per seat per second, illegal attempts included.
 
-**Tests** — `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, tsx, no server or database, **204 checks**, ~5 s): stub sockets recording
+**Tests** — `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, tsx, no server or database, **205 checks**, ~5 s; its helpers now live in `scripts/fourplayer-test-kit.mjs`, shared with §12's script): stub sockets recording
 every emit + Node fake timers and `Date`, so a flag fall, a 999 ms vs 1000 ms boundary and a 20 s off-turn resignation are exact. Sections: the configured
 numbers as literals; timers counted (one per active room, none after a game); room creation and token privacy (no token appears anywhere but in its
 owner's own `four_match_found`); the happy path and who is told what; every refusal (out of turn, illegal, another seat's piece, off-board and
@@ -417,4 +419,66 @@ four broadcasts). A `four_state` is about 700 bytes (see §10).
 **Known limits.** In-memory like the 2-player rooms (a restart ends every game); single process. No cap on spectators per room yet (each costs one
 send per state) — W4 should decide one. Clock accounting uses `Date.now()` and one `setTimeout` per room: an event-loop stall delays when a flag fall
 is PUBLISHED but not the accounting, and a late move is refused regardless. A room needs at least one human (a human-less room is W3's all-gone rule).
-While no bot driver exists a bot seat never moves, so rooms with bot seats are created in W2 only to test the data shape.
+(As built in W2 a bot seat never moved; W3 added the bot driver - §12.)
+
+## 12. 4 Player Chess Online (server side) — bots, takeover, abandonment (workstream W3)
+
+Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §4.4 and §6. W3 extends the room manager of §11 (same file, `src/game/fourPlayerRooms.ts`; new constants in
+`fourPlayerConfig.ts`). **Still nothing loads it** (no socket handler until W4; verified by grep), so the running server behaves as before.
+
+**What it adds** (the doc comment at the top of the file has the long version):
+- **A bot driver.** After every commit - and when a room is created - `scheduleBot()` arms ONE bot timer if the seat on move is a bot's (450 ms,
+  200 ms in a Bullet game - the app's own rule, "Bullet" being the 1 and 2 minute presets). The bot's move goes through the same funnel as anyone's
+  (actor `bot`: time charged, move played, increment added). The callback re-checks the room, the `seq` it was armed for, the seat's controller and
+  that it is still the seat's turn, so a callback that outlived a retake is a no-op. Bots run on their OWN random stream (`botRng`), so the engine's
+  randomness (dead kings' walks) never depends on a bot's decision - which is what lets the tests replay a game with bots on an independent engine.
+- **The ELO clamp.** A bot decision is synchronous on the event loop that serves every game. Every bot - fill, takeover, or a seat configured at
+  3000 - decides at `min(elo, 1700)`, the top of the "careful" tier (measured ~20 ms worst case against ~200 ms for the deep tier, spec §6.3), which is the
+  same safety as a worker thread with none of its plumbing. Tests pin the number, that it is below `DEEP_FROM_ELO`, and every elo/clamp pair.
+- **A bot can never stall a room or take the process down.** The chosen move is checked against the engine's legal moves; a bot that returns nothing,
+  an illegal move, a legal from/to with the wrong flags, or THROWS gets the first legal move played instead and the fault is logged. (An exception inside
+  a timer callback would be an uncaught exception that kills EVERY game on the process - found while writing this and now caught and tested.)
+- **Takeover.** A disconnected human's seat keeps its clock running; the room announces `graceMsLeft` (clients count down from it); after
+  `FOUR_TAKEOVER_GRACE_MS` (45 s) a bot takes the seat - named as the human, ELO 1200, `botReason: 'takeover'` - but ONLY if the seat is still active, still
+  disconnected, and some original human is still connected: a bot is never handed an empty room. An eliminated human's disconnect starts no countdown.
+- **Retake.** `four_rejoin` with the token at ANY time until the game ends: the seat is the human's again, its grace countdown, a pending bot move and
+  the all-gone countdown are cancelled, everyone is told. (A bot move that was armed for the seat but has not fired is cancelled; one that somehow fires
+  is a no-op because the controller changed.)
+- **Everybody leaves.** When no ORIGINAL human has a live socket an all-gone countdown starts (45 s; a bot-held seat does not keep a game alive; a
+  spectator does not count; any rejoin cancels it); at expiry the game ends with reason `abandoned`, NO winners, nothing persisted, and the late-rejoin
+  record is kept like any other. At a seat's grace expiry with nobody connected there is no takeover - the all-gone countdown decides.
+- **Fast-forward.** When no human-controlled seat is still ACTIVE but a human is still connected (eliminated seats place by score, so the game is not over
+  for them) the bots play with no think delay, one ply per timer, so one such game cannot starve the others. An ACTIVE human who is merely away still counts as
+  playing (it may come back) until its seat is taken over. If the last watcher leaves, the bots go back to the normal pace and the all-gone rule ends it.
+- **`finish()`** is now the single way a game ends (engine result or abandonment); it records the result BEFORE sending, clears EVERY timer the room owns
+  (clock, bot, all-gone, each seat's grace) and `four_game_over` is sent from nowhere else (pinned at source level).
+
+**Tests** — `npm run test:fourplayerBots` (`scripts/test-fourplayer-bots.mjs`, tsx, no server or database, **124 checks**, ~8 s), sharing helpers with the W2
+script through `scripts/fourplayer-test-kit.mjs` (stub sockets, fake timers with a COUNT of pending timers and a record of every delay a timer was armed
+with, the game factory). Sections: the configured numbers as literals; the bot driver (450/200 ms to the millisecond, Red as a bot, increment, stale
+callbacks, the four kinds of faulty bot, the clamp for 8 elo values, the bots' own random stream, one timer per bot move); takeover (the exact moment, the
+announced fields, a seat on move at the takeover, an eliminated seat, a second absence, `graceMsLeft` later in the grace); retake at every stage (during
+the grace, after the takeover, while the bot's move is pending, after the bot has played); all-gone (ordering against the takeover, cancellation, bot-held
+seats, spectators); fast-forward (including WHICH delays were used, takeover into fast-forward, watchers leaving and returning); a count of every
+pending timer; **12 seeded games with bots, random disconnects, rejoins and resignations (2 866 published states), every one replayed on an independent
+engine**; the cost of a bot decision; source pins. Two things about Node's fake timers shaped the tests: they are GLOBAL (a game left running by one
+scenario is driven by the next one's `tick()`, so every scenario disposes the previous game), and a timer armed INSIDE a tick is timed from the END of that
+tick (so the takeover and bot-move tests use two ticks, and fast-forward plies are stepped by hand - a real `setTimeout(0)` is a separate event-loop turn).
+
+**Mutation checks (CHECKLIST §2): 68 planted divergences in the new logic and constants, 62 killed, 6 equivalent by construction.** Covered: scheduling after
+a commit and at creation, re-arming, the controller check, the think delay, fast-forward always / never / ignoring watchers / ignoring an away human, stale and
+retaken callbacks, the bot's increment and actor, the clamp (removed, a floor, wrong default), illegal / fallback / throwing bots, the bots' random stream, every
+takeover guard, the takeover's elo / reason / announcement / scheduling, grace start and the eliminated seat, the all-gone start / cancel / count / reason /
+winners, retake (controller, reason, elo, pending bot move, all-gone), `finish()` clearing each kind of timer, `graceMsLeft` (both directions), and every
+config number with its boundaries. The first run left ONE real gap, closed: `graceMsLeft` counting the wrong way survived because it was only read at t = 0.
+**The six equivalents:** the no-legal-move guard (the engine never hands out such a turn); the `onGraceExpired` guards for "connected again" and "room
+finished" and the `endAbandoned` guard for "somebody came back" (each is a second line of defence behind a cancellation - removing the cancellation AND the guard
+is killed); `connected` vs `socketId !== null` in the human count (the same fact held twice for a human seat); and `originalHuman &&` (a bot seat never has a
+socket).
+
+**Cost** (measured, test section 8): **1 299 bot decisions across 12 games, mean 0.45 ms, p99 3.1 ms, max 4.6 ms** - including 400 by a seat configured at ELO 3000
+and held at 1700. A whole fast-forwarded game (~700 plies) is played in about a second of CPU, in separate timer turns.
+
+**Known limits.** The takeover bot is always ELO 1200 (decision A3); a taken-over seat is not "remembered" as stronger or weaker. A game with no original human
+connected ends after 45 s even if the bots could have finished it - by decision B3 (no result, nothing persisted). Random games exercise retakes only rarely (1 of 12);
+the constructed tests cover every stage. Open for W4: a per-room spectator cap, the fill timer and queue, and registering the events.

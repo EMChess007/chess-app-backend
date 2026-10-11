@@ -50,6 +50,12 @@ Triggers on every push/PR to `main`. One job:
      fails it.
    - `npm run test:rejoinFinished` (`scripts/test-rejoin-finished.mjs`, no server needed) — rejoin after the game ended (see
      "Rejoin after the game ended" below); the real-socket half lives in `scripts/test-multiplayer.mjs`.
+   - `npm run sync:fourplayer -- --check` — the generated 4 Player engine + wire copy matches the app source (see §10); a stale,
+     hand-edited, missing or stray generated file fails the build. Run right after the type-check.
+   - `npm run test:fourplayerSync` (`scripts/test-fourplayer-sync.mjs`, no server needed) — the generator itself: transform, closure rule,
+     drift detection, CRLF tolerance, CLI exit codes (§10).
+   - `npm run test:fourplayer` (`scripts/test-fourplayer.mjs`, no server needed) — behavioural parity of the app's 4 Player engine and
+     the generated server copy over seeded full games, bots included (§10).
    - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
      checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
      `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
@@ -253,3 +259,63 @@ exiting).
 
 **Known limits.** Records live in memory like the rooms themselves, so a server restart forgets them (the client then correctly shows
 "no longer available"). The client side is in the mobile app (`OnlineGameScreen`, `src/logic/onlineRejoin.ts`).
+## 10. 4 Player Chess Online (server side) — the engine mirror and the wire contract (workstream W1)
+
+Spec: `FOUR_PLAYER_ONLINE_SPEC.md` in the app repo. W1 is only the **foundation**: the server's copy of the 4-player rules engine and the
+shared `four_*` protocol types. No socket handler, room or matchmaker exists yet (those are W2+), so nothing here changes how the server
+behaves today; 2-player Online, tournaments and challenges are untouched.
+
+**What is generated (never edit by hand).** `src/game/fourPlayer/{board,state,moves,elimination,bot,clock}.ts`, `src/game/fourPlayer/index.ts`
+(a barrel) and `src/game/fourPlayerWire.ts` are produced by `scripts/sync-fourplayer.mjs` from the app's `src/logic/…` files, listed in the
+app repo's `src/logic/fourPlayer/MIRRORED_TO_BACKEND.json`. Why generate rather than hand-mirror (the practice for the 2-player variants): this
+backend is `module: NodeNext` (relative imports need `.js`), the app's engine uses extensionless imports, so a byte-identical copy is
+impossible — and a hand copy is exactly how two implementations of one rule set drift. The generator applies **exactly one transform**
+(every relative module specifier `'./x'` becomes `'./x.js'`) plus a 3-line banner; the test re-derives the originals from the copies with an
+independent mechanism and compares byte for byte.
+
+**Changing the engine or the protocol:** edit the app source, run `npm run sync:fourplayer` here, commit both repos. CI (`npm run
+sync:fourplayer -- --check`, right after the type-check) fails if a generated file is different, missing or stray (a hand edit, a forgotten
+regenerate, a file that left the list). It compares with CRLF normalised, because a Windows checkout with autocrlf rewrites the committed LF
+files; output is always LF. Generated files are committed so the backend still builds and deploys on its own.
+
+**The closure rule** keeps client-only code off the server: every import in a mirrored file must be relative, extensionless, and resolve to
+another listed file. A package, `node:`, an unlisted file (e.g. `./setup`, which pulls in UI types), a specifier that already has an
+extension, a directory import, `import()`, `require()`, `import x = require()` and `import('…').T` all make the generator **fail with exit
+code 2** (a different code from "drift", 1) and report every problem with file and line. It uses the TypeScript compiler API, not a regex,
+so multi-line imports, `export * from`, `export * as`, side-effect imports and specifier-looking text in comments/strings are handled
+correctly. The app repo has its own test of the same rules (`fourPlayerMirrorSet.test.ts`), so the mistake fails where it is made.
+
+**Tests (all run in CI):**
+- `npm run test:fourplayerSync` (`scripts/test-fourplayer-sync.mjs`, plain node, ~3 s, **108 checks**) — the real mirror is exactly
+  "source + banner + `.js`"; the transform on tricky syntax; every closure-rule failure; manifest validation; `check()`/`write()` on temporary
+  trees (changed, missing, stale-in-the-owned-directory, **stale root-level** copies, hand edits, a trailing newline, CRLF working trees, idempotence,
+  `--check` never writes, a hand-written top-level file is never touched); the CLI's exit codes (0 / 1 / 2) and messages.
+- `npm run test:fourplayer` (`scripts/test-fourplayer.mjs`, tsx, **20-40 s depending on the machine**, 29 checks) — **behavioural parity**: the
+  app's engine and the generated copy are driven in lockstep through 158 seeded games (about 41 000 plies): the same serialized position, legal
+  moves, check/dead-position queries, events (as JSON), clocks, bot choice (1200 and 1700 at most plies, 1800 and 3000 on a sample) and
+  `serialize`/`deserialize` round trips (including each engine reading the other's text) at **every** ply, with the server's own action
+  pattern (charge elapsed time, then move, then increment; resign; flag fall). A coverage meter makes the script fail if a rare rule was
+  never reached: castling (all 4 seats x both sides, scripted), en passant (by a perpendicular, an opposing and the other perpendicular
+  seat, scripted), all four promotion pieces for all four seats (scripted), a tuned `maxPlies` cap and the 5000-ply hard ceiling, plus a
+  bounded random hunt for stalemate/checkmate/frozen/timeout/resign. The two engines' exports must also match (functions exist on both
+  sides, 42 constants/tables deep-equal) and the app-only exports must be exactly the client-only modules'.
+
+**Mutation checks (CHECKLIST §2).** Generator + CLI: 38 mutants (no `.js`, `.js` after the quote, edits applied in the wrong order, each closure
+rule and each syntax form disabled, each manifest rule, every `check`/`write` branch, CRLF handling, exit codes, `--check` writing) —
+**38/38 killed** after two tests were added for the first-pass survivors: a non-string module specifier (the parser accepts
+`import x from foo;`, so the branch is reachable) and `write()` on a CRLF tree churning every file. Engine parity: 18 planted divergences in the
+generated copy only (castling rights, dead-piece scores, en passant, ply counter, castle geometry, rule constants, serialize order, board shape,
+clock increment/negative time, checkmate and stalemate points, the hard ply cap, four bot terms incl. the deep tier's worst-case reply, the
+tier boundary) — **18/18 killed**. Two died only LATE: the careful-tier castling bonus (caught by the random hunt at seed 2048, ~22 s in) and
+the stalemate bonus (ply 612 of the first undisturbed bot game). Parity on rarely-used scoring terms therefore leans on the hunt — see limits.
+
+**Wire payload sizes** (measured, bounded by a frontend test): a typical `four_state` at ply 150 is **700 bytes** (434-character snapshot);
+a 1000-entry move log, an extreme case, is 28 KB.
+
+**Known limits.** (1) Parity is statistical: 2 stalemates in the hunt (no hand-built stalemate position), 96 deep-tier bot comparisons, bot
+terms that fire rarely are only reached by the hunt. The *textual* identity check (`--check`) is what makes a behavioural gap unlikely in the
+first place. (2) CI checks against the same-named EM-Chess branch (`ci.yml` header): push both repos' `fourPlayerOnline` branches together,
+or `--check` runs against a frontend that has no wire file. (3) The generator needs the app checked out at `../` and `typescript` (already a
+devDependency). (4) `index.ts` is the only generated file that is not a copy; it lists the `fourPlayer/` entries in manifest order.
+(5) `parseSquare` in the engine accepts a leading zero (`e02` reads as `e2`); the wire validator therefore requires the canonical spelling
+(`squareName(parseSquare(x)) === x`), which is what the server must use on client input.

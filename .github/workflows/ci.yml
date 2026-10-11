@@ -97,6 +97,14 @@ jobs:
         working-directory: chess-app/backend
         run: npx tsc --noEmit
 
+      # The server's 4 Player Chess engine and wire contract are GENERATED from the app's source (scripts/sync-fourplayer.mjs) and
+      # committed. This fails the build if the committed copy is stale, hand-edited, missing a file or has a stray one - so it runs
+      # right after the type-check, before anything slower. Like every cross-repo test here it checks against the same-named
+      # EM-Chess branch (see the frontend-ref step above): push both repos' feature branches under the same name.
+      - name: Check the 4 Player engine mirror is in sync with the app source
+        working-directory: chess-app/backend
+        run: npm run sync:fourplayer -- --check
+
       - name: Start dev server
         working-directory: chess-app/backend
         run: nohup npm run dev > server.log 2>&1 &
@@ -147,6 +155,14 @@ jobs:
       - name: Run rejoin-after-game-ended regression suite (finished-room retention)
         working-directory: chess-app/backend
         run: npm run test:rejoinFinished
+
+      - name: Run 4 Player mirror generator tests (closure rule, drift detection, CRLF tolerance)
+        working-directory: chess-app/backend
+        run: npm run test:fourplayerSync
+
+      - name: Run 4 Player engine parity (app engine vs the generated server copy, seeded full games in lockstep)
+        working-directory: chess-app/backend
+        run: npm run test:fourplayer
 
       - name: Dump server log on failure
         if: failure()

@@ -100,12 +100,14 @@ import {
   type Seat,
 } from './fourPlayer/index.js';
 import {
+  FOUR_ACTIVE_GAMES_LIST_MAX,
   FOUR_ALL_GONE_MS,
   FOUR_BOT_ELO,
   FOUR_CHAT_MIN_INTERVAL_MS,
   FOUR_FAST_FORWARD_DELAY_MS,
   FOUR_FINISHED_RETENTION_MS,
   FOUR_FINISHED_SWEEP_INTERVAL_MS,
+  FOUR_MAX_SPECTATORS_PER_ROOM,
   FOUR_MOVE_RATE_LIMIT,
   FOUR_NAME_MAX_LENGTH,
   FOUR_SERVER_BOT_MAX_ELO,
@@ -655,19 +657,30 @@ export class FourRoomManager {
 
   // --- Spectating and chat --------------------------------------------------------------------------------------------------
 
-  /** Every game in progress, newest first as inserted - names and kinds only, never a token or a socket id. */
+  /** Whether the socket is SEATED in a game (a player, not a spectator): such a socket cannot queue for another game. */
+  isSeated(socketId: string): boolean {
+    return this.socketToSeat.has(socketId);
+  }
+
+  /** Games in progress, NEWEST first (rooms are kept in creation order, so this reads them backwards) and at most
+   * FOUR_ACTIVE_GAMES_LIST_MAX - names and kinds only, never a token or a socket id. */
   listActiveGames(): FourActiveGameSummary[] {
     return [...this.rooms.values()]
       .filter((room) => room.status === 'active')
+      .reverse()
+      .slice(0, FOUR_ACTIVE_GAMES_LIST_MAX)
       .map((room) => ({ roomId: room.id, timeControlLabel: room.timeControlLabel, seats: room.seats.map((s) => ({ name: s.name, kind: s.controller })) }));
   }
 
-  /** `four_spectate_game`: read-only. A socket that plays in a game, or already watches one, cannot start watching another without leaving. */
+  /** `four_spectate_game`: read-only. A socket that plays in a game, or already watches one, cannot start watching another without leaving.
+   * A room holds at most FOUR_MAX_SPECTATORS_PER_ROOM spectators (each costs a send per state); a refused request leaves the socket
+   * watching whatever it was watching before. */
   spectate(socketId: string, payload: unknown): FourAck<{ state: FourSpectateState }> {
     const roomId = this.roomIdOf(payload);
     const room = roomId ? this.rooms.get(roomId) : undefined;
     if (!room || room.status !== 'active') return { ok: false, error: 'The game was not found or has already ended.' };
     if (this.socketToSeat.has(socketId)) return { ok: false, error: 'You are playing in a game - you cannot also spectate.' };
+    if (!room.spectators.has(socketId) && room.spectators.size >= FOUR_MAX_SPECTATORS_PER_ROOM) return { ok: false, error: 'This game has too many spectators.' };
     this.stopSpectating(socketId);
     room.spectators.add(socketId);
     this.socketToSpectating.set(socketId, room.id);

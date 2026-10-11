@@ -25,6 +25,8 @@
     "test:fourplayer": "tsx scripts/test-fourplayer.mjs",
     "test:fourplayerRooms": "tsx scripts/test-fourplayer-rooms.mjs",
     "test:fourplayerBots": "tsx scripts/test-fourplayer-bots.mjs",
+    "test:fourplayerMatchmaking": "tsx scripts/test-fourplayer-matchmaking.mjs",
+    "test:fourplayerHandlers": "tsx scripts/test-fourplayer-handlers.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs"
   },
   "dependencies": {

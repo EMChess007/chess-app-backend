@@ -62,6 +62,10 @@ Triggers on every push/PR to `main`. One job:
    - `npm run test:fourplayerBots` (`scripts/test-fourplayer-bots.mjs`, no server needed) — the 4 Player bot driver, takeover and retake, the
      all-humans-gone rule, fast-forward, every pending timer counted, and seeded games with bots and random disconnects replayed on an
      independent engine (§12).
+   - `npm run test:fourplayerMatchmaking` (`scripts/test-fourplayer-matchmaking.mjs`, no server needed) — the 4 Player queue: lobby rules to the
+     millisecond, the fill timer, time controls, the shuffle, failed starts, no leaks (§13).
+   - `npm run test:fourplayerHandlers` (`scripts/test-fourplayer-handlers.mjs`, no server needed) — the 4 Player socket handlers on fake
+     sockets: the nine events, the join guards, real JWTs, a whole game in-process, and 1500 hostile event/payload/ack combinations (§13).
    - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
      checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
      `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
@@ -353,8 +357,8 @@ devDependency). (4) `index.ts` is the only generated file that is not a copy; it
 ## 11. 4 Player Chess Online (server side) — the room manager (workstream W2)
 
 Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §4. W2 is the server's authority over a 4-seat game: `src/game/fourPlayerRooms.ts` (`FourRoomManager`) and its
-tunables `src/game/fourPlayerConfig.ts`. **Nothing loads them yet** — no socket handler is registered (W4) and `index.ts` / `socketHandlers.ts`
-are untouched (verified by grep), so the running server behaves exactly as before. Out of scope for W2 (bot moves, takeover after a disconnect, the all-humans-gone rule and fast-forward are W3, §12; the queue, seat
+tunables `src/game/fourPlayerConfig.ts`. **When W2 and W3 were built nothing loaded them** (W4, §13, registers the handlers and is the first workstream the running server loads);
+`socketHandlers.ts` is still untouched. Out of scope for W2 (bot moves, takeover after a disconnect, the all-humans-gone rule and fast-forward are W3, §12; the queue, seat
 assignment and event registration are W4: a room is created with its four seats already decided).
 
 **The design in five rules** (the doc comment at the top of the file has the long version):
@@ -380,7 +384,7 @@ assignment and event registration are W4: a room is created with its four seats 
 2-player chat, one message per seat per second), `spectate` / `stopSpectating` / `listActiveGames` (names and kinds only), `sweepFinishedRooms`
 (an `unref()`'d interval). `four_make_move` is limited to 10 calls per seat per second, illegal attempts included.
 
-**Tests** — `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, tsx, no server or database, **205 checks**, ~5 s; its helpers now live in `scripts/fourplayer-test-kit.mjs`, shared with §12's script): stub sockets recording
+**Tests** — `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, tsx, no server or database, **215 checks** (205 at W2/W3; W4 added the spectator cap and list tests), ~5 s; its helpers now live in `scripts/fourplayer-test-kit.mjs`, shared with §12's script): stub sockets recording
 every emit + Node fake timers and `Date`, so a flag fall, a 999 ms vs 1000 ms boundary and a 20 s off-turn resignation are exact. Sections: the configured
 numbers as literals; timers counted (one per active room, none after a game); room creation and token privacy (no token appears anywhere but in its
 owner's own `four_match_found`); the happy path and who is told what; every refusal (out of turn, illegal, another seat's piece, off-board and
@@ -416,15 +420,14 @@ socket's mapping, so `handleDisconnect` returns earlier; the guard stays as a se
 **Cost** (measured, test section 14): 1 000 moves with four stub sockets: **0.14 ms mean, 2 ms worst** per move (legality check, engine, `serialize`,
 four broadcasts). A `four_state` is about 700 bytes (see §10).
 
-**Known limits.** In-memory like the 2-player rooms (a restart ends every game); single process. No cap on spectators per room yet (each costs one
-send per state) — W4 should decide one. Clock accounting uses `Date.now()` and one `setTimeout` per room: an event-loop stall delays when a flag fall
+**Known limits.** In-memory like the 2-player rooms (a restart ends every game); single process. W4 added a cap of 50 spectators per room (§13). Clock accounting uses `Date.now()` and one `setTimeout` per room: an event-loop stall delays when a flag fall
 is PUBLISHED but not the accounting, and a late move is refused regardless. A room needs at least one human (a human-less room is W3's all-gone rule).
 (As built in W2 a bot seat never moved; W3 added the bot driver - §12.)
 
 ## 12. 4 Player Chess Online (server side) — bots, takeover, abandonment (workstream W3)
 
 Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §4.4 and §6. W3 extends the room manager of §11 (same file, `src/game/fourPlayerRooms.ts`; new constants in
-`fourPlayerConfig.ts`). **Still nothing loads it** (no socket handler until W4; verified by grep), so the running server behaves as before.
+`fourPlayerConfig.ts`). At the time of W3 nothing loaded it (the handlers arrive in W4, §13).
 
 **What it adds** (the doc comment at the top of the file has the long version):
 - **A bot driver.** After every commit - and when a room is created - `scheduleBot()` arms ONE bot timer if the seat on move is a bot's (450 ms,
@@ -481,4 +484,75 @@ and held at 1700. A whole fast-forwarded game (~700 plies) is played in about a 
 
 **Known limits.** The takeover bot is always ELO 1200 (decision A3); a taken-over seat is not "remembered" as stronger or weaker. A game with no original human
 connected ends after 45 s even if the bots could have finished it - by decision B3 (no result, nothing persisted). Random games exercise retakes only rarely (1 of 12);
-the constructed tests cover every stage. Open for W4: a per-room spectator cap, the fill timer and queue, and registering the events.
+the constructed tests cover every stage. (W4, §13, added the spectator cap, the queue and fill timer, and the event registration.)
+
+## 13. 4 Player Chess Online (server side) — matchmaking and the socket handlers (workstream W4)
+
+Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §7, §3, §4.6. W4 is the **first workstream the running server loads**: `src/index.ts` gains one import and one call,
+`registerFourPlayerHandlers(io)`, right after `registerSocketHandlers(io)`. The 2-player handlers are untouched (`socketHandlers.ts` is unmodified and
+does not mention the 4-player code; a test pins that), and every event here is `four_*`, so nothing can collide. New files: `fourPlayerMatchmaking.ts`
+(`FourPlayerMatchmaker`), `fourPlayerHandlers.ts`, and the W4 constants in `fourPlayerConfig.ts`.
+
+**The matchmaker** (a pure, dependency-injected class: `startGame` and `notify` are injected, so every rule is tested with fake timers and no network):
+- One lobby per time control (`initialSeconds|incrementSeconds`); lobbies never mix; a socket is in at most ONE lobby.
+- The 4th human starts the game at once (four humans, no bots). With >= 2 queued, a fill timer of 30 s starts - from the moment the lobby FIRST holds two,
+  not from each player's own join, and a third human does not restart it; at expiry all queued humans (2 or 3) plus bots make four (A1/A2).
+  Dropping below two cancels the timer; reaching two again restarts it from zero. A lone human waits indefinitely.
+- Every change is pushed to the lobby as `four_queue_update { queued, fillInMs }` (`fillInMs` null while there is no timer).
+- Seats are a uniform Fisher-Yates shuffle over `crypto.randomInt`; the random source is injectable, so a test drives it through EVERY sequence of choices
+  and proves all 24 permutations are reachable (and all 12 arrangements of 2 humans + 2 bots), plus a statistical check of the default (crypto) source.
+- "No time limit", Daily and anything outside 60-3600 s / 0-30 s are refused by the shared validator. If starting a game throws, the humans are put back in the
+  queue (and the timer re-armed) instead of vanishing from it.
+- `FOUR_FILL_MS=<ms>` shortens the wait for tests and the dev server, **only when NODE_ENV is not "production"** and only for a plain decimal 1..600000
+  (the first version accepted `" 3000"`, `"3e3"` and `"0x10"` through `Number()`; the test caught it and the check is now `/^\d+$/`).
+
+**The handlers** do nothing but parse, delegate and reply; every rule lives in the manager and the matchmaker. What `listen()` guarantees at the network
+boundary: socket.io's argument shapes are normalised (a client that sends no payload leaves the ack in FIRST place; the 2-player `ack?.()` would throw on a
+non-function ack), replies go through a safe `reply`, and BOTH a synchronous throw and a rejected promise are caught, logged and answered with a generic error -
+nothing a client does can become an uncaught exception, which would kill every game on the process. Identity is the optional JWT (same rule as the 2-player
+server: a valid token is a user, anything else a guest); the username is looked up when a player QUEUES (one query per join; a failed lookup falls back to
+"Player"; guests are "Guest") - a deliberate deviation from the spec's "at room creation", which keeps room creation synchronous and race-free. A seated
+socket cannot queue, a queued one cannot queue twice (refused BEFORE any lookup), a socket that left during its lookup is never queued, and a LATE check after
+the lookup stops a socket that was seated in the meantime from being queued. `disconnect` leaves the queue and tells the room manager, each guarded so one
+cannot skip the other. A queue update that cannot be sent is logged and does not turn a successful join into an error.
+
+**Manager additions** (W2 file): `isSeated()`, a **spectator cap** of 50 per room (a spectator already watching it is never refused; a refused request leaves the
+socket watching what it was watching), and the active-games list is now genuinely **newest first and capped at 100** (W2's comment said "newest first" but
+`Map` order is oldest first - found while testing).
+
+**Tests** (all in CI, none needs a server or a database):
+- `npm run test:fourplayerMatchmaking` (`scripts/test-fourplayer-matchmaking.mjs`, **74 checks**): the lobby rules to the millisecond (29.999 s vs 30 s, a countdown
+  that starts when the lobby reaches two, one that restarts from zero), time controls never mixing, validation, one entry per socket, a failed start, the shuffle,
+  the override's accepted and refused spellings, every timer accounted for, and that no lobby or socket mapping is left behind (an emptied lobby that was kept
+  would be a slow leak for every time control ever used).
+- `npm run test:fourplayerHandlers` (`scripts/test-fourplayer-handlers.mjs`, **61 checks**): fake `io`/sockets driving the REAL handlers, manager and matchmaker with only
+  the username lookup stubbed: exactly the nine events are wired; the join guards and races; real signed JWTs (8 kinds of bad token are guests); a WHOLE game
+  in-process (queue, fill, 2 bots, 12 human + 12 bot moves, spectate, chat, disconnect, rejoin, resign); faults inside the server contained; the disconnect hook
+  guarded; **1500 random event/payload/ack combinations - junk payloads, non-function and throwing acks - across all nine events: nothing throws out of a handler, no
+  unhandled rejection, and the game is exactly as it was**; source pins on the wiring.
+- `test-fourplayer-rooms.mjs` (now **215**) gained the spectator cap (50 accepted, the 51st refused, the idempotent case, the "refused request keeps the old room"
+  case) and the list (105 games: 100 listed, newest first, the 5 oldest left out).
+
+**Verified over a real network** (a throwaway server on :3101 with `FOUR_FILL_MS=1500`, real `socket.io-client` sockets; the script was not kept - the full
+real-server e2e is W6): two guests queued, the fill wait elapsed, a game started with two fill bots; 8 human moves interleaved with 8 bot moves, `seq`
+contiguous 1..16; one human disconnected (the other was told, `graceMsLeft: 45000`) and rejoined on a new socket; chat was delivered; both humans resigned and the
+bots **fast-forwarded to a natural end in ~3.7 s**; the spectator received the same result; a late rejoin got the finished result; the active-games list was empty
+again; the server log had no error. The existing 2-player suites (`test:multiplayer` 186, `test-tournament` 40) pass against the live server with the 4-player
+handlers registered next to them.
+
+**Mutation checks (CHECKLIST §2): 83 planted divergences, 79 killed, 4 equivalent by construction.** Covered: validation, one-entry-per-socket, the lobby key, the
+4th-human / 3-human thresholds, the fill timer (lone human, three needed, re-arming on every join, not cancelled below two, a wrong default, never starting a game),
+`fillInMs` (wrong sign, reported without a timer), notification (dropped, off by one), the number taken / bots / bot elo / bot reason / no shuffle / a biased shuffle
+(`randomInt(i)`) / no swap, the queue maps and lobby cleanup after a start and a leave, the label, a failed start (not restored, not re-queued, not re-armed, not
+told, not logged), the ack-in-first-place handling, a throwing ack, a synchronous throw, a swallowed rejection, the dropped failure reply, every handler guard,
+the late seated check, the lookup fallbacks, each of the nine handlers' wiring, the disconnect hook (each half, and the guard), the queue-update event name, a
+tampered token, and every constant with its boundaries (including the override's production rule, regex, floor and ceiling). The first run left THREE real gaps,
+now closed: the join test accepted "a message" without checking it was the validator's (a crash into "Something went wrong" also produced one); a failing
+queue-update send had no test; the label reaching the game was unchecked. **The four equivalents:** the fill-timer callback's two guards (the timer is cancelled
+whenever either condition would hold); an ack in first place also being taken as the payload (every validator rejects a function and the payload-less events ignore
+it); and a failed start restoring the humans to the FRONT rather than the back (the restore is synchronous, so nobody can be in the lobby meanwhile).
+
+**Known limits.** No per-socket cap on `four_*` events in general (the move, chat and queue rules each limit themselves; a flood of valid-shaped junk costs one
+validation each). The default username lookup (`prisma.user.findUnique`) is not exercised by the scripts (they stub it; guests need no database) - the real-server
+e2e with a logged-in user is W6. Fill timers are per process (single instance, like everything else here). A client that never answers is not "queued" any longer
+than its socket lives: disconnect removes it.

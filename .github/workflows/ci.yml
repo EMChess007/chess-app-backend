@@ -172,6 +172,14 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:fourplayerBots
 
+      - name: Run 4 Player matchmaking tests (lobby rules, fill timer, shuffle, failed start)
+        working-directory: chess-app/backend
+        run: npm run test:fourplayerMatchmaking
+
+      - name: Run 4 Player socket handler tests (nine events, join guards, JWT identity, a whole game in-process, hostile input)
+        working-directory: chess-app/backend
+        run: npm run test:fourplayerHandlers
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

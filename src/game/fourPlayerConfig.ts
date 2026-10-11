@@ -53,6 +53,40 @@ export const FOUR_BULLET_MAX_INITIAL_SECONDS = 120;
  * one ply per timer tick, so the event loop is released between plies and one such game can never starve the others. */
 export const FOUR_FAST_FORWARD_DELAY_MS = 0;
 
+// --- Matchmaking, spectating and the active-games list (W4) ---------------------------------------------------------------------------
+
+/** A game needs at least this many humans to start (decision A1); the empty seats are filled with bots. Four humans start at once. */
+export const FOUR_MIN_HUMANS = 2;
+
+/** How long the lobby of one time control waits, measured from the moment it first holds FOUR_MIN_HUMANS, before the bots fill the rest. */
+export const FOUR_FILL_WAIT_MS = 30_000;
+/** The largest `FOUR_FILL_MS` override that is honoured (a typo like 3000000 must not silently make lobbies wait 50 minutes). */
+export const FOUR_FILL_WAIT_MAX_OVERRIDE_MS = 600_000;
+
+/**
+ * The fill wait: FOUR_FILL_WAIT_MS, unless the environment says `FOUR_FILL_MS=<ms>` - honoured ONLY when NODE_ENV is not 'production' (so a
+ * misconfigured production box can never shorten the wait, and tests and the dev server can run a game in seconds) and only for a whole
+ * number of milliseconds in 1..FOUR_FILL_WAIT_MAX_OVERRIDE_MS. Anything else is ignored. Read at call time so tests can pass their own env.
+ */
+export function resolveFourFillWaitMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.FOUR_FILL_MS;
+  if (env.NODE_ENV === 'production' || raw === undefined) return FOUR_FILL_WAIT_MS;
+  // Decimal digits only: `Number()` alone would also take " 3000", "3e3" and "0x10", which are typos, not milliseconds.
+  if (!/^\d+$/.test(raw)) return FOUR_FILL_WAIT_MS;
+  const ms = Number(raw);
+  return ms >= 1 && ms <= FOUR_FILL_WAIT_MAX_OVERRIDE_MS ? ms : FOUR_FILL_WAIT_MS;
+}
+
+/** What a bot that fills an empty seat is called (the strength is FOUR_BOT_ELO). */
+export const FOUR_BOT_NAME = 'Bot (Amateur)';
+
+/** Each spectator costs one send per state, so a room has a ceiling (the 2-player server has none). A spectator already watching a room
+ * is never refused by it. */
+export const FOUR_MAX_SPECTATORS_PER_ROOM = 50;
+
+/** The active-games list is newest first and at most this long: it is built on every request and shown on a phone. */
+export const FOUR_ACTIVE_GAMES_LIST_MAX = 100;
+
 /** The pause before a bot's move, by time control (the local game's rule: bullet is quicker). */
 export function fourBotThinkMs(initialSeconds: number): number {
   return initialSeconds <= FOUR_BULLET_MAX_INITIAL_SECONDS ? FOUR_BOT_THINK_BULLET_MS : FOUR_BOT_THINK_MS;

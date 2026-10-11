@@ -16,7 +16,7 @@ import { mock } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { FourRoomManager } from '../src/game/fourPlayerRooms.ts';
 import { KINGS, TC, UUID, eventsOf, mulberry32, newGame, startFakeTimers, stubIo } from './fourplayer-test-kit.mjs';
-import { FOUR_CHAT_MIN_INTERVAL_MS, FOUR_FINISHED_RETENTION_MS, FOUR_FINISHED_SWEEP_INTERVAL_MS, FOUR_MOVE_RATE_LIMIT } from '../src/game/fourPlayerConfig.ts';
+import { FOUR_ACTIVE_GAMES_LIST_MAX, FOUR_CHAT_MIN_INTERVAL_MS, FOUR_FINISHED_RETENTION_MS, FOUR_FINISHED_SWEEP_INTERVAL_MS, FOUR_MAX_SPECTATORS_PER_ROOM, FOUR_MOVE_RATE_LIMIT } from '../src/game/fourPlayerConfig.ts';
 import { FINISHED_RETENTION_MS as TWO_PLAYER_RETENTION_MS } from '../src/game/rooms.ts';
 import * as E from '../src/game/fourPlayer/index.ts';
 
@@ -617,6 +617,43 @@ console.log('\n=== 8. Spectating ===');
   g.resign(1);
   g.resign(2);
   check(g.mgr.listActiveGames().length === 1, 'a finished game drops out of the list');
+}
+
+console.log('\n=== 8b. The spectator cap and the active-games list (W4) ===');
+{
+  check(FOUR_MAX_SPECTATORS_PER_ROOM === 50 && FOUR_ACTIVE_GAMES_LIST_MAX === 100, 'a room holds at most 50 spectators and the list at most 100 games');
+  const g = newGame();
+  const room = g.room();
+  for (let i = 0; i < 50; i++) assert.ok(g.mgr.spectate(`SPC${i}`, { roomId: g.id }).ok, `spectator ${i} is accepted`);
+  check(room.spectators.size === 50, 'fifty spectators are accepted');
+  const over = g.mgr.spectate('SPC50', { roomId: g.id });
+  check(over.ok === false && /too many spectators/.test(over.error) && room.spectators.size === 50 && !g.mgr.socketToSpectating.has('SPC50'), 'the 51st is refused with a message and is not registered anywhere');
+  check(g.mgr.spectate('SPC0', { roomId: g.id }).ok === true && room.spectators.size === 50, 'a spectator already watching this room is never refused by the cap (asking again is idempotent)');
+  g.mgr.stopSpectating('SPC1');
+  check(g.mgr.spectate('SPC50', { roomId: g.id }).ok === true && room.spectators.size === 50, 'as soon as one leaves, the next is accepted');
+  // a refused request must not make the socket lose the game it was already watching
+  const other = g.mgr.createRoom({ seats: [{ kind: 'human', socketId: 'OT0', name: 'o0' }, { kind: 'human', socketId: 'OT1', name: 'o1' }, { kind: 'bot', socketId: null, name: 'B', elo: 1200 }, { kind: 'bot', socketId: null, name: 'B', elo: 1200 }], timeControl: TC });
+  const otherRoom = g.mgr.rooms.get(other.roomId);
+  check(g.mgr.spectate('SPY', { roomId: other.roomId }).ok === true && otherRoom.spectators.has('SPY'), 'a spectator watches another game');
+  const refused = g.mgr.spectate('SPY', { roomId: g.id });
+  check(refused.ok === false && otherRoom.spectators.has('SPY') && g.mgr.socketToSpectating.get('SPY') === other.roomId, 'a refused request (the full room) leaves it watching the game it was already watching');
+  clearTimeout(otherRoom.clockTimer);
+  otherRoom.clockTimer = null;
+}
+{
+  const mgr = new FourRoomManager(stubIo());
+  const created = [];
+  for (let i = 0; i < 105; i++) {
+    created.push(mgr.createRoom({ seats: [{ kind: 'human', socketId: `LA${i}`, name: `a${i}` }, { kind: 'human', socketId: `LB${i}`, name: `b${i}` }, { kind: 'bot', socketId: null, name: 'Bot', elo: 1200 }, { kind: 'bot', socketId: null, name: 'Bot', elo: 1200 }], timeControl: TC, timeControlLabel: `room ${i}` }).roomId);
+  }
+  const list = mgr.listActiveGames();
+  check(list.length === 100, '105 games in progress: the list has the 100 allowed');
+  check(list[0].roomId === created[104] && list[0].timeControlLabel === 'room 104' && list.at(-1).roomId === created[5], 'newest first: the last game created leads, and the five OLDEST are the ones left out');
+  check(list.every((entry, i) => i === 0 || Number(list[i - 1].timeControlLabel.slice(5)) === Number(entry.timeControlLabel.slice(5)) + 1), '...strictly newest to oldest, with no gap or repeat');
+  for (const room of mgr.rooms.values()) {
+    clearTimeout(room.clockTimer);
+    room.clockTimer = null;
+  }
 }
 
 console.log('\n=== 9. Rate limits ===');

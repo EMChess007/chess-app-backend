@@ -5,6 +5,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import helmet from 'helmet';
 import { Server as SocketIOServer } from 'socket.io';
+import { registerFourPlayerHandlers } from './game/fourPlayerHandlers.js';
 import { registerSocketHandlers } from './game/socketHandlers.js';
 import authRouter from './routes/auth.js';
 import gamesRouter from './routes/games.js';
@@ -76,6 +77,8 @@ app.use(errorHandler);
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, { cors: { origin: '*' } });
 registerSocketHandlers(io);
+// 4 Player Chess Online: its own `four_*` events on its own connection listener - no code or state shared with the 2-player handlers above.
+registerFourPlayerHandlers(io);
 
 // Listening on 0.0.0.0 (not just localhost) so devices on the same LAN — e.g. a phone
 // running Expo Go — can reach this server via the computer's local network IP.

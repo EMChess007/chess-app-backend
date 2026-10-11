@@ -23,6 +23,7 @@
     "sync:fourplayer": "node scripts/sync-fourplayer.mjs",
     "test:fourplayerSync": "node scripts/test-fourplayer-sync.mjs",
     "test:fourplayer": "tsx scripts/test-fourplayer.mjs",
+    "test:fourplayerRooms": "tsx scripts/test-fourplayer-rooms.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs"
   },
   "dependencies": {

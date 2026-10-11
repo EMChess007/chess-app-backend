@@ -56,6 +56,9 @@ Triggers on every push/PR to `main`. One job:
      drift detection, CRLF tolerance, CLI exit codes (§10).
    - `npm run test:fourplayer` (`scripts/test-fourplayer.mjs`, no server needed) — behavioural parity of the app's 4 Player engine and
      the generated server copy over seeded full games, bots included (§10).
+   - `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, no server needed) — the 4 Player room manager: the commit funnel,
+     clocks (fake timers), rejoin and finished-result retention, disconnects, chat, spectating, rate limits, hostile input, and seeded random
+     games checked move by move against an independent engine replay (§11).
    - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
      checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
      `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
@@ -343,3 +346,75 @@ or `--check` runs against a frontend that has no wire file. (3) The generator ne
 devDependency). (4) `index.ts` is the only generated file that is not a copy; it lists the `fourPlayer/` entries in manifest order.
 (5) `parseSquare` in the engine accepts a leading zero (`e02` reads as `e2`); the wire validator therefore requires the canonical spelling
 (`squareName(parseSquare(x)) === x`), which is what the server must use on client input.
+
+## 11. 4 Player Chess Online (server side) — the room manager (workstream W2)
+
+Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §4. W2 is the server's authority over a 4-seat game: `src/game/fourPlayerRooms.ts` (`FourRoomManager`) and its
+tunables `src/game/fourPlayerConfig.ts`. **Nothing loads them yet** — no socket handler is registered (W4) and `index.ts` / `socketHandlers.ts`
+are untouched (verified by grep), so the running server behaves exactly as before. Out of scope here, each with its seam: bot seats' moves, takeover
+after a disconnect, the all-humans-gone rule and fast-forward (W3: until then a bot seat or a disconnected seat just keeps its clock running and
+flags like anyone); the queue, seat assignment and event registration (W4: a room is created with its four seats already decided).
+
+**The design in five rules** (the doc comment at the top of the file has the long version):
+1. **One funnel.** Every state change - a move, a resignation, a flag fall - ends in `commit()`, the ONLY place `room.state`, `room.clock`,
+   `room.seq` and `room.turnStartedAt` are assigned after creation. It publishes exactly one `four_state` (seq + 1) to every seat and spectator,
+   then ends the game or re-arms the timer. Time is charged by `charge()`, a PURE computation whose result is fed INTO a commit - nothing can mutate a
+   room without publishing it. Pinned at source level by the tests.
+2. **Clocks are charged lazily** from `turnStartedAt` with the engine's own `clockTick`: when the seat's move arrives, when someone else resigns, or
+   when its timer fires. If charging flags the mover the engine eliminates it for time and THAT is published (actor `clock`); a move that arrives after
+   the flag is refused ("Your time ran out."). The timer spends the seat's whole remaining time, so one that wakes a millisecond early still flags.
+   An increment is added after a move, never after a flag. Dead kings' walks and eliminated seats cost nobody time.
+3. **The seat is the socket's, never the payload's** (`socketToSeat`; a "seat" field smuggled into a move payload is ignored, and a socket
+   seated in game B cannot act in game A even with A's room id). Tokens appear only in `four_match_found` to their own seat and in that seat's own rejoin.
+4. **Every inbound call takes `unknown`** and validates with the shared validators from the generated wire file; a hostile payload cannot throw or
+   reach the engine, and every refusal leaves the room untouched (no seq, no send).
+5. **A failing send cannot abort a commit.** `emit()` is the only place anything leaves the manager and it catches (and logs, with the recipient):
+   by then the state has changed, so one dying socket must not skip the others. `endGame` records the result BEFORE it sends anything (the 2-player
+   lesson from W0), so a seat whose send failed can still learn the result by rejoining.
+
+**Methods = the protocol** (W4 will only parse and delegate): `createRoom` (sends each human its own `four_match_found`), `makeMove`, `resign`,
+`rejoin` (a newer connection silently replaces an older one; a finished game answers `{ ok, finished, gameOver }` for 5 minutes, to token holders only),
+`handleDisconnect` (the seat shows as disconnected, its clock keeps running), `sendChat` (to the other seats and spectators, trimmed and cut like the
+2-player chat, one message per seat per second), `spectate` / `stopSpectating` / `listActiveGames` (names and kinds only), `sweepFinishedRooms`
+(an `unref()`'d interval). `four_make_move` is limited to 10 calls per seat per second, illegal attempts included.
+
+**Tests** — `npm run test:fourplayerRooms` (`scripts/test-fourplayer-rooms.mjs`, tsx, no server or database, **204 checks**, ~5 s): stub sockets recording
+every emit + Node fake timers and `Date`, so a flag fall, a 999 ms vs 1000 ms boundary and a 20 s off-turn resignation are exact. Sections: the configured
+numbers as literals; timers counted (one per active room, none after a game); room creation and token privacy (no token appears anywhere but in its
+owner's own `four_match_found`); the happy path and who is told what; every refusal (out of turn, illegal, another seat's piece, off-board and
+non-canonical squares, bad promotion, wrong room, stranger, spectator, eliminated seat) leaving position, seq and sends untouched; promotions (all four
+pieces and the queen default), castling and en passant through the manager; clocks (charging, increment, flag by timer, late move after the flag,
+a timer waking early, a stale timer, an off-turn resignation that must CHARGE the seat on move, a resignation after the seat's own flag, dead-king
+walks costing nothing, a boxed king freezing); resignation and the end of a game (order of messages, sockets released, the winner by points not
+survival); a socket that throws on send; rejoin (a new socket replaces the old, tokens open only their own seat, another game's token opens nothing,
+finished-result retention inclusive at exactly 300 s, sweep, `unref()` via a real child process, equality with the 2-player retention); disconnects;
+chat (boundaries 999/1000 ms, per seat, spectators, eliminated seats may chat); spectating; rate limits; 114 hostile calls through six entry
+points; the funnel pin; **10 seeded random games checked move by move against an independent replay on the engine** (2 380 actions: every
+published position equals the replay's, `seq` is contiguous, all four seats and the spectator receive the identical payload, each result matches);
+two games at once; cost.
+
+**Found while building** (each now has a test): an early `resign` committed the UNCHARGED clock, silently refunding the seat on move its thinking
+time (off-turn resignation) — caught by the clock test I wrote for it; a timer left behind after `endGame` was harmless to behaviour (the status
+guard and the engine's own `clockTick` both make a late firing a no-op) but kept the finished room alive for up to an hour, so timers are now
+COUNTED (spec test plan: "no timers remain after endGame"); and a cross-room test that passed by accident (the other socket's seat was not on move)
+was rebuilt with a socket whose seat IS the mover in the other game.
+
+**Mutation checks (CHECKLIST §2): 65 planted divergences in the manager and its config, 63 killed.** Covered: seq, timer base, game end, installing
+state/clock, every broadcast target, the abort-on-send-failure, actor/move/events/log, the charging unit, the timer's whole-time spend, re-arming and
+cancelling timers, late moves, increment, rejoin clocks, out-of-turn, eliminated seat, both rate-limit boundaries, promotion default, ack seq,
+cross-room action, payload validation, the resign refund, resign after a flag, double resign, the finished record / socket release / room removal /
+winners / scores, sweep and retention boundaries, token checks (live and finished), replaced-socket mapping, cross-game seating, spectator-takes-seat,
+disconnect announcements, chat boundary / echo / spectators / recording, spectating rules, token uniqueness, name cut, duplicate sockets, time-control
+validation, `unref()`, and the five config constants. First-pass survivors were test gaps and are closed (cross-room by accident, timers, and
+config boundaries that the tests had computed FROM the constants). **Two survivors are equivalent by construction, not gaps:** (a) removing the
+`room.status !== 'active'` guard in the timer callback alone (a finished room's timer is cancelled, so the guard is a second line of defence; removing
+the cancel AND the guard is killed); (b) removing the `runtime.socketId !== socketId` guard in `handleDisconnect` (rejoin already drops the replaced
+socket's mapping, so `handleDisconnect` returns earlier; the guard stays as a second line of defence).
+
+**Cost** (measured, test section 14): 1 000 moves with four stub sockets: **0.14 ms mean, 2 ms worst** per move (legality check, engine, `serialize`,
+four broadcasts). A `four_state` is about 700 bytes (see §10).
+
+**Known limits.** In-memory like the 2-player rooms (a restart ends every game); single process. No cap on spectators per room yet (each costs one
+send per state) — W4 should decide one. Clock accounting uses `Date.now()` and one `setTimeout` per room: an event-loop stall delays when a flag fall
+is PUBLISHED but not the accounting, and a late move is refused regardless. A room needs at least one human (a human-less room is W3's all-gone rule).
+While no bot driver exists a bot seat never moves, so rooms with bot seats are created in W2 only to test the data shape.

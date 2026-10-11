@@ -164,6 +164,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:fourplayer
 
+      - name: Run 4 Player room manager tests (commit funnel, clocks, rejoin, chat, spectating, hostile input, replay parity)
+        working-directory: chess-app/backend
+        run: npm run test:fourplayerRooms
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

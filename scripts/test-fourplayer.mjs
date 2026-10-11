@@ -12,8 +12,10 @@
  * position, the legal-move list, the events (as JSON), the clocks, and on what the bots would play (same seed per call). Actions
  * mimic the server's commit(): charge elapsed time (clockTick), then apply a human-style move (findLegalMove with a random promotion
  * piece), a bot move, a resignation or a flag fall, then add the increment. A coverage meter makes the suite say what it did NOT
- * exercise, and the rare rules are asserted to have been reached (see section 5) - "identical on random games" must never silently
- * mean "never got to castling".
+ * exercise, and the rare rules are asserted to have been reached (see section 6) - "identical on random games" must never silently
+ * mean "never got to castling". The hardest-to-stumble-into things are BUILT instead of hunted (sections 4 and 4b): castling, en
+ * passant, every promotion, the ply caps, a forced stalemate with its exact scores, and the bot's stalemate and castling terms,
+ * each tuned to sit mid-decision so a divergent constant flips seeded choices (see TESTING.md section 10).
  */
 import assert from 'node:assert/strict';
 import * as feBarrel from '../../src/logic/fourPlayer/index.ts';
@@ -36,6 +38,13 @@ const FESetup = unwrap(feSetup);
 const FEPresentation = unwrap(fePresentation);
 const FEPremove = unwrap(fePremove);
 const FEAnnotations = unwrap(feAnnotations);
+
+/**
+ * Developer / mutation-testing switch (CI never sets it): PARITY_ONLY_CONSTRUCTED=1 skips the random-game sections (2, 3, the hunt and the
+ * coverage meter), so the hand-built sections (4, 4b) run ALONE. A planted divergence that the random games would catch first (and so
+ * kill the run before the constructed tests are reached) can then be shown to be caught by the constructed test itself.
+ */
+const ONLY_CONSTRUCTED = process.env.PARITY_ONLY_CONSTRUCTED === '1';
 
 let passed = 0;
 function ok(condition, message) {
@@ -253,7 +262,7 @@ console.log('\n=== 1. The public surface is the same ===');
 }
 
 console.log('\n=== 2. Random full games in lockstep (human-style moves with every promotion piece, resigns, flag falls) ===');
-{
+if (!ONLY_CONSTRUCTED) {
   const started = Date.now();
   for (let seed = 1; seed <= 14; seed++) playGame(seed, { style: 'human', maxPlies: 320, botEvery: 8 });
   ok(coverage.games === 14, `14 random-move games, ${coverage.plies} plies, identical at every ply (positions, legal moves, events, clocks, bots every 8th ply)`);
@@ -261,7 +270,7 @@ console.log('\n=== 2. Random full games in lockstep (human-style moves with ever
 }
 
 console.log('\n=== 3. Bot-played full games, run to their natural end where possible ===');
-{
+if (!ONLY_CONSTRUCTED) {
   const started = Date.now();
   const before = coverage.plies;
   const endedBy = [];
@@ -290,6 +299,7 @@ function scripted(ls, seat, from, to, promotionType) {
   countEvents(a.events);
   ls.fe = a.state;
   ls.be = b.state;
+  ls.lastEvents = a.events; // for scenarios that assert on exactly what happened, not just that both engines agree
   ls.states();
   return fm;
 }
@@ -379,17 +389,107 @@ const ROOKS_AT_HOME = ['rR@d1', 'rR@k1', 'bR@a4', 'bR@a11', 'yR@d14', 'yR@k14', 
   ok(coverage.endings.cap === before + 2, `rules.maxPlies = 1 000 000 is still ended by HARD_MAX_PLIES (${FE.HARD_MAX_PLIES}) in both engines`);
 }
 
-console.log('\n=== 5. Outcomes that are hard to build by hand: a bounded hunt over more seeds ===');
+console.log("\n=== 4b. A stalemate and the bot's castling bonus, BUILT (not left to the random hunt) ===");
+/**
+ * Runs `chooseBotMove` on BOTH engines for many seeded decisions (same seed per pair) and requires identical choices; returns how often
+ * `isTarget` matched. A bonus or penalty of a fraction of a pawn changes a decision only when the noisy candidate scores are close, so
+ * it shows up as a SHIFT IN FREQUENCY over many seeds - which is exactly what a parity test can pin: a divergent constant on one side
+ * flips some of the pairs.
+ */
+function botSweep(label, build, elos, seedsPerElo, isTarget) {
+  const ls = new Lockstep(label, build(FE), build(BE));
+  const targetOf = (E, move) => isTarget(E, move);
+  const result = { decisions: 0, hits: 0, byElo: {} };
+  for (const elo of elos) {
+    let hits = 0;
+    for (let s = 1; s <= seedsPerElo; s++) {
+      const seed = (s * 7919 + elo) >>> 0;
+      const a = FE.chooseBotMove(ls.fe, elo, mulberry32(seed));
+      const b = BE.chooseBotMove(ls.be, elo, mulberry32(seed));
+      ls.same(`bot move (ELO ${elo}, seed ${s})`, a, b);
+      if (a && targetOf(FE, a)) hits++;
+    }
+    result.byElo[elo] = hits;
+    result.decisions += seedsPerElo;
+    result.hits += hits;
+    coverage.botComparisons += seedsPerElo;
+  }
+  return result;
+}
+const STALEMATE_BASE = ['rK@h1', 'rB@d6', 'bK@a4', 'yK@g14', 'gK@n7'];
 {
-  const wanted = () => coverage.stalemates >= 2 && coverage.checkmates >= 6 && coverage.frozen >= 10 && coverage.timeouts >= 10 && coverage.resigns >= 10;
+  // 1. The RULE, scripted. Blue's king on a4 has three squares: a5 and b5 (a Red rook on rank 5 sweeps both) and b4 (the Red bishop on
+  //    d6 covers it); a4 itself is on neither line, so Blue is NOT in check. Red plays Re8-e5 and Blue, to move, has no legal move:
+  //    stalemate - the stalemated seat gets +20, every other active seat +10, and nobody is "credited".
+  const started = coverage.stalemates;
+  playGame(950, {
+    style: 'human', maxPlies: 40, chaos: 0, botEvery: 2, label: 'stalemate by construction',
+    build: (E) => E.stateFromPieces([...STALEMATE_BASE, 'rR@e8'], { turn: 0 }),
+    prelude: (ls) => {
+      assert.ok(FE.legalMoves(ls.fe, 1).length > 0, 'before Red moves, Blue still has king moves (the stalemate is created by the move)');
+      scripted(ls, 0, 'e8', 'e5');
+      const eliminated = ls.lastEvents.filter((e) => e.kind === 'eliminated');
+      assert.equal(eliminated.length, 1, 'exactly one seat is eliminated by the move');
+      assert.equal(eliminated[0].seat, 1, 'it is Blue');
+      assert.equal(eliminated[0].reason, 'stalemate', 'for STALEMATE, not checkmate (Blue is not in check)');
+      assert.equal(eliminated[0].credit, null, 'nobody is credited with a stalemate');
+      assert.deepEqual([...eliminated[0].points], [10, 20, 10, 10], 'points: the stalemated seat +20, every OTHER active seat +10');
+      assert.deepEqual([...ls.fe.score], [10, 20, 10, 10], 'and the scores are exactly that (no captures happened)');
+      assert.equal(ls.fe.status[1], 'dead-king', 'Blue is out, its king keeps walking');
+      assert.equal(ls.fe.result, null, 'the game goes on (three seats are still active)');
+      assert.equal(ls.fe.turn, 2, 'and the turn passes to Yellow');
+    },
+  });
+  ok(coverage.stalemates === started + 1, 'a stalemate FORCED by a constructed position: scores [10,20,10,10] asserted exactly, identical in both engines, then a random continuation incl. the dead king walking');
+}
+{
+  // 2. The BOT'S stalemate term (-6: stalemating the next seat is bad for the mover). Same stalemate pattern, but the stalemating move
+  //    (Rg8xg5) also captures a Yellow BISHOP: 5 capture points x 1.5 plus about +1.1 from the evaluation = about +8.6, so with the -6
+  //    the move nets about +2.6 - level with the best of the ~35 other moves once their noise is added. That is deliberate: the
+  //    constant has to sit MID-DECISION, so that a change in EITHER direction flips choices (an earlier version captured a knight, whose
+  //    +5.5 left the move at -0.5: the scored choice then never took it, almost every "hit" was the bot's random-move branch, and a
+  //    penalty made STRONGER went unnoticed). The bishop is on g5 so that ONLY the rook can take it - the Red bishop on d6 would
+  //    otherwise offer a free capture and drown the effect.
+  const build = (E) => E.stateFromPieces([...STALEMATE_BASE, 'rR@g8', 'yB@g5', 'yP@c7'], { turn: 0 });
+  const g8 = FE.parseSquare('g8');
+  const g5 = FE.parseSquare('g5');
+  const sweep = botSweep('bot vs stalemating capture', build, [1000, 1100, 1200], 1500, (E, m) => m.from === g8 && m.to === g5);
+  console.log(`      stalemating capture chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+  ok(sweep.decisions === 4500, `the careful bot (ELO 1000-1200) chooses identically in both engines over ${sweep.decisions} seeded decisions where the best capture also stalemates the next seat`);
+  // "Mid-decision" made precise. A decision is SCORED with probability botStrength(elo).bestChance and otherwise a uniformly random legal
+  // move; so the hits that come from the scored branch are (hits - the random branch's expected share). That rate must be neither
+  // "never" nor "always", or a change to the constant in one direction would go unnoticed.
+  const moveCount = FE.legalMoves(FE.stateFromPieces([...STALEMATE_BASE, 'rR@g8', 'yB@g5', 'yP@c7'], { turn: 0 }), 0).length;
+  const scored = [1000, 1100, 1200].reduce((n, elo) => n + 1500 * FE.botStrength(elo).bestChance, 0);
+  const randomShare = [1000, 1100, 1200].reduce((n, elo) => n + (1500 * (1 - FE.botStrength(elo).bestChance)) / moveCount, 0);
+  const scoredRate = (sweep.hits - randomShare) / scored;
+  console.log(`      scored decisions ~${scored.toFixed(0)}, random-branch hits ~${randomShare.toFixed(0)} -> the scored choice takes the stalemating capture ${(100 * scoredRate).toFixed(1)}% of the time`);
+  ok(scoredRate > 0.25 && scoredRate < 0.92, `...mid-decision: the scored choice takes it ${(100 * scoredRate).toFixed(0)}% of the time (not never, not always), so the -6 matters in BOTH directions`);
+}
+{
+  // 3. The BOT'S castling nudge (+0.3 for careful and deep). Castling is one candidate among ~22 equal-value moves (king steps, rook
+  //    moves), so the nudge shows only as a frequency shift - at low ELO, where the noise is large enough for it to matter.
+  const build = (E) => E.stateFromPieces(['rK@h1', 'rR@d1', 'bK@a8', 'yK@g14', 'gK@n7'], { turn: 0 });
+  const sweep = botSweep('bot castling nudge', build, [1000, 1100, 1250, 1500, 1800], 1500, (E, m) => (m.flags & E.FLAG_CASTLE) !== 0);
+  console.log(`      castle chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+  ok(sweep.decisions === 7500, `the careful and deep bots choose identically in both engines over ${sweep.decisions} seeded decisions with a castle available`);
+  ok(sweep.hits >= 50 && sweep.hits < sweep.decisions * 0.5, `...and the nudge is in play: castling is chosen sometimes but nowhere near always (${sweep.hits} times, ${(100 * sweep.hits / sweep.decisions).toFixed(1)}%)`);
+}
+
+console.log('\n=== 5. Outcomes that are hard to build by hand: a bounded hunt over more seeds ===');
+if (!ONLY_CONSTRUCTED) {
+  // The hunt must find a stalemate ITSELF (random play stumbling into one is part of what is being checked): the scripted stalemate in
+  // section 4b must not shorten it, or the random parity breadth would shrink as a side effect of adding a constructed test.
+  const stalematesBefore = coverage.stalemates;
+  const wanted = () => coverage.stalemates - stalematesBefore >= 1 && coverage.checkmates >= 6 && coverage.frozen >= 10 && coverage.timeouts >= 10 && coverage.resigns >= 10;
   let seed = 2000;
   const started = Date.now();
   while (!wanted() && seed < 2400) playGame(seed++, { style: seed % 3 === 0 ? 'bot' : 'human', maxPlies: 400, chaos: 0.01, initialSeconds: 300, botEvery: 20 });
-  ok(wanted(), `stalemate/checkmate/frozen/timeout/resign were all reached (${seed - 2000} extra games, ${Date.now() - started} ms): stalemates ${coverage.stalemates}, checkmates ${coverage.checkmates}, frozen ${coverage.frozen}, timeouts ${coverage.timeouts}, resigns ${coverage.resigns}`);
+  ok(wanted(), `stalemate/checkmate/frozen/timeout/resign were all reached (${seed - 2000} extra games, ${Date.now() - started} ms; the hunt itself found ${coverage.stalemates - stalematesBefore} stalemate(s)): stalemates ${coverage.stalemates}, checkmates ${coverage.checkmates}, frozen ${coverage.frozen}, timeouts ${coverage.timeouts}, resigns ${coverage.resigns}`);
 }
 
 console.log('\n=== 6. The suite says what it covered - and fails if a rare rule was never reached ===');
-{
+if (!ONLY_CONSTRUCTED) {
   const c = coverage;
   const reached = {
     castling: c.castles >= 8,

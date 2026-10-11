@@ -290,14 +290,15 @@ correctly. The app repo has its own test of the same rules (`fourPlayerMirrorSet
   "source + banner + `.js`"; the transform on tricky syntax; every closure-rule failure; manifest validation; `check()`/`write()` on temporary
   trees (changed, missing, stale-in-the-owned-directory, **stale root-level** copies, hand edits, a trailing newline, CRLF working trees, idempotence,
   `--check` never writes, a hand-written top-level file is never touched); the CLI's exit codes (0 / 1 / 2) and messages.
-- `npm run test:fourplayer` (`scripts/test-fourplayer.mjs`, tsx, **20-40 s depending on the machine**, 29 checks) — **behavioural parity**: the
+- `npm run test:fourplayer` (`scripts/test-fourplayer.mjs`, tsx, **20-45 s depending on the machine**, 34 checks) — **behavioural parity**: the
   app's engine and the generated copy are driven in lockstep through 158 seeded games (about 41 000 plies): the same serialized position, legal
   moves, check/dead-position queries, events (as JSON), clocks, bot choice (1200 and 1700 at most plies, 1800 and 3000 on a sample) and
   `serialize`/`deserialize` round trips (including each engine reading the other's text) at **every** ply, with the server's own action
   pattern (charge elapsed time, then move, then increment; resign; flag fall). A coverage meter makes the script fail if a rare rule was
   never reached: castling (all 4 seats x both sides, scripted), en passant (by a perpendicular, an opposing and the other perpendicular
-  seat, scripted), all four promotion pieces for all four seats (scripted), a tuned `maxPlies` cap and the 5000-ply hard ceiling, plus a
-  bounded random hunt for stalemate/checkmate/frozen/timeout/resign. The two engines' exports must also match (functions exist on both
+  seat, scripted), all four promotion pieces for all four seats (scripted), a tuned `maxPlies` cap and the 5000-ply hard ceiling, **a
+  stalemate built by hand** (below), and a bounded random hunt for stalemate/checkmate/frozen/timeout/resign (it must find a stalemate
+  ITSELF, so the scripted one cannot shorten it). The two engines' exports must also match (functions exist on both
   sides, 42 constants/tables deep-equal) and the app-only exports must be exactly the client-only modules'.
 
 **Mutation checks (CHECKLIST §2).** Generator + CLI: 38 mutants (no `.js`, `.js` after the quote, edits applied in the wrong order, each closure
@@ -306,14 +307,37 @@ rule and each syntax form disabled, each manifest rule, every `check`/`write` br
 `import x from foo;`, so the branch is reachable) and `write()` on a CRLF tree churning every file. Engine parity: 18 planted divergences in the
 generated copy only (castling rights, dead-piece scores, en passant, ply counter, castle geometry, rule constants, serialize order, board shape,
 clock increment/negative time, checkmate and stalemate points, the hard ply cap, four bot terms incl. the deep tier's worst-case reply, the
-tier boundary) — **18/18 killed**. Two died only LATE: the careful-tier castling bonus (caught by the random hunt at seed 2048, ~22 s in) and
-the stalemate bonus (ply 612 of the first undisturbed bot game). Parity on rarely-used scoring terms therefore leans on the hunt — see limits.
+tier boundary) — **18/18 killed**; but two of those died only LATE, in the random games (the careful-tier castling bonus, the stalemate
+scoring), i.e. by luck. That was closed by building both by hand:
+
+**Constructed stalemate and castling-bonus tests (`scripts/test-fourplayer.mjs`, section 4b).**
+- *The rule, scripted.* Blue's king on a4 has three squares: a5 and b5 (a Red rook on rank 5) and b4 (a Red bishop on d6); a4 itself is on
+  neither line, so Blue is not in check. Red plays Re8-e5 and Blue is stalemated: the test asserts EXACTLY one elimination, Blue, reason
+  `stalemate` (not checkmate), no credit, points `[10,20,10,10]` (stalemated seat +20, every other active seat +10), Blue's king dead and walking,
+  the game still on, the turn with Yellow — and that both engines agree, then continues 40 random plies (the dead king's walk).
+- *The bot's stalemate term (-6).* Same pattern, with Red's stalemating move also CAPTURING a Yellow bishop (+8.6 one-ply) while a second capture
+  (Bishop takes a pawn, +1.9) competes, so the move nets about +2.6 and the scored choice takes it ~83% of the time: right on the decision
+  threshold, so a change to the constant in EITHER direction flips choices. (A first version captured a knight: net -0.5, so the scored choice
+  never took it, almost every 'hit' was the bot's random-move branch, and a STRONGER penalty went unnoticed — the survivor that exposed it.)
+  4 500 seeded decisions at ELO 1000-1200, identical in both engines; the assertion is on the scored-choice rate (computed from
+  `botStrength().bestChance` minus the random branch's expected share), not a bare percentage.
+- *The bot's castling nudge (+0.3).* A castle among ~22 equal-value moves, at ELO 1000-1800: 7 500 seeded decisions, castle chosen ~13.5%.
+  The nudge only matters when noisy scores are close, so it is a FREQUENCY shift - exactly what identical-seed comparison pins.
+- **Mutation-checked: 19 planted divergences in these terms, 18 killed** (castling nudge 0.35 / 0.25 / 0.4 / removed / deep-tier-only; stalemate
+  value +6 / 0 / -4 / -5 / -7 / -8 / -10; both stalemate rule constants; stalemated seat or others paid nothing; stalemate credited; stalemate and
+  checkmate swapped). The one survivor is a NEIGHBOURING term, planted as a probe: the promotion nudge (+1 -> +1.1) — see limits.
+  A developer switch, `PARITY_ONLY_CONSTRUCTED=1`, skips the random sections so a mutant cannot be pre-empted by an earlier random game; run that way
+  16 scoring/stalemate/castling mutants were ALL killed by the hand-built sections (`stalemate by construction`, `bot castling nudge`,
+  `bot vs stalemating capture`; two - the checkmate/stalemate swap and 'stalemated king not made dead' - died in the castling games' random
+  continuation, also hand-built territory, before reaching 4b).
 
 **Wire payload sizes** (measured, bounded by a frontend test): a typical `four_state` at ply 150 is **700 bytes** (434-character snapshot);
 a 1000-entry move log, an extreme case, is 28 KB.
 
-**Known limits.** (1) Parity is statistical: 2 stalemates in the hunt (no hand-built stalemate position), 96 deep-tier bot comparisons, bot
-terms that fire rarely are only reached by the hunt. The *textual* identity check (`--check`) is what makes a behavioural gap unlikely in the
+**Known limits.** (1) Parity is statistical beyond the constructed cases: 96 deep-tier bot comparisons, and bot terms that were not built by
+hand are only reached by random games — the promotion nudge (+1) is the known example (a +1.1 variant survives; promotion's material gain
+swamps it except against a near-equal capture, which has not been constructed). The stalemate constant is pinned to within +/-1 of -6 in
+both directions, not to the exact digit. The *textual* identity check (`--check`) is what makes a behavioural gap unlikely in the
 first place. (2) CI checks against the same-named EM-Chess branch (`ci.yml` header): push both repos' `fourPlayerOnline` branches together,
 or `--check` runs against a frontend that has no wire file. (3) The generator needs the app checked out at `../` and `typescript` (already a
 devDependency). (4) `index.ts` is the only generated file that is not a copy; it lists the `fourPlayer/` entries in manifest order.

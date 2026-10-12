@@ -17,6 +17,7 @@ import type {
   GameOverReason,
   MakeMovePayload,
   OpponentMovePayload,
+  RejoinAck,
   RejoinGamePayload,
   RejoinStatePayload,
   SpectateStatePayload,
@@ -28,6 +29,21 @@ import type {
  * on abandonment — independent of (and in addition to) the normal clock/timeout mechanism, so
  * a disconnect with minutes still on the clock doesn't force the opponent to wait that long. */
 const ABANDONMENT_GRACE_MS = 45_000;
+
+/** How long a finished room's RESULT stays available to `rejoin` (to someone holding one of its player tokens). A player whose connection
+ * dropped while the game ended — by checkmate, flag, resignation, or the very abandonment their own absence caused — reconnects to a room
+ * that no longer exists; without this they were told "game not found" and the client hung on "Reconnecting…" forever. Long enough for any
+ * reconnect, short enough that nothing accumulates. */
+export const FINISHED_RETENTION_MS = 5 * 60 * 1000;
+const FINISHED_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/** The part of an ended room a late `rejoin` needs: its result, and the two tokens allowed to ask for it (so a roomId alone never reveals
+ * anything). */
+interface FinishedRoom {
+  gameOver: GameOverPayload;
+  tokens: readonly string[];
+  finishedAt: number;
+}
 
 /** Minimum time a player must wait after a draw offer (whether accepted, declined, or still
  * unanswered) before sending another one — the simplest possible spam guard, per-player. */
@@ -157,7 +173,27 @@ export class RoomManager {
   private socketToRoom = new Map<string, { roomId: string; color: PieceColor }>();
   private socketToSpectatingRoom = new Map<string, string>();
 
-  constructor(private io: Server) {}
+  /** Results of rooms that have just ended, keyed by room id, kept for FINISHED_RETENTION_MS so a player who was offline when the game
+   * ended gets the result from `rejoin` instead of "game not found" (see FinishedRoom). */
+  private finishedRooms = new Map<string, FinishedRoom>();
+
+  constructor(private io: Server) {
+    // Without a sweep a long-running process would keep every finished game's tiny record until a late rejoin happened to look at it.
+    // unref()'d so it never keeps the process alive on its own (same approach as ChallengeManager's sweep).
+    setInterval(() => this.sweepFinishedRooms(), FINISHED_SWEEP_INTERVAL_MS).unref();
+  }
+
+  /** Drops finished-room records older than FINISHED_RETENTION_MS; returns how many were removed. Public so tests can drive the clock. */
+  sweepFinishedRooms(now: number = Date.now()): number {
+    let removed = 0;
+    for (const [roomId, finished] of this.finishedRooms) {
+      if (now - finished.finishedAt > FINISHED_RETENTION_MS) {
+        this.finishedRooms.delete(roomId);
+        removed++;
+      }
+    }
+    return removed;
+  }
 
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
@@ -442,9 +478,16 @@ export class RoomManager {
     };
   }
 
-  rejoin(socketId: string, payload: RejoinGamePayload): Ack<{ state: RejoinStatePayload }> {
+  rejoin(socketId: string, payload: RejoinGamePayload): RejoinAck {
     const room = this.rooms.get(payload.roomId);
     if (!room || room.status !== 'active') {
+      // A game that ended while the caller was offline: tell them how it ended (only if they hold one of its tokens, and only while the
+      // record is still fresh). The socket is deliberately NOT seated or registered anywhere — there is nothing left to take part in.
+      const finished = this.finishedRooms.get(payload.roomId);
+      if (finished && finished.tokens.includes(payload.playerToken) && Date.now() - finished.finishedAt <= FINISHED_RETENTION_MS) {
+        // ok:false on purpose (see RejoinFinishedAck): a client from before this existed must never see ok:true without a `state`.
+        return { ok: false, error: 'The game has already ended.', finished: true, gameOver: finished.gameOver };
+      }
       return { ok: false, error: 'The game was not found or has already ended.' };
     }
 
@@ -716,6 +759,15 @@ export class RoomManager {
 
   private endGame(room: Room, reason: GameOverReason, winner: PieceColor | null): void {
     room.status = 'finished';
+    const gameOverPayload: GameOverPayload = { reason, winner };
+    // Remembered for a late rejoin (see FINISHED_RETENTION_MS). Deliberately the FIRST thing after the status flips: once the room is
+    // 'finished' a rejoin can no longer reach it, so if anything below threw (an emit to a dying socket, a spectator broadcast) the
+    // player would be back to "game not found" with no record to find.
+    this.finishedRooms.set(room.id, {
+      gameOver: gameOverPayload,
+      tokens: [room.players.w.playerToken, room.players.b.playerToken],
+      finishedAt: Date.now(),
+    });
     if (room.clockTimer) clearTimeout(room.clockTimer);
 
     for (const color of ['w', 'b'] as const) {
@@ -728,7 +780,6 @@ export class RoomManager {
       }
     }
 
-    const gameOverPayload: GameOverPayload = { reason, winner };
     this.broadcastToSpectators(room, 'game_over', gameOverPayload);
     for (const spectatorSocketId of room.spectators) {
       this.socketToSpectatingRoom.delete(spectatorSocketId);

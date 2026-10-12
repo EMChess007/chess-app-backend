@@ -69,12 +69,20 @@ export const FOUR_FILL_WAIT_MAX_OVERRIDE_MS = 600_000;
  * number of milliseconds in 1..FOUR_FILL_WAIT_MAX_OVERRIDE_MS. Anything else is ignored. Read at call time so tests can pass their own env.
  */
 export function resolveFourFillWaitMs(env: Record<string, string | undefined> = process.env): number {
-  const raw = env.FOUR_FILL_MS;
-  if (env.NODE_ENV === 'production' || raw === undefined) return FOUR_FILL_WAIT_MS;
-  // Decimal digits only: `Number()` alone would also take " 3000", "3e3" and "0x10", which are typos, not milliseconds.
-  if (!/^\d+$/.test(raw)) return FOUR_FILL_WAIT_MS;
+  return envMsOverride(env, 'FOUR_FILL_MS', FOUR_FILL_WAIT_MS, FOUR_FILL_WAIT_MAX_OVERRIDE_MS);
+}
+
+/**
+ * The one rule behind every FOUR_*_MS override (a test/dev convenience, never a production knob): `env[name]` is honoured ONLY when NODE_ENV is
+ * not 'production', ONLY for a plain decimal whole number of milliseconds, and ONLY in 1..max. Anything else - unset, production, " 3000", "3e3",
+ * "0x10", "-5", "0", "1.5", "", too large - gives `fallback`. (`Number()` alone would take " 3000", "3e3" and "0x10", which are typos, not milliseconds.)
+ */
+function envMsOverride(env: Record<string, string | undefined>, name: string, fallback: number, max: number): number {
+  const raw = env[name];
+  if (env.NODE_ENV === 'production' || raw === undefined) return fallback;
+  if (!/^\d+$/.test(raw)) return fallback;
   const ms = Number(raw);
-  return ms >= 1 && ms <= FOUR_FILL_WAIT_MAX_OVERRIDE_MS ? ms : FOUR_FILL_WAIT_MS;
+  return ms >= 1 && ms <= max ? ms : fallback;
 }
 
 /** What a bot that fills an empty seat is called (the strength is FOUR_BOT_ELO). */
@@ -90,4 +98,22 @@ export const FOUR_ACTIVE_GAMES_LIST_MAX = 100;
 /** The pause before a bot's move, by time control (the local game's rule: bullet is quicker). */
 export function fourBotThinkMs(initialSeconds: number): number {
   return initialSeconds <= FOUR_BULLET_MAX_INITIAL_SECONDS ? FOUR_BOT_THINK_BULLET_MS : FOUR_BOT_THINK_MS;
+}
+
+// --- End-to-end testing (W6) ---------------------------------------------------------------------------------------------------------
+
+/** The largest `FOUR_GRACE_MS` override that is honoured (same ceiling as the fill-wait override). */
+export const FOUR_GRACE_WAIT_MAX_OVERRIDE_MS = 600_000;
+
+/**
+ * The takeover grace: FOUR_TAKEOVER_GRACE_MS (45 s), unless `FOUR_GRACE_MS=<ms>` says otherwise, under exactly the guard of FOUR_FILL_MS (see
+ * `envMsOverride`): never in production, only a plain whole number in 1..FOUR_GRACE_WAIT_MAX_OVERRIDE_MS. It exists so the real-socket end-to-end test
+ * and the nightly fuzz can watch a disconnect -> takeover -> retake without spending 45 real seconds on every occurrence. Read when the room
+ * manager is constructed (once per process) and passed through `FourRoomManager`'s `graceMs` option, so a unit test can inject its own.
+ *
+ * Deliberately NOT done for FOUR_ALL_GONE_MS: no end-to-end scenario waits for "every human is gone" (that rule is covered with fake timers in
+ * test-fourplayer-bots.mjs), so a second knob would widen the production configuration surface for no test benefit.
+ */
+export function resolveFourGraceMs(env: Record<string, string | undefined> = process.env): number {
+  return envMsOverride(env, 'FOUR_GRACE_MS', FOUR_TAKEOVER_GRACE_MS, FOUR_GRACE_WAIT_MAX_OVERRIDE_MS);
 }

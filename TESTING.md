@@ -66,6 +66,9 @@ Triggers on every push/PR to `main`. One job:
      millisecond, the fill timer, time controls, the shuffle, failed starts, no leaks (§13).
    - `npm run test:fourplayerHandlers` (`scripts/test-fourplayer-handlers.mjs`, no server needed) — the 4 Player socket handlers on fake
      sockets: the nine events, the join guards, real JWTs, a whole game in-process, and 1500 hostile event/payload/ack combinations (§13).
+   - `npm run test:fourplayerOnline` (`scripts/test-fourplayer-online.mjs`, **needs the dev server, started with `FOUR_GRACE_MS=1500`**) — the first 4 Player test with FOUR real
+     socket.io-client players per room (+ a spectator): identical snapshots at every seq, illegal moves, disconnect/takeover/retake, resign and game over, rejoin after the end,
+     chat, spectating, the active-games list (§14).
    - `npm run duck-opponent` (`scripts/duck-opponent.mjs`) is NOT a test: a live guest opponent for manual Duck Chess
      checks on one device. `challenge` mode (default) prints a code to enter via Challenge a Friend → Join by Code;
      `queue` mode joins the Duck Chess quick-match queue; `join CODE` joins a challenge. It plays random legal Duck turns
@@ -95,7 +98,9 @@ checkout/Postgres setup as CI, then:
   fuzzed the same way (illegal probes are pseudo-legal moves Atomic forbids; `game_over` reasons `atomic`/
   `checkmate`/`stalemate`/`draw` must match the mobile app's own judgement). Duck Chess's probes are a move the
   duck blocks and a legal move with a bad duck (missing, occupied, or its own square) — each must be refused with the
-  room left untouched — and every ack / `opponent_move` must carry the duck square the mobile app expects.
+  room left untouched — and every ack / `opponent_move` must carry the duck square the mobile app expects. A fifth section, **40** real 4 Player
+  Chess games with FOUR sockets each, checks that all four hold the byte-identical snapshot at every `seq` (issue `snapshot-mismatch`), plus seq contiguity, refused illegal and
+  out-of-turn moves, resignations, disconnects with a bot takeover and a retake by token, and a consistent `four_game_over` (§14).
 
 **Visibility when something fails:**
 - Both scripts write a markdown report (`nightly-fuzz-report.md`, `nightly-fuzz-online-report.md`)
@@ -556,3 +561,91 @@ it); and a failed start restoring the humans to the FRONT rather than the back (
 validation each). The default username lookup (`prisma.user.findUnique`) is not exercised by the scripts (they stub it; guests need no database) - the real-server
 e2e with a logged-in user is W6. Fill timers are per process (single instance, like everything else here). A client that never answers is not "queued" any longer
 than its socket lives: disconnect removes it.
+
+## 14. 4 Player Chess Online (server side) — real sockets: the e2e test and the nightly fuzz (workstream W6)
+
+Spec: `FOUR_PLAYER_ONLINE_SPEC.md` §9 (W6) and §10. Everything before W6 tested the 4 Player server logic **in-process** — stub `io`, fake timers, a frozen `Date` — or
+tested the app's client against a fake socket. W6 adds the first tests that hold **four independent real `socket.io-client` connections to one room** on a running
+server, plus a fifth seat-less one for the spectator. That is the only way to prove the invariant the feature rests on: after every state change all four players
+hold the byte-identical snapshot and `seq`.
+
+### `scripts/test-fourplayer-online.mjs` (`npm run test:fourplayerOnline`, **198 checks**, 9 scenarios)
+Same shape as `test-multiplayer.mjs` (header, `BACKEND_URL`, `connect` / `emitAck` / `waitFor` with the same race note, `check`, one `async function test…()` per
+scenario, `main()` exiting 1 with the stack). Needs a running server **started with `FOUR_GRACE_MS=1500`** (scenario 4 fails loudly, with that instruction, if the
+grace is still 45 s). Runs under **tsx** rather than plain node because legal moves come from the generated TypeScript mirror (`src/game/fourPlayer/index.ts`).
+Each inbox records everything a socket is sent from before it joins (`record()`), so a scenario can compare all four afterwards; a pseudo-random but seeded
+(`FOUR_E2E_SEED`) legal move is chosen from the mover's **own** copy of the position, as a real client does.
+1. **Queue and match found** — "No time limit" and Daily refused; a queued socket cannot queue twice; `four_queue_update` counts and the fill countdown (3 waiting,
+   `fillInMs` ≤ 30 s; 1 waiting, `null`); nothing starts with 3 humans; the 4th starts the game at once; one room, seq 0, four distinct seats, four own tokens, four
+   byte-identical starting payloads (clocks included), no token / socket id / user id in the shared seats list; queues never mix; `four_leave_queue`.
+2. **Move sync is identical** — 18 real plies; after **every** `four_state` the four sockets hold the byte-identical snapshot, `actor` and `seq`, and the message
+   names the mover and the move; per socket seq 1..N with no gap or duplicate; identical clocks; the ack's `seq` is the `seq` of the broadcast it caused.
+3. **Illegal and out-of-turn moves** — each refused **for its own reason** ("Not your turn.", "Illegal move.", "Invalid move.", "Invalid promotion piece.") with nothing
+   sent to anyone, then a burst of 14 calls shows the rate limit ("Too many moves - slow down."; refused calls count, so the probes are paced under it), then the room
+   still takes a legal move as seq 1.
+4. **Disconnect → grace → takeover → retake** — `four_seat_update` (connected: false, `graceMsLeft`), then (`kind: 'bot'`, `botReason: 'takeover'`, still the player's name, ELO
+   1200), the bot plays seat 3's turn by itself, the original token rejoins on a NEW socket mid-game and gets the live snapshot, the others see the human back, a bogus
+   token is refused, and the player's next move from the new socket is accepted and broadcast as a human move.
+5. **Resign and game over** — an off-turn resignation (`actor: 'resign'`, game continues), nine more moves, two more resignations; `four_game_over` reaches all four
+   seats (eliminated ones stay attached) and the spectator **identically**, its scores equal the scores in its own final snapshot, its winners are exactly the highest
+   score, and it carries the same snapshot as the last `four_state`.
+6. **Rejoin after the game ended** — pinned as **`{ ok: true, finished: true, gameOver }` with no live state**, not the 2-player `{ ok: false, finished: true, … }`: the
+   4 Player protocol is new, so a finished room is a plain success (FourRejoinFinished). Bogus token / unknown room refused; the late socket is not seated.
+7. **Spectator** — joins mid-game, gets the live room (same seq and text as the players, the move log, no token), keeps receiving identical `four_state`s, cannot move /
+   chat / resign, a seated socket cannot also spectate, can leave and then receives nothing.
+8. **Chat** — reaches the other three seats and the spectator, exactly `fromSeat,name,sentAt,text`, trimmed; the sender does not get it back; the 1 s rate limit; blank
+   refused; 900 characters cut to 500.
+9. **Active games list** — the live room with its label and four names (guests are "Guest"), only names and kinds, gone once the game ends.
+
+### `scripts/nightly-fuzz-online.mjs` — a "4 Player Chess" section (extended in place)
+Own stats object, loop, console line, markdown line and issue list, counted into the exit code, exactly like the other variants. New CLI argument after `duckGames`
+(`[fourPlayerGames]`, default = `fogGames`). Per game, **four real sockets**, each with **its own** position built only from the snapshots it was sent and read by the
+**mobile app's** 4-seat engine (not the server's mirror — the clients are independent of the server, like the other sections), and its moves chosen from that:
+- **headline:** at every seq all connected clients hold the byte-identical `{roomId, seq, actor, move, events, state, clocksMs}` — a mismatch is issue kind `snapshot-mismatch`;
+- seq contiguous per client; the ack's seq is the previous seq + 1; the broadcast describes the move that was sent; clocks plausible;
+- a fraction of turns first submit an illegal move (and sometimes an out-of-turn one): the server must refuse and the room must be untouched;
+- resignations part-way; in ~40% of games a random seat is disconnected and later brought back by token — with `FOUR_GRACE_MS` set on the server the bot takeover is
+  waited for and observed first; otherwise the player is brought back inside the 45 s grace — and the rejoin snapshot must equal the others' copy at that seq;
+- a game that has not ended is finished by resignations, and the `four_game_over` each client got must agree between seats, with the app engine's own reading of the final
+  position (scores, winners, reason), and with the last `four_state`; a late `four_rejoin` of the finished game must return the same result.
+The fuzz **paces itself under the server's move rate limit** (8 calls per seat per second): it plays far faster than a human and its first run tripped "Too many moves" on
+legal moves — a fuzz flaw, not a server bug. Pace: about 5.5 s a game (80 plies). **Nightly count: 40 games** (≈ 4 minutes; each game has four sockets), run with
+`FOUR_GRACE_MS=1500` set on the server-start step. Local run at 20 games: 1600 plies, 695 illegal/out-of-turn moves correctly refused, 7 disconnect/rejoin cycles
+(10 bot takeovers), 59 resignations, 20 games ended, **0 issues**. Limit: no game in 80 plies ends by the engine itself (cap / dead position), so those three
+`reason`s are covered by the unit suites, not by this fuzz.
+
+### `FOUR_GRACE_MS` (`src/game/fourPlayerConfig.ts`, `FourRoomManager`'s `graceMs`)
+`resolveFourGraceMs()` shortens the 45 s takeover grace for the real-socket tests, under **exactly** the guard of `FOUR_FILL_MS` (now one shared helper, `envMsOverride`):
+ignored when `NODE_ENV=production`; only a plain decimal whole number of ms in 1..600000 (not `" 3000"`, `"3e3"`, `"0x10"`, `"1.5"`, `"0"`, `"-5"`, …). Read once when the room
+manager is built and passed as the `graceMs` option, so a unit test can inject its own. **`FOUR_ALL_GONE_MS` was deliberately left alone**: no end-to-end scenario waits for "every
+human is gone" (that rule is covered with fake timers in `test-fourplayer-bots.mjs`), so a second knob would widen the production configuration surface for no benefit.
+**Production unchanged, verified on live servers** (a guest disconnects, the others are told `graceMsLeft`): unset → 44999 (one millisecond had passed); `FOUR_GRACE_MS=1500`
+with `NODE_ENV=production` → 45000; `FOUR_GRACE_MS=1.5s` → 45000; `FOUR_GRACE_MS=1500` → 1500. In `test-fourplayer-bots.mjs` section 10 (+36 checks, now **160**): the
+constants untouched; 6 accepted and 15 refused spellings; production; independence from `FOUR_FILL_MS`; the manager's timer and `graceMsLeft` honour the option and the
+environment; source pins that nothing reads the 45 s constant directly and neither the entry point nor the handlers pass a grace.
+
+### What real sockets found that the stub tests structurally could not
+1. **The starting snapshot was not one snapshot.** `createRoom` read the clocks inside its per-recipient loop, so on a real clock the seat on move showed `299999`,
+   `299998`, `300000`, `299999` ms to the four players of the same `four_match_found` (seq 0). Every in-process test freezes `Date`, so none could see it. Fixed (one reading
+   for every recipient), pinned deterministically by `test-fourplayer-rooms.mjs` section 9 (a `Date.now` that moves on every read: 220 checks, was 215), and by e2e scenario 1.
+   `four_state` broadcasts were already correct (one payload per commit).
+2. **Flaws in the new tests themselves, found by running them many times** (none was a server bug): a "clocks are exactly 300 s" assertion that failed whenever a
+   millisecond had passed; scenario 4 and the fuzz reading a stale copy of the position after back-to-back moves (the ack and the `four_state` it caused travel on different
+   sockets — `playOne` now waits for the mover's own copy to catch up); the fuzz outrunning the rate limit; a namespace import of the app's engine that exposed nothing under tsx
+   (imported file by file now, like the other variants). The e2e was run 12 times in a row after the last fix: 0 failures (it had failed in 3 of 13 runs before).
+
+### Mutation checks (copy-based: a mutated COPY of `backend/src`, never the real files)
+**17 unit mutants** of the override and the fix (judged by the bots and rooms suites): 16 killed, 1 equivalent (the starting *seats* read per recipient: nothing in them depends on
+time at creation). **9 real-server mutants** (the mutated copy is started as a real server on its own port with `FOUR_GRACE_MS=1500`): the e2e kills **all 9** — clocks per recipient;
+`seq` skipping a number; one seat never receiving broadcasts; one recipient's clock 1 ms off; out-of-turn moves accepted; takeover never happening; the grace override ignored by
+the live server; a retake that leaves the bot in charge; a spectator able to chat (as seat 0) — each by the check that names it. The **fuzz alone also kills the 7 it can reach**
+(its issue kinds: `snapshot-mismatch` for the 1 ms clock, `seq-gap-or-duplicate`/`ack-seq-not-contiguous`, `missing-four-state`, `server-ACCEPTED-out-of-turn-fourplayer-move`,
+`stalled-waiting-for-takeover`, `rejoin-did-not-restore-the-seat`, `match-found-snapshots-differ`). The first e2e kills of two mutants came from the over-strict clock assertion
+above rather than from their own check, which is how that flaw was spotted; they were re-run after the fix.
+
+### CI and nightly
+`ci.yml`: one new step after the socket-handler tests, `npm run test:fourplayerOnline`, against the dev server started earlier — **whose start step now sets
+`FOUR_GRACE_MS: '1500'`** (the one change to an existing step; nothing else in the job depends on the grace). `nightly.yml`: the same env on its server-start step, and the online-fuzz
+step's command is `… nightly-fuzz-online.mjs 200 80 200 200 200 40` (the previous defaults, spelled out, plus 40 four-player games). **Nightly dependency:** the nightly checks out
+the frontend repo's DEFAULT branch, and the 4 Player section imports the app's engine from it, so the frontend's 4 Player work must be merged before (or with) this change —
+otherwise every nightly online fuzz would fail at import (the same pairing rule `ci.yml` already documents for `sync:fourplayer --check`).

@@ -837,6 +837,28 @@ console.log('\n=== 14. Cost ===');
   check(n >= 900 && total / n < 5 && worst < 100, 'a move (legality check, engine, serialize, four broadcasts) costs well under 5 ms on average and never blocks the loop for long');
 }
 
+console.log('\n=== 9. The starting snapshot is ONE snapshot (found by the first real-socket run, W6) ===');
+{
+  // Every other test here freezes Date, so a clock read once per recipient and a clock read once look the same. Make time MOVE on every read:
+  // if createRoom reads the clock inside its per-recipient loop, each player's starting clocks differ.
+  const realNow = Date.now;
+  let t = 1_700_000_000_000;
+  Date.now = () => (t += 1);
+  let g;
+  try {
+    g = newGame({ names: ['Ann', 'Ben', 'Cy', 'Di'] });
+  } finally {
+    Date.now = realNow;
+  }
+  const found = eventsOf(g.io, 'four_match_found').map((e) => e.payload);
+  check(found.length === 4, 'four players were each sent a four_match_found');
+  check(new Set(found.map((p) => JSON.stringify(p.clocksMs))).size === 1, 'all four starting clocks are identical even when the wall clock advances on every read');
+  check(new Set(found.map((p) => JSON.stringify(p.seats))).size === 1 && new Set(found.map((p) => p.state)).size === 1, '...and so are the seats and the position');
+  check(found.every((p) => p.seq === 0) && new Set(found.map((p) => p.playerToken)).size === 4, '...while each player still gets their own token and seat number');
+  const live = g.mgr.rejoin(g.sockets[0] + '.x', { roomId: g.id, playerToken: g.tokens[0] });
+  check(live.ok === true && live.state.clocksMs.length === 4, '(a rejoin answer, unlike a broadcast, is a fresh reading taken when it is asked for - that is intended)');
+}
+
 mock.timers.reset();
 console.log(`\nAll ${passed} checks passed.`);
 process.exit(0);

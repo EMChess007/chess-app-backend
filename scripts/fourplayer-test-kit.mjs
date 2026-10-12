@@ -81,8 +81,9 @@ export function disposeAll() {
  * `elos` gives bot seats their strength (default 1200). `rng` is the engine's randomness, `botRng` the bots', `chooseBotMove` an injected
  * decision function. Returns handles; `sockets[seat]` is the seat's CURRENT socket (rejoin() replaces it).
  */
-export function newGame({ tc = TC, rng, botRng, chooseBotMove, bots = 0, kinds, elos, label, names, io = stubIo() } = {}) {
+export function newGame({ tc = TC, rng, botRng, chooseBotMove, graceMs, bots = 0, kinds, elos, label, names, io = stubIo() } = {}) {
   const options = {};
+  if (graceMs) options.graceMs = graceMs;
   if (rng) options.rng = rng;
   if (botRng) options.botRng = botRng;
   if (chooseBotMove) options.chooseBotMove = chooseBotMove;

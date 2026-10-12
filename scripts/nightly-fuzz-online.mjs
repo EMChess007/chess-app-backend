@@ -23,10 +23,17 @@
  *    fraction of turns ALSO first submit a deliberately illegal move (a non-capturing move while a
  *    capture is mandatory) and the server MUST reject it — the "server is the authority" check —
  *    and every game_over must agree with the mobile app's own winner detection.
+ *  - 4 Player Chess: FOUR real sockets per game in one room, each keeping its OWN position (built only from the snapshots it is sent, read
+ *    with the mobile app's own 4-seat engine) and moving from its own legal-move generation. The headline assertion is that all four hold the
+ *    byte-identical snapshot for every seq (issue kind 'snapshot-mismatch'); also: seq contiguous per client, illegal / out-of-turn moves refused
+ *    and the room left untouched, resignations, disconnects with a bot takeover and a retake by token (needs the server started with
+ *    FOUR_GRACE_MS, see below), and a four_game_over that agrees across seats and with the app engine's own reading of the final position.
  *
  * Usage:
- *   npm run dev                                (in one terminal, from backend/)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames]
+ *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
+ *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
+ *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames]
  * (the others default to the same count as fogGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
@@ -36,6 +43,13 @@ import { ChessEngine } from '../../src/logic/ChessEngine.ts';
 import { getGiveawayMoves, getGiveawayWinner } from '../../src/logic/giveaway.ts';
 import { getAtomicMoves, getAtomicWinner, isAtomicThreefoldRepetition } from '../../src/logic/atomic.ts';
 import { getLegalDuckPlacementSquares, hasNoDuckMoves } from '../../src/logic/duckChess.ts';
+// The MOBILE APP's 4-seat engine (not the server's generated mirror): the 4 Player clients are independent of the server. Imported file by file, like
+// the other variants' logic: under tsx the app's .ts files load as CommonJS, and a namespace import of its index.ts (which is only `export *`) would
+// expose nothing but `default`.
+import { PLAYABLE_SQUARES, squareName } from '../../src/logic/fourPlayer/board.ts';
+import { BISHOP, KNIGHT, QUEEN, ROOK, deserialize } from '../../src/logic/fourPlayer/state.ts';
+import { legalMoves, promotionOf } from '../../src/logic/fourPlayer/moves.ts';
+const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf };
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const GAMES = Number(process.argv[2] ?? 100);
@@ -43,6 +57,7 @@ const MAX_PLIES = Number(process.argv[3] ?? 60);
 const GIVEAWAY_GAMES = Number(process.argv[4] ?? GAMES);
 const ATOMIC_GAMES = Number(process.argv[5] ?? GAMES);
 const DUCK_GAMES = Number(process.argv[6] ?? GAMES);
+const FOUR_GAMES = Number(process.argv[7] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -515,8 +530,353 @@ async function playDuckGame(gameIndex) {
   return { stats, issues };
 }
 
+// --- 4 Player Chess ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * One 4 Player Chess game with FOUR real socket.io-client players (the server's matchmaker puts them in one room; four humans start at once),
+ * checked against the spec's section 10 requirement: IDENTICAL snapshots to every seat for every seq, seq contiguous, every client move legal
+ * in its OWN engine, the final result consistent with four_game_over, random disconnects and rejoins.
+ *
+ * The clients' engine is the MOBILE APP's (src/logic/fourPlayer), not the server's generated mirror, exactly as the other sections use the
+ * app's ChessEngine / giveaway / atomic / duck logic: each client keeps its OWN position, built only from the snapshots it was sent, and
+ * computes its moves from that. A move it computed as legal being refused, or two clients holding different positions, is a client/server
+ * desync - the thing this file exists to catch.
+ *
+ * Per game: the seat on move plays a random legal move from its own tracked position; on a fraction of its turns it first submits an illegal
+ * move (an unreachable destination) and the server MUST refuse it and send nothing; sometimes another seat tries a legal move out of turn
+ * (refused too). Some games have a seat resign part-way. Some drop one seat's connection and later bring the player back with their token -
+ * with the takeover grace shortened by FOUR_GRACE_MS on the server, the bot takeover happens first, then the retake; if the server still has
+ * the full 45 s grace (the override is ignored in production), the player is brought straight back inside the grace instead. A game that has
+ * not ended by itself is finished by resigning seats, and the four_game_over each client got must agree with the others, with the position it
+ * ends in, and with the app engine's own reading of that position (scores, winners, reason).
+ */
+async function playFourPlayerGame(gameIndex) {
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: false, naturalEnd: false, rejoins: 0, takeovers: 0, resigns: 0 };
+  const problem = (kind, extra = {}) => issues.push({ kind, game: gameIndex, ply: stats.plies, ...extra });
+  const timeControl = { initialSeconds: 300, incrementSeconds: 2 };
+  const names = [0, 1, 2, 3].map((i) => `F${gameIndex}x${i}`);
+  const sockets = [];
+  for (const name of names) sockets.push(await connect(name));
+  const clients = sockets.map((socket) => fourClient(socket));
+  const found = sockets.map((s) => waitFor(s, 'four_match_found')); // BEFORE the emits - see waitFor's doc comment
+  found.forEach((p) => p.catch(() => {})); // no unhandled rejection if a join fails first; the caller still sees it
+  for (let i = 0; i < 4; i++) {
+    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl, timeControlLabel: '5 | 2' });
+    if (!ack.ok) problem('four-join-queue-refused', { player: i, error: ack.error });
+  }
+  const matches = await Promise.all(found);
+  const roomId = matches[0].roomId;
+  const seatsOf = []; // by seat: { client, socket, token, connected }
+  matches.forEach((match, i) => {
+    clients[i].start(match);
+    seatsOf[match.seat] = { client: clients[i], socket: sockets[i], token: match.playerToken, connected: true, name: names[i] };
+  });
+  if (new Set(matches.map((m) => m.roomId)).size !== 1 || new Set(matches.map((m) => m.seat)).size !== 4) problem('match-found-inconsistent', { seats: matches.map((m) => m.seat), rooms: matches.map((m) => m.roomId) });
+  if (new Set(matches.map((m) => JSON.stringify({ ...m, seat: 0, playerToken: 0 }))).size !== 1) problem('match-found-snapshots-differ', { clocks: matches.map((m) => m.clocksMs) });
+
+  const live = () => seatsOf.filter((s) => s.connected);
+  const lead = () => live()[0].client;
+  /** Waits until every connected client has received the four_state with this seq. */
+  const allHave = (seq, ms = 4000) => until(() => live().every((s) => s.client.bySeq.has(seq)), ms);
+  /** THE headline check: at this seq every connected client holds the byte-identical snapshot (position, clocks, who moved and how, the events). */
+  const compareAt = (seq) => {
+    const copies = live().map((s) => ({ seat: seatIndexOf(s), p: s.client.bySeq.get(seq) })).filter((c) => c.p);
+    if (copies.length < live().length) return problem('missing-four-state', { seq, have: copies.map((c) => c.seat) });
+    const key = (p) => JSON.stringify({ roomId: p.roomId, seq: p.seq, actor: p.actor, move: p.move, events: p.events, state: p.state, clocksMs: p.clocksMs });
+    const first = key(copies[0].p);
+    for (const c of copies) {
+      if (key(c.p) !== first) return problem('snapshot-mismatch', { seq, seatA: copies[0].seat, seatB: c.seat, a: copies[0].p, b: c.p });
+    }
+    const clocks = copies[0].p.clocksMs;
+    if (!Array.isArray(clocks) || clocks.length !== 4 || clocks.some((ms) => !Number.isFinite(ms) || ms < 0 || ms > 300_000 + 60_000)) problem('implausible-clocks', { seq, clocks });
+  };
+  const seatIndexOf = (entry) => seatsOf.indexOf(entry);
+  // The server allows 10 four_make_move calls per second per seat and counts REFUSED ones too (a human cannot play faster, and it stops a client
+  // hammering the legality check). This fuzz plays far faster than a human, so it paces itself to 8 per seat per second: otherwise a legal move
+  // would be refused for 'Too many moves' and look like a bug. (test-fourplayer-online.mjs scenario 3 tests the limit itself.)
+  const moveCalls = [[], [], [], []];
+  const paced = async (seat) => {
+    for (;;) {
+      const now = Date.now();
+      moveCalls[seat] = moveCalls[seat].filter((t) => now - t < 1000);
+      if (moveCalls[seat].length < 8) break;
+      await sleep(1000 - (now - moveCalls[seat][0]) + 5);
+    }
+    moveCalls[seat].push(Date.now());
+  };
+  /** The snapshot text the room had at `seq`, as the lead client saw it (the starting snapshot for seq 0). */
+  const textAt = (seq) => (seq === 0 ? lead().startText : lead().bySeq.get(seq)?.state);
+
+  const plan = {
+    resignAtPly: Math.random() < 0.5 ? 6 + randInt(20) : null,
+    resignSeat: randInt(4),
+    dropAtPly: Math.random() < 0.4 ? 4 + randInt(18) : null,
+    dropSeat: randInt(4),
+    backAfterPlies: 1 + randInt(8),
+  };
+  let dropped = null; // { seat, atPly, sawTakeover }
+  let resigned = false;
+  let graceMs = null;
+  const graceShort = () => graceMs !== null && graceMs <= 10_000;
+
+  const bringBack = async () => {
+    const entry = seatsOf[dropped.seat];
+    const back = await connect(`${names[dropped.seat]}-back`);
+    const client = fourClient(back);
+    const ack = await emitAck(back, 'four_rejoin', { roomId, playerToken: entry.token });
+    stats.rejoins++;
+    if (!ack.ok || ack.finished) return problem('rejoin-refused', { seat: dropped.seat, ack });
+    // The room may have moved on (a bot) between the server answering and the others' copies arriving: compare AT the rejoin's seq.
+    await until(() => lead().latest().seq >= ack.state.seq, 4000).catch(() => {});
+    if (textAt(ack.state.seq) !== ack.state.state) problem('rejoin-state-mismatch', { seat: dropped.seat, rejoinSeq: ack.state.seq, leadSeq: lead().latest().seq });
+    if (ack.state.seat !== dropped.seat || ack.state.seats[dropped.seat].kind !== 'human') problem('rejoin-did-not-restore-the-seat', { seat: dropped.seat, seats: ack.state.seats });
+    client.startFromRejoin(ack.state);
+    seatsOf[dropped.seat] = { client, socket: back, token: entry.token, connected: true, name: entry.name };
+    dropped.done = true;
+    sockets.push(back);
+  };
+
+  const resignSeat = async (seat) => {
+    const entry = seatsOf[seat];
+    if (!entry.connected || lead().tracked.status[seat] !== 'active') return false;
+    const seqBefore = lead().latest().seq;
+    const ack = await emitAck(entry.socket, 'four_resign', { roomId });
+    if (!ack.ok) {
+      problem('server-refused-resign', { seat, error: ack.error });
+      return false;
+    }
+    stats.resigns++;
+    await until(() => lead().latest().seq > seqBefore && live().every((s) => s.client.latest().seq === lead().latest().seq), 4000).catch(() => problem('resignation-state-did-not-reach-everyone', { seat, seqBefore }));
+    compareAt(lead().latest().seq);
+    return true;
+  };
+
+  for (; stats.plies < MAX_PLIES; stats.plies++) {
+    const leader = lead();
+    if (leader.tracked.result) break;
+
+    if (plan.resignAtPly === stats.plies && !resigned) {
+      resigned = true;
+      await resignSeat(plan.resignSeat);
+      if (lead().tracked.result) break;
+    }
+    if (plan.dropAtPly === stats.plies && !dropped) {
+      const candidates = [0, 1, 2, 3].filter((s) => seatsOf[s].connected && lead().tracked.status[s] === 'active');
+      const seat = candidates.length > 0 ? candidates[plan.dropSeat % candidates.length] : null;
+      if (seat !== null && live().length === 4) {
+        const others = live().filter((s) => seatIndexOf(s) !== seat);
+        const before = others.map((s) => s.client.seatUpdates.length);
+        seatsOf[seat].socket.disconnect();
+        seatsOf[seat].connected = false;
+        dropped = { seat, atPly: stats.plies, sawTakeover: false, done: false };
+        await until(() => others.every((s, i) => s.client.seatUpdates.length > before[i]), 4000).catch(() => problem('no-seat-update-after-disconnect', { seat }));
+        const away = others[0].client.seatUpdates.at(-1)?.seats?.[seat];
+        if (!away || away.connected !== false || away.kind !== 'human' || !(away.graceMsLeft > 0)) problem('bad-away-announcement', { seat, away });
+        else graceMs = away.graceMsLeft;
+        // With the full 45 s grace nothing would happen for 45 s if this seat's turn came: bring the player straight back, inside the grace.
+        if (!graceShort()) await bringBack();
+      }
+    }
+    if (dropped && !dropped.done && graceShort() && stats.plies >= dropped.atPly + plan.backAfterPlies) {
+      await bringBack();
+    }
+
+    const turn = lead().tracked.turn;
+    const mover = seatsOf[turn];
+    if (!mover.connected) {
+      // The seat on move belongs to a player who is away: nothing happens until the grace runs out and the bot takes over and plays.
+      const seqBefore = lead().latest().seq;
+      const ok = await until(() => lead().latest().seq > seqBefore, (graceMs ?? 1500) + 8000).then(() => true, () => false);
+      if (!ok) {
+        problem('stalled-waiting-for-takeover', { seat: turn, graceMs });
+        break;
+      }
+      const after = lead().latest().payload;
+      if (after.actor === 'bot') {
+        stats.takeovers++;
+        if (dropped) dropped.sawTakeover = true;
+      }
+      await allHave(after.seq).catch(() => {});
+      compareAt(after.seq);
+      continue;
+    }
+
+    // The mover's OWN position and its own legal moves.
+    const own = mover.client;
+    if (own.tracked.turn !== turn || own.latest().seq !== leader.latest().seq) {
+      problem('client-positions-differ-before-a-move', { seat: turn, ownSeq: own.latest().seq, leadSeq: leader.latest().seq });
+      break;
+    }
+    const moves = FP.legalMoves(own.tracked, turn);
+    if (moves.length === 0) {
+      problem('no-legal-move-for-the-seat-on-move', { seat: turn, state: own.latest().text });
+      break;
+    }
+
+    // Probes: something the server MUST refuse, and which must leave the room untouched.
+    const probes = [];
+    if (Math.random() < 0.3) {
+      const pick = moves[randInt(moves.length)];
+      const legalTos = new Set(moves.filter((m) => m.from === pick.from).map((m) => m.to));
+      const to = FP.PLAYABLE_SQUARES.find((s) => s !== pick.from && !legalTos.has(s));
+      probes.push({ socketOf: turn, payload: { roomId, from: FP.squareName(pick.from), to: FP.squareName(to) }, kind: 'server-ACCEPTED-illegal-fourplayer-move' });
+    }
+    if (Math.random() < 0.15) {
+      const other = [0, 1, 2, 3].find((s) => s !== turn && seatsOf[s].connected);
+      if (other !== undefined) {
+        const m = FP.legalMoves(own.tracked, other)[0];
+        if (m) probes.push({ socketOf: other, payload: { roomId, from: FP.squareName(m.from), to: FP.squareName(m.to) }, kind: 'server-ACCEPTED-out-of-turn-fourplayer-move' });
+      }
+    }
+    const seqBefore = leader.latest().seq;
+    for (const probe of probes) {
+      stats.illegalProbes++;
+      await paced(probe.socketOf);
+      const ack = await emitAck(seatsOf[probe.socketOf].socket, 'four_make_move', probe.payload);
+      if (ack.ok) problem(probe.kind, { payload: probe.payload, ack });
+    }
+    if (probes.length > 0) {
+      await sleep(15);
+      if (live().some((s) => s.client.latest().seq !== seqBefore)) problem('refused-move-changed-the-room', { seqBefore, seqNow: live().map((s) => s.client.latest().seq) });
+    }
+
+    const pick = moves[randInt(moves.length)];
+    const promotion = FP.promotionOf(pick);
+    const letter = promotion ? { [FP.QUEEN]: 'q', [FP.ROOK]: 'r', [FP.BISHOP]: 'b', [FP.KNIGHT]: 'n' }[promotion] : undefined;
+    const payload = { roomId, from: FP.squareName(pick.from), to: FP.squareName(pick.to), ...(letter ? { promotion: letter } : {}) };
+    await paced(turn);
+    const ack = await emitAck(mover.socket, 'four_make_move', payload);
+    if (!ack.ok) {
+      problem('server-rejected-legal-fourplayer-move', { seat: turn, payload, error: ack.error, state: own.latest().text });
+      break;
+    }
+    if (ack.seq !== seqBefore + 1) problem('ack-seq-not-contiguous', { ackSeq: ack.seq, expected: seqBefore + 1 });
+    await allHave(ack.seq).catch(() => {});
+    compareAt(ack.seq);
+    const sent = mover.client.bySeq.get(ack.seq);
+    if (sent && (sent.actor !== 'human' || !sent.move || sent.move.seat !== turn || sent.move.from !== payload.from || sent.move.to !== payload.to)) {
+      problem('four-state-does-not-describe-the-move', { sent: payload, got: { actor: sent.actor, move: sent.move } });
+    }
+  }
+
+  // If a seat was dropped and never came back, bring it back now (its token must still work), so the end of the game is seen by all four.
+  if (dropped && !dropped.done) await bringBack().catch((e) => problem('rejoin-threw', { error: String(e) }));
+
+  // End the game: it may have ended by itself; otherwise resign seats until three are out.
+  stats.naturalEnd = !!lead().tracked.result;
+  if (!lead().tracked.result) {
+    for (const seat of [0, 1, 2, 3].sort(() => Math.random() - 0.5)) {
+      if (lead().tracked.result) break;
+      await resignSeat(seat);
+    }
+  }
+  const ended = await until(() => live().every((s) => s.client.gameOvers.length >= 1), 6000).then(() => true, () => false);
+  if (!ended) problem('no-game-over-for-some-seat', { seqs: live().map((s) => s.client.latest().seq), overs: live().map((s) => s.client.gameOvers.length) });
+  else {
+    stats.finished = true;
+    const over = live()[0].client.gameOvers[0];
+    for (const s of live()) {
+      if (s.client.gameOvers.length !== 1) problem('game-over-delivered-more-than-once', { seat: seatIndexOf(s), count: s.client.gameOvers.length });
+      if (JSON.stringify(s.client.gameOvers[0]) !== JSON.stringify(over)) problem('game-over-differs-between-seats', { a: over, b: s.client.gameOvers[0] });
+    }
+    // ...and with the app engine's own reading of the final position.
+    let final = null;
+    try {
+      final = FP.deserialize(over.state);
+    } catch (e) {
+      problem('client-cannot-read-the-final-snapshot', { error: String(e) });
+    }
+    if (final) {
+      if (!final.result && over.reason !== 'abandoned') problem('game-over-without-a-result-in-the-snapshot', { over });
+      if (final.result && final.result.reason !== over.reason) problem('game-over-reason-disagrees-with-the-engine', { engine: final.result.reason, got: over.reason });
+      if (JSON.stringify([...final.score]) !== JSON.stringify(over.scores)) problem('game-over-scores-disagree-with-the-engine', { engine: [...final.score], got: over.scores });
+      const best = Math.max(...final.score);
+      const expectedWinners = [0, 1, 2, 3].filter((s) => final.score[s] === best);
+      if (final.result && JSON.stringify(expectedWinners) !== JSON.stringify([...over.winners].sort((a, b) => a - b))) problem('game-over-winners-disagree-with-the-engine', { engine: expectedWinners, got: over.winners });
+      const last = lead().latest();
+      if (last.text !== over.state) problem('game-over-snapshot-differs-from-the-last-four-state', { lastSeq: last.seq });
+    }
+    for (const s of live()) {
+      const seqs = s.client.states.map((p) => p.seq);
+      // contiguity is per client from the seq it started at (a rejoined client starts at its rejoin snapshot)
+      if (seqs.some((q, i) => i > 0 && q !== seqs[i - 1] + 1)) problem('seq-not-contiguous', { seat: seatIndexOf(s), seqs: seqs.slice(0, 60) });
+    }
+    // A late rejoin of the finished game answers the result.
+    const late = await connect(`F${gameIndex}-late`);
+    const lateAck = await emitAck(late, 'four_rejoin', { roomId, playerToken: seatsOf[randInt(4)].token });
+    if (!(lateAck.ok === true && lateAck.finished === true && JSON.stringify(lateAck.gameOver) === JSON.stringify(over))) problem('rejoin-after-end-wrong', { ack: lateAck });
+    late.disconnect();
+  }
+  for (const s of seatsOf) s.socket.disconnect();
+  sockets.forEach((s) => s.disconnect());
+  for (const c of clients) issues.push(...c.drainProblems().map((p) => ({ ...p, game: gameIndex })));
+  return { stats, issues };
+}
+
+/** One real player's side of a 4 Player room: a recorder of everything it is sent, plus its OWN position built only from those snapshots. */
+function fourClient(socket) {
+  const c = {
+    states: [],
+    bySeq: new Map(),
+    seatUpdates: [],
+    gameOvers: [],
+    tracked: null,
+    trackedSeq: -1,
+    problems: [],
+    latest() {
+      const last = this.states.at(-1);
+      return last ? { seq: last.seq, text: last.state, payload: last } : { seq: this.trackedSeq, text: this.startText, payload: null };
+    },
+    start(match) {
+      this.startText = match.state;
+      this.tracked = FP.deserialize(match.state);
+      this.trackedSeq = 0;
+    },
+    startFromRejoin(state) {
+      // A four_state that followed the ack on the same socket may already have been handled (the waitFor trap, again): never go BACK to the older snapshot.
+      this.startText = state.state;
+      if (this.trackedSeq >= state.seq) return;
+      this.tracked = FP.deserialize(state.state);
+      this.trackedSeq = state.seq;
+    },
+    drainProblems() {
+      return this.problems.splice(0);
+    },
+  };
+  socket.on('four_state', (p) => {
+    // contiguity per client: each state is exactly the next one after the last it saw
+    if (c.trackedSeq >= 0 && p.seq !== c.trackedSeq + 1) c.problems.push({ kind: 'seq-gap-or-duplicate', game: -1, expected: c.trackedSeq + 1, got: p.seq });
+    c.states.push(p);
+    c.bySeq.set(p.seq, p);
+    try {
+      c.tracked = FP.deserialize(p.state);
+      c.trackedSeq = p.seq;
+    } catch (e) {
+      c.problems.push({ kind: 'client-cannot-read-snapshot', game: -1, seq: p.seq, error: String(e) });
+    }
+  });
+  socket.on('four_seat_update', (p) => c.seatUpdates.push(p));
+  socket.on('four_game_over', (p) => c.gameOvers.push(p));
+  return c;
+}
+
+/** Polls until `test()` is truthy; rejects after `ms`. (Four sockets' events arrive independently, so "the next event on one socket" is not enough.) */
+function until(test, ms = 4000) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (test()) return resolve();
+      if (Date.now() - t0 > ms) return reject(new Error('timed out waiting for a condition'));
+      setTimeout(tick, 5);
+    };
+    tick();
+  });
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function main() {
-  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
+  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess + ${FOUR_GAMES} 4 Player Chess games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
@@ -586,6 +946,27 @@ async function main() {
   }
   allIssues.push(...duckStats.issues.map((i) => ({ ...i, variant: 'duckChess' })));
 
+  // --- 4 Player Chess ---
+  const fourStats = { games: 0, plies: 0, probes: 0, finished: 0, natural: 0, rejoins: 0, takeovers: 0, resigns: 0, issues: [] };
+  for (let g = 0; g < FOUR_GAMES; g++) {
+    try {
+      const { stats, issues } = await playFourPlayerGame(g);
+      fourStats.games++;
+      fourStats.plies += stats.plies;
+      fourStats.probes += stats.illegalProbes;
+      if (stats.finished) fourStats.finished++;
+      if (stats.naturalEnd) fourStats.natural++;
+      fourStats.rejoins += stats.rejoins;
+      fourStats.takeovers += stats.takeovers;
+      fourStats.resigns += stats.resigns;
+      fourStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${FOUR_GAMES} 4 Player Chess games played`);
+    } catch (err) {
+      fourStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...fourStats.issues.map((i) => ({ ...i, variant: 'fourPlayer' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
@@ -594,10 +975,11 @@ async function main() {
   console.log(`Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused, ${giveaway.finished} games ended by the stuck-wins rule.`);
   console.log(`Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king).`);
   console.log(`Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture).`);
+  console.log(`4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games, ${fourStats.plies} plies, ${fourStats.probes} illegal/out-of-turn moves correctly refused, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself).`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -608,6 +990,7 @@ async function main() {
     `- Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused by the server, ${giveaway.finished} games ended by the stuck-wins rule`,
     `- Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused by the server, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king)`,
     `- Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused by the server, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture)`,
+    `- 4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games (four real sockets each), ${fourStats.plies} plies, ${fourStats.probes} illegal / out-of-turn moves correctly refused by the server, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself); every seq checked for byte-identical snapshots across all four sockets`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];

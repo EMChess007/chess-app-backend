@@ -695,6 +695,72 @@ console.log('\n=== 9. Source-level pins ===');
   check(src.includes('[room.clockTimer, room.botTimer, room.allGoneTimer, ...room.seats.map((s) => s.graceTimer)]'), 'finish() clears every kind of timer a room owns');
 }
 
+console.log('\n=== 10. The FOUR_GRACE_MS override (workstream W6: lets the real-socket tests watch a takeover in seconds) ===');
+{
+  const { resolveFourGraceMs, resolveFourFillWaitMs, FOUR_GRACE_WAIT_MAX_OVERRIDE_MS } = await import('../src/game/fourPlayerConfig.ts');
+  const grace = (env) => resolveFourGraceMs(env);
+
+  check(FOUR_GRACE_WAIT_MAX_OVERRIDE_MS === 600_000 && FOUR_TAKEOVER_GRACE_MS === 45_000 && FOUR_ALL_GONE_MS === 45_000, 'the constants are untouched: takeover grace 45 s, all-gone 45 s, override ceiling 10 min');
+  check(grace({}) === 45_000 && grace({ NODE_ENV: 'development' }) === 45_000 && grace({ NODE_ENV: 'production' }) === 45_000, 'with no override the grace is 45 s (whatever NODE_ENV is)');
+
+  // honoured: outside production, a plain whole number of milliseconds in 1..600000
+  for (const [raw, expected] of [['1500', 1500], ['1', 1], ['600000', 600_000], ['45000', 45_000], ['007', 7], ['3000', 3000]]) {
+    check(grace({ FOUR_GRACE_MS: raw }) === expected && grace({ FOUR_GRACE_MS: raw, NODE_ENV: 'development' }) === expected && grace({ FOUR_GRACE_MS: raw, NODE_ENV: 'test' }) === expected, `FOUR_GRACE_MS=${JSON.stringify(raw)} -> ${expected} ms outside production`);
+  }
+  // refused (falls back to 45 s): production, and anything that is not a plain 1..600000 integer
+  check(grace({ FOUR_GRACE_MS: '1500', NODE_ENV: 'production' }) === 45_000, 'NEVER in production: FOUR_GRACE_MS=1500 with NODE_ENV=production is ignored');
+  for (const raw of ['0', '-5', '1.5', ' 3000', '3000 ', '3e3', '0x10', '', 'abc', '3000ms', '600001', '99999999999999999999', '+5', '１２３', '١٢٣']) {
+    check(grace({ FOUR_GRACE_MS: raw }) === 45_000, `FOUR_GRACE_MS=${JSON.stringify(raw)} is ignored -> 45 s`);
+  }
+  // independent of the fill-wait override, and the other way round
+  check(grace({ FOUR_FILL_MS: '1500' }) === 45_000 && resolveFourFillWaitMs({ FOUR_GRACE_MS: '1500' }) === 30_000, 'FOUR_GRACE_MS and FOUR_FILL_MS do not affect each other');
+  check(resolveFourFillWaitMs({ FOUR_FILL_MS: '1500' }) === 1500 && resolveFourFillWaitMs({ FOUR_FILL_MS: '1500', NODE_ENV: 'production' }) === 30_000, '(and the fill-wait override behaves exactly as before the shared helper)');
+
+  // the manager uses it: for the grace TIMER and for the graceMsLeft clients count down from
+  const g = newGame({ graceMs: 2000, names: ['Ann', 'Ben', 'Cy', 'Di'] });
+  g.clear();
+  g.disconnect(1);
+  const announced = eventsOf(g.io, 'four_seat_update', 'S0')[0].payload.seats[1];
+  check(announced.graceMsLeft === 2000 && delayOf(g.room().seats[1].graceTimer) === 2000, 'a manager built with graceMs: 2000 announces graceMsLeft: 2000 and arms a 2000 ms timer');
+  mock.timers.tick(1999);
+  check(g.room().seats[1].controller === 'human', '...nothing happens at 1999 ms');
+  mock.timers.tick(1);
+  check(g.room().seats[1].controller === 'bot' && g.room().seats[1].botReason === 'takeover', '...the bot takes over at 2000 ms');
+  // a retake still works after a short grace
+  check(g.rejoin(1).ok === true && g.room().seats[1].controller === 'human', '...and the human can still retake the seat');
+
+  // default wiring: no option -> resolveFourGraceMs() read from the process environment AT CONSTRUCTION
+  const saved = { grace: process.env.FOUR_GRACE_MS, node: process.env.NODE_ENV };
+  try {
+    process.env.FOUR_GRACE_MS = '3000';
+    delete process.env.NODE_ENV;
+    const fromEnv = newGame();
+    fromEnv.disconnect(2);
+    check(delayOf(fromEnv.room().seats[2].graceTimer) === 3000, 'with FOUR_GRACE_MS=3000 in the environment a default manager arms a 3000 ms grace');
+    process.env.NODE_ENV = 'production';
+    const production = newGame();
+    production.disconnect(2);
+    check(delayOf(production.room().seats[2].graceTimer) === 45_000, '...and the same environment with NODE_ENV=production arms the normal 45 s grace');
+    process.env.FOUR_GRACE_MS = 'not a number';
+    delete process.env.NODE_ENV;
+    const junk = newGame();
+    junk.disconnect(2);
+    check(delayOf(junk.room().seats[2].graceTimer) === 45_000, '...and a junk value is ignored by the manager too');
+  } finally {
+    if (saved.grace === undefined) delete process.env.FOUR_GRACE_MS; else process.env.FOUR_GRACE_MS = saved.grace;
+    if (saved.node === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = saved.node;
+  }
+
+  // source pins: the manager no longer reads the constant directly (that would bypass the override), and the production entry points pass nothing
+  const rooms = fs.readFileSync(new URL('../src/game/fourPlayerRooms.ts', import.meta.url), 'utf8').split('\r\n').join('\n');
+  const codeLines = rooms.split('\n').filter((l) => !l.trim().startsWith('*') && !l.trim().startsWith('//') && !l.trim().startsWith('/**'));
+  check(!codeLines.some((l) => l.includes('FOUR_TAKEOVER_GRACE_MS')), 'fourPlayerRooms.ts uses FOUR_TAKEOVER_GRACE_MS nowhere in code - only this.graceMs, which defaults through resolveFourGraceMs()');
+  check(rooms.includes('this.graceMs = options.graceMs ?? resolveFourGraceMs();') && (rooms.match(/this\.graceMs/g) ?? []).length === 3, 'graceMs is set once and used exactly twice: the grace timer and the graceMsLeft figure');
+  const indexSrc = fs.readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const handlers = fs.readFileSync(new URL('../src/game/fourPlayerHandlers.ts', import.meta.url), 'utf8');
+  check(!/graceMs|FOUR_GRACE_MS/.test(indexSrc) && !/graceMs|FOUR_GRACE_MS/.test(handlers), 'neither the server entry point nor the handlers pass or read a grace: production uses the default (45 s) unless the guarded env override is set');
+}
+
 mock.timers.reset();
 console.log(`\nAll ${passed} checks passed.`);
 process.exit(0);

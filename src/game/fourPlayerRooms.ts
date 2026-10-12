@@ -111,8 +111,8 @@ import {
   FOUR_MOVE_RATE_LIMIT,
   FOUR_NAME_MAX_LENGTH,
   FOUR_SERVER_BOT_MAX_ELO,
-  FOUR_TAKEOVER_GRACE_MS,
   fourBotThinkMs,
+  resolveFourGraceMs,
 } from './fourPlayerConfig.js';
 
 /** What a bot decision needs from the engine: given a position, a strength and a random stream, a move (or null). Injectable for tests. */
@@ -215,15 +215,19 @@ export class FourRoomManager {
   private readonly rng: () => number;
   private readonly botRng: () => number;
   private readonly chooseBot: FourBotChooser;
+  /** How long a disconnected human's seat is left alone before a bot takes it over: 45 s (FOUR_TAKEOVER_GRACE_MS), or the FOUR_GRACE_MS test override. */
+  private readonly graceMs: number;
 
   /**
    * `rng` is the ENGINE's randomness (dead kings' walks), `botRng` the BOTS' (kept separate so a bot's decision never shifts the engine's
-   * stream), `chooseBotMove` the decision function (the engine's own; a test can inject a recording or faulty one).
+   * stream), `chooseBotMove` the decision function (the engine's own; a test can inject a recording or faulty one), `graceMs` the takeover
+   * grace (default `resolveFourGraceMs()`: 45 s unless the non-production FOUR_GRACE_MS override is set).
    */
-  constructor(private io: Server, options: { rng?: () => number; botRng?: () => number; chooseBotMove?: FourBotChooser } = {}) {
+  constructor(private io: Server, options: { rng?: () => number; botRng?: () => number; chooseBotMove?: FourBotChooser; graceMs?: number } = {}) {
     this.rng = options.rng ?? Math.random;
     this.botRng = options.botRng ?? Math.random;
     this.chooseBot = options.chooseBotMove ?? chooseBotMove;
+    this.graceMs = options.graceMs ?? resolveFourGraceMs();
     // Without a sweep a long-running process would keep every finished game's tiny record until a late rejoin happened to look at it.
     // unref()'d so it never keeps the process alive on its own (same as the 2-player manager).
     setInterval(() => this.sweepFinishedRooms(), FOUR_FINISHED_SWEEP_INTERVAL_MS).unref();
@@ -286,6 +290,11 @@ export class FourRoomManager {
     };
     this.rooms.set(id, room);
 
+    // ONE reading of the clocks for every recipient. They were read inside the loop at first, so on a real clock the seat on move showed
+    // 299999 / 299998 / 300000 ms to different players of the SAME starting snapshot (found by the first real-socket run, W6: every stub
+    // test freezes Date, so none could see it).
+    const startingClocksMs = this.liveClocksMs(room);
+    const startingSeats = this.seatInfos(room);
     for (const seat of [0, 1, 2, 3] as Seat[]) {
       const runtime = seats[seat];
       if (runtime.controller !== 'human' || !runtime.socketId) continue;
@@ -294,11 +303,11 @@ export class FourRoomManager {
         roomId: id,
         seat,
         playerToken: runtime.playerToken as string,
-        seats: this.seatInfos(room),
+        seats: startingSeats,
         timeControl: room.timeControl,
         timeControlLabel: room.timeControlLabel,
         state: serialize(room.state),
-        clocksMs: this.liveClocksMs(room),
+        clocksMs: startingClocksMs,
         seq: 0,
       };
       this.emit(runtime.socketId, 'four_match_found', payload);
@@ -648,7 +657,7 @@ export class FourRoomManager {
     runtime.disconnectedAt = Date.now();
     // An ACTIVE human's seat is taken over by a bot if it stays away for the grace period (an eliminated one has nothing left to play).
     if (runtime.controller === 'human' && room.state.status[located.seat] === 'active' && !runtime.graceTimer) {
-      runtime.graceTimer = setTimeout(() => this.onGraceExpired(room, located.seat), FOUR_TAKEOVER_GRACE_MS);
+      runtime.graceTimer = setTimeout(() => this.onGraceExpired(room, located.seat), this.graceMs);
     }
     this.broadcastSeats(room);
     this.checkAllGone(room);
@@ -746,7 +755,7 @@ export class FourRoomManager {
         ...(s.elo !== undefined ? { elo: s.elo } : {}),
         connected: s.controller === 'bot' ? true : s.connected,
         // A disconnected human whose seat is still waiting to be taken over: how long it has left (the client counts down from this).
-        ...(s.graceTimer && s.disconnectedAt !== null ? { graceMsLeft: Math.max(0, FOUR_TAKEOVER_GRACE_MS - (Date.now() - s.disconnectedAt)) } : {}),
+        ...(s.graceTimer && s.disconnectedAt !== null ? { graceMsLeft: Math.max(0, this.graceMs - (Date.now() - s.disconnectedAt)) } : {}),
       };
     }) as FourSeats;
   }

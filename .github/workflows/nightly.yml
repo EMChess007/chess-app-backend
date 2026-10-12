@@ -86,6 +86,10 @@ jobs:
 
       - name: Start dev server (for the online fuzz below)
         working-directory: chess-app/backend
+        # FOUR_GRACE_MS shortens the 4 Player bot-takeover grace (45 s) so the 4 Player part of the online fuzz can watch takeovers; it is ignored
+        # when NODE_ENV=production and affects nothing else.
+        env:
+          FOUR_GRACE_MS: '1500'
         run: nohup npm run dev > server.log 2>&1 &
 
       - name: Wait for server to become healthy
@@ -97,10 +101,13 @@ jobs:
           cat chess-app/backend/server.log || true
           exit 1
 
-      - name: Online fuzz (200 real games through the live server/socket protocol)
+      - name: Online fuzz (Fog of War, Giveaway, Atomic, Duck Chess and 4 Player Chess through the live server/socket protocol)
         id: online_fuzz
         working-directory: chess-app/backend
-        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 # tsx for the same reason as the logic fuzz above
+        # Arguments: fogGames maxPlies giveawayGames atomicGames duckGames fourPlayerGames. The first five are what an omitted argument used to
+        # default to (200 each); 4 Player is 40 because each game has FOUR sockets and is paced under the server's move rate limit (about 5-6 s a
+        # game, so about 4 minutes). tsx for the same reason as the logic fuzz above.
+        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40
         continue-on-error: true
 
       - name: Upload fuzz reports

@@ -5,6 +5,67 @@ several places, because some of this backend's own test scripts import the front
 directly (see "Why some backend tests import frontend code" below). This document covers what
 exists in **this repo**; see the frontend's own `TESTING.md` for its half of the picture.
 
+## 4 Player Chess Online — roll-up (read this first for the whole feature)
+
+**What it is.** Online Free-for-All 4 Player Chess. Players queue per time control (live Bullet/Blitz/Rapid only); four humans start a game at once, and with at least two the matchmaker fills the empty seats with Amateur bots after 30 s.
+This server is the only authority: `FourRoomManager` runs every game through one funnel (`commit()`) that validates the move with the engine, charges the clocks, increments `seq` and broadcasts the `four_state` snapshot to every seat and
+spectator, so all of them hold the identical position. A human who stays away for 45 s is replaced by a bot (and may retake the seat until the game ends); if every human leaves, the game ends with no result. The server's copy of the
+engine is GENERATED from the app's and guarded against drift in CI. Nothing is persisted (v1). The 2-player server is untouched apart from one fix (W0). Spec: `FOUR_PLAYER_ONLINE_SPEC.md`; the app's half is in the frontend's `TESTING.md`
+(same roll-up at its top).
+
+**Where each workstream is documented** (the per-workstream sections stay as they are)
+
+| | What | Section |
+|---|---|---|
+| W0 | 2-player "rejoin after the game ended" fix (finished-room retention) | "Rejoin after the game ended"; frontend §10 |
+| W1 | generated engine mirror, wire contract, CI drift check | §10; frontend §11 |
+| W2 | the room manager (commit funnel, clocks, rejoin, chat, spectating) | §11 |
+| W3 | bots, takeover, retake, all-humans-gone, fast-forward | §12 |
+| W4 | matchmaker and the nine socket handlers | §13 |
+| W5 | the client | frontend §12 |
+| W6 | real-socket end-to-end test (four sockets per room), the 4 Player nightly fuzz section, `FOUR_GRACE_MS`, CI/nightly wiring | §14 |
+| W7 | this roll-up, the last mutation re-run on the final code | here and the frontend roll-up |
+
+**What runs where.** In CI (`ci.yml`): the mirror drift check, then `test:fourplayerSync`, `test:fourplayer` (engine parity), `test:fourplayerRooms`, `test:fourplayerBots`, `test:fourplayerMatchmaking`, `test:fourplayerHandlers` (all in-process), then
+`test:fourplayerOnline` against the live dev server (started with `FOUR_GRACE_MS=1500`). Nightly (`nightly.yml`): the 4 Player section of `nightly-fuzz-online.mjs` (40 games, four sockets each).
+
+**Final numbers, both repos.** Automated checks written for the feature: **1,085** — **897 script checks in this repo** (W0 `test:rejoinFinished` 42, W1 sync 108 + parity 34, W2 rooms 220, W3 bots 160, W4 matchmaking 74 + handlers 61, W6 online 198) and
+**188 vitest tests in the frontend** (W0 14, W1 46, W5 128), plus the nightly fuzz section (random, not counted). (Each count is the script's current total, so later workstreams' additions are in the earlier script's figure.)
+**Mutation checks, every workstream's set re-run on the final code** (always on a disposable copy, never the real files; W6's mutants run a mutated copy as a REAL server): **565 planted, 543 killed, 22 equivalent, 0 survivors.**
+
+| | Planted | Killed | Equivalent | Survivors |
+|---|---|---|---|---|
+| W0 (backend 13, client 15) | 28 | 27 | 1 | 0 |
+| W1 (generator 38, wire 41, mirror-set guard 10, engine parity 18) | 107 | 107 | 0 | 0 |
+| W2 | 65 | 63 | 2 | 0 |
+| W3 | 68 | 62 | 6 | 0 |
+| W4 | 83 | 79 | 4 | 0 |
+| W5 | 188 | 180 | 8 | 0 |
+| W6 (17 unit + 9 against a real server) | 26 | 25 | 1 | 0 |
+| **Total** | **565** | **543** | **22** | **0** |
+
+**The 13 equivalent mutants in THIS repo, each justified against the final code** (each also has an `EQUIVALENT-MUTANT NOTE` in the source, added in W7; the frontend's 9 are listed in its roll-up):
+- W2 — the `status !== 'active'` guard in `onClockTimer`: `finish()` clears the clock timer, so a finished room's callback can never run.
+- W2 — the `runtime.socketId !== socketId` check in `handleDisconnect`: `rejoin()` already removed the replaced socket from `socketToSeat`, so its late disconnect returns at the `located` check first.
+- W3 — the `legal.length === 0` branch in `playBotTurn`: the engine hands the turn only to an active seat that has a legal move (one without is eliminated on the spot), so the branch is unreachable.
+- W3 — `onGraceExpired`'s `status` guard and its `connected` / `controller` guard (two mutants): `finish()` clears every grace timer and `rejoin()` cancels the seat's own, so the callback only runs for a disconnected, still-human seat of a live room.
+- W3 — `connectedHumans` counted from `connected` instead of `socketId !== null`, and without `originalHuman &&` (two mutants): `socketId` and `connected` are always set and cleared together (a taken-over seat has both cleared) and a bot seat has no socket.
+- W3 — `endAbandoned`'s `connectedHumans() > 0` guard: `rejoin()` cancels the all-gone countdown as soon as anyone returns.
+- W4 — the fill timer callback ignoring a replaced lobby, and ignoring a lobby below two (two mutants): `rearmTimer` clears the timer whenever the lobby changes or drops below two, so the callback only sees its own qualifying lobby.
+- W4 — `restore` putting humans at the back of the queue (`push` vs `unshift`): a start takes every entry it will take and `restore` runs synchronously right after it, so the lobby is empty and the order is moot (`unshift` is kept as the right behaviour once a start can be asynchronous).
+- W4 — `listen` taking an ack passed first as the payload: every event validates its payload as `unknown`, and a function and `undefined` are both "not an object", so the refusal is the same.
+- W6 — reading the starting SEATS per recipient in `createRoom` (the starting CLOCKS were the real defect, killed): at creation no seat has a grace countdown, so the seats list cannot differ between recipients.
+
+**What the W7 re-run changed.** Nothing is taken on trust from an earlier pass: every set was re-run on the final code. Six mutants of the older harnesses (W3 ×2 grace, W4 ×4 override) had gone stale when W6 moved the `FOUR_*_MS` override rules into one shared
+helper (`envMsOverride`); they were retargeted and now die. The W6 real-server mutants that had first been "killed" by an over-strict clock assertion were re-run on the final code: 9/9 killed, each by the check that names it. The W5 first-pass
+kills were re-classified (see the frontend roll-up). The older harnesses edited files in place; W7 ran them unchanged on a disposable copy of both repos (`w7-run`: a patched copy of each harness whose root is a work tree, with the real tree hashed before and after).
+
+**What was NOT verified.** The browser pass of the player screens (two tabs, bot fill with `FOUR_FILL_MS=3000`) was **not performed** — declined by the project owner for W7; see the frontend roll-up. Note for anyone doing it later: a lone human never gets bots
+(the matchmaker needs at least two humans), so the check needs a second human (a second account, or a scripted guest socket), and the backend must be started with `FOUR_FILL_MS=3000 FOUR_GRACE_MS=3000`. Also open by design: the 4 Player nightly games never end by the
+engine itself within 80 plies, and `FOUR_ALL_GONE_MS` has no override.
+
+**Merge order.** `ci.yml` checks out the same-named branch of the frontend repo, and the nightly checks out its default branch: merge the frontend's `fourPlayerOnline` first (or together with this one).
+
 ## 1. What runs on every commit/PR (`.github/workflows/ci.yml`)
 
 Triggers on every push/PR to `main`. One job:

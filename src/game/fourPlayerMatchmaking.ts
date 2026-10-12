@@ -142,6 +142,11 @@ export class FourPlayerMatchmaker {
     }
   }
 
+  /**
+   * The fill timer fired. EQUIVALENT-MUTANT NOTES (W4 mutation set): both halves of the guard are second lines of defence - `rearmTimer` clears this
+   * timer whenever the lobby changes or drops below two, and a replaced lobby's timer is cleared with it - so the callback only ever sees its own,
+   * still-qualifying lobby; removing either half changes nothing observable.
+   */
   private onFillTimer(lobby: Lobby): void {
     lobby.timer = null;
     if (this.lobbies.get(lobby.key) !== lobby || lobby.entries.length < FOUR_MIN_HUMANS) return;
@@ -176,7 +181,10 @@ export class FourPlayerMatchmaker {
     }
   }
 
-  /** Puts humans back at the FRONT of their lobby (a failed start) and re-evaluates the timer. */
+  /** Puts humans back at the FRONT of their lobby (a failed start) and re-evaluates the timer.
+   * EQUIVALENT-MUTANT NOTE (W4 set, "restored humans go to the back of the queue"): `unshift` vs `push` is unobservable today - a start takes every
+   * entry it will ever take, `restore` runs synchronously right after it, and nothing can join in between - so the lobby is empty and the order is
+   * moot. `unshift` is kept because it is the right behaviour the moment a start can be asynchronous. */
   private restore(lobby: Lobby, entries: FourQueueEntry[]): void {
     let target = this.lobbies.get(lobby.key);
     if (!target) {

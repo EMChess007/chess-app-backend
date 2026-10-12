@@ -57,6 +57,8 @@ async function usernameFromDatabase(userId: string): Promise<string> {
 /**
  * Registers one event with every protection described in the file header. The handler gets the payload (as `unknown`) and a `reply`
  * that is safe to call whatever the client sent; whatever it throws or rejects with is logged and answered with a generic error.
+ * EQUIVALENT-MUTANT NOTE (W4 set, "an ack passed first is also taken as the payload"): `typeof first === 'function' ? undefined : first` could be just
+ * `first` - every event validates its payload as `unknown`, and a function and `undefined` are both "not an object", so the reply is the same refusal.
  */
 function listen(socket: Socket, event: string, handler: (payload: unknown, reply: Reply) => void | Promise<void>): void {
   socket.on(event, (first: unknown, second: unknown) => {

@@ -368,6 +368,10 @@ export class FourRoomManager {
     room.clockTimer = setTimeout(() => this.onClockTimer(room), remainingMs);
   }
 
+  /**
+   * The clock timer fired. EQUIVALENT-MUTANT NOTE (W2 mutation set, "the status guard in the timer callback alone"): the `status !== 'active'` guard is
+   * a second line of defence - `finish()` clears this timer, so a finished room's callback can never run - and removing it changes nothing observable.
+   */
   private onClockTimer(room: FourRoom): void {
     room.clockTimer = null;
     if (room.status !== 'active') return;
@@ -378,7 +382,11 @@ export class FourRoomManager {
 
   // --- Bots, takeover and abandonment ---------------------------------------------------------------------------------------------
 
-  /** Original humans that currently have a live socket: the ones who can still watch or play (a seat a bot has taken over does not count). */
+  /**
+   * Original humans that currently have a live socket: the ones who can still watch or play (a seat a bot has taken over does not count).
+   * EQUIVALENT-MUTANT NOTES (W3 mutation set): counting `s.connected` instead of `s.socketId !== null`, or dropping `s.originalHuman &&`, changes nothing:
+   * `socketId` and `connected` are always set and cleared together (rejoin / handleDisconnect; a taken-over seat has both cleared) and a bot seat has no socket.
+   */
   private connectedHumans(room: FourRoom): number {
     return room.seats.filter((s) => s.originalHuman && s.socketId !== null).length;
   }
@@ -407,7 +415,9 @@ export class FourRoomManager {
   }
 
   /** The bot on move plays - through the same funnel as any move (time charged, increment added), but nothing about it is trusted: the
-   * decision is clamped to FOUR_SERVER_BOT_MAX_ELO and checked against the legal moves, and a faulty bot can never stall a room. */
+   * decision is clamped to FOUR_SERVER_BOT_MAX_ELO and checked against the legal moves, and a faulty bot can never stall a room.
+   * EQUIVALENT-MUTANT NOTE (W3 set, "the no-legal-move guard"): the `legal.length === 0` branch is unreachable - the engine hands the turn only to an
+   * active seat that HAS a legal move (one without is eliminated on the spot) - so it is a log-and-return safety net that no test can reach. */
   private playBotTurn(room: FourRoom, armedFor: number): void {
     room.botTimer = null;
     if (room.status !== 'active' || room.seq !== armedFor) return; // stale: the position moved on since this was armed
@@ -455,7 +465,9 @@ export class FourRoomManager {
   }
 
   /** The grace period of a disconnected human ran out. Takes the seat over with a bot - unless it came back, was eliminated meanwhile,
-   * or nobody is left (then the all-gone timer decides: a bot is never handed an empty room). */
+   * or nobody is left (then the all-gone timer decides: a bot is never handed an empty room).
+   * EQUIVALENT-MUTANT NOTES (W3 set): the `status !== 'active'` guard and the `connected` / `controller` guard are second lines of defence: `finish()`
+   * clears every grace timer and `rejoin()` cancels the seat's own, so this callback only ever runs for a disconnected, still-human seat of a live room. */
   private onGraceExpired(room: FourRoom, seat: Seat): void {
     const runtime = room.seats[seat];
     runtime.graceTimer = null;
@@ -476,7 +488,9 @@ export class FourRoomManager {
     room.allGoneTimer = setTimeout(() => this.endAbandoned(room), FOUR_ALL_GONE_MS);
   }
 
-  /** Nobody came back: the game ends with NO RESULT (no winners; nothing was ever persisted for 4-player). */
+  /** Nobody came back: the game ends with NO RESULT (no winners; nothing was ever persisted for 4-player).
+   * EQUIVALENT-MUTANT NOTE (W3 set, "endAbandoned ends a game somebody has rejoined"): the `connectedHumans() > 0` guard is a second line of defence -
+   * `rejoin()` cancels this countdown the moment anyone comes back - so removing it changes nothing observable. */
   private endAbandoned(room: FourRoom): void {
     room.allGoneTimer = null;
     if (room.status !== 'active' || this.connectedHumans(room) > 0) return;
@@ -642,7 +656,9 @@ export class FourRoomManager {
   }
 
   /** A socket went away: a seated human is marked disconnected (everyone is told; its clock keeps running), a spectator just leaves.
-   * A socket that was already replaced by a newer connection for the same seat is ignored. */
+   * A socket that was already replaced by a newer connection for the same seat is ignored.
+   * EQUIVALENT-MUTANT NOTE (W2 set, "a replaced socket's late disconnect"): the `runtime.socketId !== socketId` check below is a second line of defence -
+   * `rejoin()` already deleted the replaced socket from `socketToSeat`, so such a late disconnect returns at the `located` check first. */
   handleDisconnect(socketId: string): void {
     this.stopSpectating(socketId);
     const located = this.socketToSeat.get(socketId);

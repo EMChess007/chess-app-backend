@@ -175,6 +175,23 @@ function pickMove(text, seat, rules) {
 /** Whose turn it is according to the position the server last sent (every player holds the same one - scenario 2 proves it). */
 const turnOf = (room) => deserialize(latestOf(room.players[0]).text).turn;
 
+/**
+ * Keeps one seat under the server's move rate limit (10 four_make_move calls per second per seat, refused ones included - FOUR_MOVE_RATE_LIMIT) by waiting until it
+ * has sent fewer than 8 in the last 1.1 s. A fixed sleep between plies is NOT enough: how often one seat moves depends on how many seats are still in the game and on
+ * how fast the machine and the timers are: a whole Giveaway game (scenario 12) passed on Windows and was refused with "Too many moves - slow down." on the Linux CI
+ * runner, where a 15 ms sleep really is ~15 ms.
+ */
+async function paceSeat(room, seat) {
+  const sent = ((room.moveTimes ??= [[], [], [], []])[seat] ??= []);
+  for (;;) {
+    const now = Date.now();
+    while (sent.length > 0 && now - sent[0] > 1100) sent.shift();
+    if (sent.length < 8) break;
+    await sleep(sent[0] + 1100 - now + 5);
+  }
+  sent.push(Date.now());
+}
+
 /** Plays one legal move for the seat on move, from THAT player's own socket; resolves with the move sent and the server's ack. */
 async function playOne(room) {
   const seat = turnOf(room);
@@ -182,6 +199,7 @@ async function playOne(room) {
   // The mover chooses from ITS OWN copy of the position (as a real client does), so that copy must have caught up with the one turnOf() read.
   await until(`seat ${seat} has caught up with seat 0`, () => latestOf(player).seq >= latestOf(room.players[0]).seq);
   const move = pickMove(latestOf(player).text, seat, room.rules);
+  await paceSeat(room, seat);
   const ack = await emitAck(player.socket, 'four_make_move', { roomId: room.roomId, ...move });
   // The ack and the four_state it caused travel on different sockets, so the NEXT call to turnOf() (which reads seat 0's inbox) must not run before
   // seat 0 has actually received that state - otherwise two back-to-back moves read a stale turn (an earlier version of scenario 4 flaked on exactly this).

@@ -130,8 +130,14 @@ export const GIVEAWAY_RULES: GiveawayRules = {
   maxPlies: 1000,
 };
 
+/**
+ * Which four-player game a room / queue / screen is about. `'ffa'` is 4 Player Chess (what the protocol did before Giveaway existed, so an OMITTED variant
+ * always means `'ffa'`); `'giveaway'` is 4 Player Giveaway. Defined here, next to the rules it selects, so local screens can use it without touching the wire.
+ */
+export type FourVariant = 'ffa' | 'giveaway';
+
 /** The rules object of a variant: `'ffa'` = 4 Player Chess, `'giveaway'` = 4 Player Giveaway. */
-export const rulesFor = (variant: 'ffa' | 'giveaway'): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : FFA_RULES);
+export const rulesFor = (variant: FourVariant): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : FFA_RULES);
 
 /** En passant opportunity created by a double step: the square that was skipped, the pawn's landing square, and who stepped. */
 export interface EnPassant {

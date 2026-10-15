@@ -25,7 +25,7 @@
 
 import { parseSquare, squareName, type Seat } from './fourPlayer/board.js';
 import type { GameEvent } from './fourPlayer/elimination.js';
-import type { FourPlayerResult } from './fourPlayer/state.js';
+import type { FourPlayerResult, FourVariant } from './fourPlayer/state.js';
 
 // --- Limits both sides enforce ------------------------------------------------------------------------------------------------
 
@@ -53,11 +53,8 @@ export interface FourTimeControl {
 
 export type FourPromotion = 'q' | 'r' | 'b' | 'n';
 
-/**
- * Which four-player game a room / queue / payload is about. `'ffa'` is 4 Player Chess (what the protocol did before Giveaway existed, so
- * an OMITTED variant always means `'ffa'`); `'giveaway'` is 4 Player Giveaway. A room has exactly one variant, fixed when it is created.
- */
-export type FourVariant = 'ffa' | 'giveaway';
+/** Which four-player game a room / queue / payload is about (defined with the rules in fourPlayer/state.ts). A room has exactly one variant, fixed when it is created. */
+export type { FourVariant };
 
 /**
  * Why a game ended: the engine's own result reasons (FFA: elimination | cap | deadPosition; Giveaway: outOfPieces | stuck | lastStanding |

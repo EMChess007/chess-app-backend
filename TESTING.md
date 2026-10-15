@@ -794,3 +794,11 @@ gained an optional `variant` option for `newGame`.
 
 **Known limits / next.** No Giveaway real-socket scenarios yet (W4: forced capture refused over a socket, last-piece win, stuck win, lobbies never mixing, the nightly fuzz section). The "new client Giveaway + old
 server" row of the compatibility matrix is a client behaviour (W3). Deploy order stays: backend first, then the app.
+
+## 17. 4 Player Giveaway (server side) — what W3 changed here (workstream W3)
+
+W3 is the app's screens (frontend `TESTING.md` §15); **no server behaviour changed**. The one thing that touched this repo: `FourVariant` (`'ffa' | 'giveaway'`) moved from the wire file into the engine's
+`state.ts` (next to `rulesFor`, which uses it) and `fourPlayerWire.ts` now re-exports it (`export type { FourVariant }`), so the app's local screens can use the type without importing the wire. Both files are GENERATED
+mirrors: `npm run sync:fourplayer` regenerated them (`--check` green, 10 generated files) and nothing else in `src/` changed. The type-only move is invisible at runtime; the parity script's wire-validator battery and
+every other four-player script pass unchanged: `test:fourplayerSync` 114, `test:fourplayer` 53, `test:fourplayerRooms` 220, `test:fourplayerBots` 160, `test:fourplayerMatchmaking` 74, `test:fourplayerHandlers` 61,
+`test:fourplayerGiveaway` 89; `tsc` clean. No Giveaway real-socket scenarios yet (W4).

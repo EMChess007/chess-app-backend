@@ -85,6 +85,8 @@ export class FourPlayerMatchmaker {
   join(entry: Omit<FourQueueEntry, 'joinedAt'>): FourAck {
     const timeControl = validateFourTimeControl(entry.timeControl);
     if (!timeControl.ok) return timeControl;
+    // EQUIVALENT-MUTANT NOTE (W4 socket-level set, "the variant is not validated"): over a real socket the handler's shared validator refuses an unknown variant BEFORE
+    // the matchmaker is reached, so this is a second line of defence for direct callers; it is pinned in-process (test-fourplayer-giveaway.mjs section 5 joins the matchmaker directly) and killed there.
     const variant = validateFourVariant(entry.variant);
     if (!variant.ok) return variant;
     if (this.socketToKey.has(entry.socketId)) return { ok: false, error: 'You are already in a queue.' };

@@ -79,9 +79,9 @@ export function disposeAll() {
 /**
  * A game: by default four humans (S0..S3, named P0..P3); `bots` makes the LAST n seats bots, `kinds` ('human'|'bot' x4) overrides that,
  * `elos` gives bot seats their strength (default 1200). `rng` is the engine's randomness, `botRng` the bots', `chooseBotMove` an injected
- * decision function. Returns handles; `sockets[seat]` is the seat's CURRENT socket (rejoin() replaces it).
+ * decision function, `variant` ('ffa' | 'giveaway'; omitted = the room manager's default). Returns handles; `sockets[seat]` is the seat's CURRENT socket (rejoin() replaces it).
  */
-export function newGame({ tc = TC, rng, botRng, chooseBotMove, graceMs, bots = 0, kinds, elos, label, names, io = stubIo() } = {}) {
+export function newGame({ tc = TC, rng, botRng, chooseBotMove, graceMs, bots = 0, kinds, elos, label, names, variant, io = stubIo() } = {}) {
   const options = {};
   if (graceMs) options.graceMs = graceMs;
   if (rng) options.rng = rng;
@@ -94,7 +94,7 @@ export function newGame({ tc = TC, rng, botRng, chooseBotMove, graceMs, bots = 0
       ? { kind: 'human', socketId: `S${i}`, name: names?.[i] ?? `P${i}` }
       : { kind: 'bot', socketId: null, name: names?.[i] ?? 'Bot', ...(elos?.[i] === null ? {} : { elo: elos?.[i] ?? 1200 }), botReason: 'fill' } // elos[i] === null: a bot seat with NO elo
   );
-  const created = mgr.createRoom({ seats, timeControl: tc, timeControlLabel: label });
+  const created = mgr.createRoom({ seats, timeControl: tc, timeControlLabel: label, ...(variant ? { variant } : {}) });
   const g = { io, mgr, id: created.roomId, tokens: created.tokens, room: () => mgr.rooms.get(created.roomId), sockets: ['S0', 'S1', 'S2', 'S3'] };
   let rejoins = 0;
   g.state = () => g.room().state;

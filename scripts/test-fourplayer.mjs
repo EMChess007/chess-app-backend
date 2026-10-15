@@ -136,17 +136,21 @@ class Lockstep {
 }
 
 const ELOS_EVERY_PLY = [1200, 1700];
+const ELOS_GIVEAWAY = [600, 1200, 3000]; // greedy, careful, and the top of the dial (the Giveaway bot has no deep tier)
 const ELOS_DEEP = [1800, 3000];
 
 /** The bots, given identically seeded RNGs, must pick the same move (and the evaluator must score identically). */
 function compareBots(ls, seedBase, elos, deep = false) {
+  const giveaway = ls.fe.rules.mode === 'giveaway'; // a Giveaway position is played by the Giveaway bot (and has no Chess evaluator to compare)
+  const choose = giveaway ? 'chooseGiveawayFourBotMove' : 'chooseBotMove';
   for (const elo of elos) {
     const seed = (seedBase * 7919 + elo) >>> 0;
-    ls.same(`bot move at ELO ${elo}`, FE.chooseBotMove(ls.fe, elo, mulberry32(seed)), BE.chooseBotMove(ls.be, elo, mulberry32(seed)));
-    coverage.botComparisons++;
-    if (deep) coverage.deepBotComparisons++;
+    ls.same(`bot move at ELO ${elo}`, FE[choose](ls.fe, elo, mulberry32(seed)), BE[choose](ls.be, elo, mulberry32(seed)));
+    ls.same(`dispatching bot at ELO ${elo}`, FE.chooseBotMoveFor(ls.fe, elo, mulberry32(seed)), BE.chooseBotMoveFor(ls.be, elo, mulberry32(seed)));
+    tally.botComparisons++;
+    if (deep) tally.deepBotComparisons++;
   }
-  for (const seat of FE.SEATS) ls.same(`evaluate(seat ${seat})`, String(FE.evaluate(ls.fe, seat)), String(BE.evaluate(ls.be, seat)));
+  if (!giveaway) for (const seat of FE.SEATS) ls.same(`evaluate(seat ${seat})`, String(FE.evaluate(ls.fe, seat)), String(BE.evaluate(ls.be, seat)));
 }
 
 /** Compares everything a position exposes that is not a plain field. */
@@ -173,7 +177,7 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
     const seat = ls.fe.turn;
     const feMoves = FE.legalMoves(ls.fe, seat);
     compareQueries(ls, seat);
-    if (step % botEvery === 0) compareBots(ls, seed * 1000 + step, ELOS_EVERY_PLY);
+    if (step % botEvery === 0) compareBots(ls, seed * 1000 + step, ls.fe.rules.mode === 'giveaway' ? ELOS_GIVEAWAY : ELOS_EVERY_PLY);
     if (deepEvery && step % deepEvery === 0) compareBots(ls, seed * 1000 + step, ELOS_DEEP, true);
 
     const r = script();
@@ -211,8 +215,8 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
         let feMove;
         let beMove;
         if (style === 'bot') {
-          feMove = FE.chooseBotMove(ta.state, 1200, mulberry32(rngSeed));
-          beMove = BE.chooseBotMove(tb.state, 1200, mulberry32(rngSeed));
+          feMove = FE.chooseBotMoveFor(ta.state, 1200, mulberry32(rngSeed));
+          beMove = BE.chooseBotMoveFor(tb.state, 1200, mulberry32(rngSeed));
         } else {
           const pick = feMoves[Math.floor(script() * feMoves.length)];
           const promotionType = FE.PROMOTABLE_TYPES[Math.floor(script() * 4)];
@@ -404,7 +408,7 @@ console.log("\n=== 4b. A stalemate and the bot's castling bonus, BUILT (not left
  * it shows up as a SHIFT IN FREQUENCY over many seeds - which is exactly what a parity test can pin: a divergent constant on one side
  * flips some of the pairs.
  */
-function botSweep(label, build, elos, seedsPerElo, isTarget) {
+function botSweep(label, build, elos, seedsPerElo, isTarget, choose = 'chooseBotMove') {
   const ls = new Lockstep(label, build(FE), build(BE));
   const targetOf = (E, move) => isTarget(E, move);
   const result = { decisions: 0, hits: 0, byElo: {} };
@@ -412,15 +416,15 @@ function botSweep(label, build, elos, seedsPerElo, isTarget) {
     let hits = 0;
     for (let s = 1; s <= seedsPerElo; s++) {
       const seed = (s * 7919 + elo) >>> 0;
-      const a = FE.chooseBotMove(ls.fe, elo, mulberry32(seed));
-      const b = BE.chooseBotMove(ls.be, elo, mulberry32(seed));
+      const a = FE[choose](ls.fe, elo, mulberry32(seed));
+      const b = BE[choose](ls.be, elo, mulberry32(seed));
       ls.same(`bot move (ELO ${elo}, seed ${s})`, a, b);
       if (a && targetOf(FE, a)) hits++;
     }
     result.byElo[elo] = hits;
     result.decisions += seedsPerElo;
     result.hits += hits;
-    coverage.botComparisons += seedsPerElo;
+    tally.botComparisons += seedsPerElo;
   }
   return result;
 }
@@ -680,6 +684,47 @@ console.log('\n=== 5b. 4 Player Giveaway: the same engine under the Giveaway rul
     ok(compared === 4 * inputs.length, `the wire validators (variant, join, time control, move) answer ${compared} inputs identically in the app source and the backend copy; omitted variant = ffa; FOUR_REASONS equal`);
   }
 
+  // 5. The GIVEAWAY BOT (W2). Whole games played by the bot (chooser = the dispatching one) in lockstep, with the bots compared at 600 / 1200 / 3000 every
+  //    5th ply of the random games above and every 4th of these; then constructed sweeps where the heuristic's constants sit MID-DECISION, so a divergent
+  //    constant on one side flips seeded choices (the same technique as section 4b for the Chess bot).
+  for (let seed = 3201; seed <= 3208; seed++) {
+    playGame(seed, { style: 'bot', maxPlies: 400, chaos: 0, botEvery: 4, initialSeconds: 3600, incrementSeconds: 5, label: 'giveaway bot game', build: (E) => E.initialState({ ...GA(E), maxPlies: 400 }) });
+  }
+  ok(giveawayCoverage.botComparisons >= 400, `8 bot-played Giveaway games in lockstep: identical positions, events and bot choices (${giveawayCoverage.botComparisons} bot decisions compared so far, at ELO 600 / 1200 / 3000, plus the dispatching chooser)`);
+  {
+    // Hand a seat the win or not: a capture of Green's LAST pawn (which also lands where Blue can recapture - exposure) versus a Yellow capture that is safe.
+    const HAND = ['rR@e5', 'rK@h1', 'gP@m5', 'yP@e12', 'yK@d14', 'bR@m9', 'bK@a8'];
+    const build = (E) => E.stateFromPieces(HAND, { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot vs handing the win', build, [400, 800, 1000, 1200, 1500, 2000, 3000], 700, (E, m) => m.to === E.parseSquare('m5'), 'chooseGiveawayFourBotMove');
+    console.log(`      the last-piece capture chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    ok(sweep.decisions === 4900 && sweep.byElo[400] > sweep.byElo[1500] && sweep.byElo[1500] > sweep.byElo[3000], `the Giveaway bot chooses identically in both engines over ${sweep.decisions} decisions, and the weaker the bot the more often it hands the win away (400: ${sweep.byElo[400]}, 1500: ${sweep.byElo[1500]}, 3000: ${sweep.byElo[3000]} of 700)`);
+  }
+  {
+    // The victim term (4 / (1 + pieces the victim has left)): two exposure-free captures; the careful tiers should prefer the richer victim, with noise that keeps it mid-decision.
+    const PIECES = ['rR@e5', 'rK@h1', 'gP@m5', 'gK@n7', 'yP@e12', 'yP@d11', 'yP@f11', 'yP@h11', 'yP@i11', 'yK@d14', 'bK@a8'];
+    const build = (E) => E.stateFromPieces(PIECES, { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot victim term', build, [1000, 1100, 1200, 1400], 1500, (E, m) => m.to === E.parseSquare('e12'), 'chooseGiveawayFourBotMove');
+    console.log(`      the richer victim chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    const rate = sweep.hits / sweep.decisions;
+    ok(sweep.decisions === 6000 && rate > 0.55 && rate < 0.97, `...and the careful bot's victim preference is MID-DECISION (${(100 * rate).toFixed(0)}% take the richer victim: not never, not always), so the constant matters in both directions`);
+  }
+  {
+    // The exposure term: offering a knight to Blue's pawn versus quiet moves.
+    const build = (E) => E.stateFromPieces(['rN@e5', 'rK@h1', 'bP@e6', 'bK@a8', 'yK@d14', 'gK@n7'], { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot exposure', build, [400, 1000, 1500, 3000], 800, (E, m) => m.to === E.parseSquare('f7'), 'chooseGiveawayFourBotMove');
+    console.log(`      the exposing move chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    ok(sweep.decisions === 3200 && sweep.byElo[3000] > sweep.byElo[400], `...identical over ${sweep.decisions} decisions, and the stronger the bot the more it offers the piece (400: ${sweep.byElo[400]}, 3000: ${sweep.byElo[3000]} of 800)`);
+  }
+
+  {
+    // The "do not leave the next seat stuck" term: Red's knight has seven jumps, all equally (un)exposed, but the jump to g5 blocks Blue's lone pawn for good (Blue is
+    // then stuck, which WINS it the game). Careful bots must never play it from their scored branch; greedy ones cannot see it.
+    const build = (E) => E.stateFromPieces(['rN@e4', 'bP@f5', 'yK@d14', 'gK@n7'], { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot vs leaving the next seat stuck', build, [400, 600, 1000, 1500, 3000], 600, (E, m) => m.to === E.parseSquare('g5'), 'chooseGiveawayFourBotMove');
+    console.log(`      the blocking jump chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    ok(sweep.decisions === 3000 && sweep.byElo[3000] < sweep.byElo[400], `...identical over ${sweep.decisions} decisions, and the careful bots avoid the blocking jump (400: ${sweep.byElo[400]}, 3000: ${sweep.byElo[3000]} of 600; 3000 only ever plays it in its 10% random moments)`);
+  }
+
   const g = giveawayCoverage;
   const reachedG = {
     'captures taken': g.captures >= 100,
@@ -692,6 +737,7 @@ console.log('\n=== 5b. 4 Player Giveaway: the same engine under the Giveaway rul
     'ends by stuck': g.endings.stuck >= 1,
     'ends by lastStanding': g.endings.lastStanding >= 1,
     'ends by cap': g.endings.cap >= 1,
+    'Giveaway bots compared': g.botComparisons >= 400,
     'no points were ever scored and no seat ever walked': g.deadKingMoves === 0 && g.checkmates === 0 && g.stalemates === 0 && g.frozen === 0,
   };
   for (const [name, hit] of Object.entries(reachedG)) ok(hit, `giveaway exercised: ${name}`);

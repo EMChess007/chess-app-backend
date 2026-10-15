@@ -603,7 +603,7 @@ async function testActiveGamesListing() {
   check(!!game, 'the live room is in the list');
   check(game.timeControlLabel === TIME_CONTROL_LABEL, `...with its time control label "${game.timeControlLabel}"`);
   check(game.seats.length === 4 && game.seats.every((s) => s.kind === 'human' && s.name === 'Guest'), '...and its four seats (guests are listed as "Guest")');
-  check(Object.keys(game).sort().join() === 'roomId,seats,timeControlLabel' && game.seats.every((s) => Object.keys(s).sort().join() === 'kind,name'), '...carrying names and kinds only - no token, socket id or user id');
+  check(Object.keys(game).sort().join() === 'roomId,seats,timeControlLabel,variant' && game.variant === 'ffa' && game.seats.every((s) => Object.keys(s).sort().join() === 'kind,name'), '...carrying names and kinds only - no token, socket id or user id (plus the game it is: "ffa" - the one field 4 Player Giveaway added)');
   const idx = listed.games.findIndex((g) => g.roomId === roomId);
   check(idx >= 0 && listed.games.length <= 100, `the list is capped (${listed.games.length} <= 100) and this room is in it`);
   // It leaves the list when it ends.

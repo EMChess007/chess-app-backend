@@ -7,7 +7,8 @@
  * whole thing with fake timers and no network.
  *
  * THE RULES (decisions A1-A5, and the six details confirmed on the spec):
- *  - One lobby per time control (`initialSeconds|incrementSeconds`); lobbies never mix, and a socket is in at most ONE lobby.
+ *  - One lobby per time control AND VARIANT (`initialSeconds|incrementSeconds|ffa` / `...|giveaway`); lobbies never mix - a 4 Player Chess player and a
+ *    4 Player Giveaway player can never be matched - and a socket is in at most ONE lobby.
  *  - The 4th human to arrive starts the game at once (the first four, FIFO).
  *  - With >= FOUR_MIN_HUMANS (2) queued, a fill timer of FOUR_FILL_WAIT_MS (30 s) starts - from the moment the lobby FIRST holds two
  *    humans, not from each player's own join, so a player who waited alone is not penalised and a late second player does not trigger an
@@ -23,7 +24,7 @@
 import { randomInt as cryptoRandomInt } from 'node:crypto';
 import { FOUR_BOT_ELO, FOUR_BOT_NAME, FOUR_MIN_HUMANS, resolveFourFillWaitMs } from './fourPlayerConfig.js';
 import type { FourSeatSetup, FourSeatSetups } from './fourPlayerRooms.js';
-import { validateFourTimeControl, type FourAck, type FourQueueUpdatePayload, type FourTimeControl } from './fourPlayerWire.js';
+import { validateFourTimeControl, validateFourVariant, type FourAck, type FourQueueUpdatePayload, type FourTimeControl, type FourVariant } from './fourPlayerWire.js';
 
 export interface FourQueueEntry {
   socketId: string;
@@ -32,12 +33,14 @@ export interface FourQueueEntry {
   name: string;
   timeControl: FourTimeControl;
   timeControlLabel?: string;
+  /** The game queued for; omitted when joining = 4 Player Chess. */
+  variant?: FourVariant;
   joinedAt: number;
 }
 
 export interface FourMatchmakerDeps {
   /** Starts a game with the four seats already shuffled. May throw: the humans are then put back in their lobby. */
-  startGame(seats: FourSeatSetups, timeControl: FourTimeControl, timeControlLabel: string | undefined): void;
+  startGame(seats: FourSeatSetups, timeControl: FourTimeControl, timeControlLabel: string | undefined, variant: FourVariant): void;
   /** Sends a queued socket its lobby's state. Must not throw (the matchmaker does not guard it). */
   notify(socketId: string, update: FourQueueUpdatePayload): void;
   /** The fill wait in ms; default resolveFourFillWaitMs() (30 s, or the dev/test override). */
@@ -49,12 +52,13 @@ export interface FourMatchmakerDeps {
 interface Lobby {
   key: string;
   timeControl: FourTimeControl;
+  variant: FourVariant;
   entries: FourQueueEntry[];
   timer: ReturnType<typeof setTimeout> | null;
   timerStartedAt: number;
 }
 
-const keyOf = (tc: FourTimeControl): string => `${tc.initialSeconds}|${tc.incrementSeconds}`;
+const keyOf = (tc: FourTimeControl, variant: FourVariant): string => `${tc.initialSeconds}|${tc.incrementSeconds}|${variant}`;
 
 /** Fisher-Yates with an injectable uniform integer source: every permutation is reachable and, with a uniform source, equally likely. */
 export function shuffled<T>(items: readonly T[], randomInt: (maxExclusive: number) => number): T[] {
@@ -81,15 +85,19 @@ export class FourPlayerMatchmaker {
   join(entry: Omit<FourQueueEntry, 'joinedAt'>): FourAck {
     const timeControl = validateFourTimeControl(entry.timeControl);
     if (!timeControl.ok) return timeControl;
+    const variant = validateFourVariant(entry.variant);
+    if (!variant.ok) return variant;
     if (this.socketToKey.has(entry.socketId)) return { ok: false, error: 'You are already in a queue.' };
 
-    const key = keyOf(timeControl.value);
+    const key = keyOf(timeControl.value, variant.value);
     let lobby = this.lobbies.get(key);
     if (!lobby) {
-      lobby = { key, timeControl: timeControl.value, entries: [], timer: null, timerStartedAt: 0 };
+      lobby = { key, timeControl: timeControl.value, variant: variant.value, entries: [], timer: null, timerStartedAt: 0 };
       this.lobbies.set(key, lobby);
     }
-    lobby.entries.push({ ...entry, timeControl: timeControl.value, joinedAt: Date.now() });
+    // EQUIVALENT-MUTANT NOTE (W2 set, "entries forget their variant"): the entry's own `variant` is informational - the lobby (keyed by it) is what `start` and `restore` read,
+    // so storing the normalised value on the entry changes nothing observable today; it is kept so a queue entry always says what it queued for.
+    lobby.entries.push({ ...entry, timeControl: timeControl.value, variant: variant.value, joinedAt: Date.now() });
     this.socketToKey.set(entry.socketId, key);
 
     if (lobby.entries.length >= 4) this.start(lobby);
@@ -123,9 +131,9 @@ export class FourPlayerMatchmaker {
     return this.socketToKey.size;
   }
 
-  /** Humans waiting in the lobby for this time control. */
-  lobbySize(timeControl: FourTimeControl): number {
-    return this.lobbies.get(keyOf(timeControl))?.entries.length ?? 0;
+  /** Humans waiting in the lobby for this time control and variant (default 4 Player Chess). */
+  lobbySize(timeControl: FourTimeControl, variant: FourVariant = 'ffa'): number {
+    return this.lobbies.get(keyOf(timeControl, variant))?.entries.length ?? 0;
   }
 
   /** The fill timer exists exactly while the lobby holds at least FOUR_MIN_HUMANS: started the moment it first does (and not restarted by
@@ -174,7 +182,7 @@ export class FourPlayerMatchmaker {
     const bots: FourSeatSetup[] = Array.from({ length: 4 - entries.length }, () => ({ kind: 'bot', socketId: null, name: FOUR_BOT_NAME, elo: FOUR_BOT_ELO, botReason: 'fill' }));
     const seats = shuffled([...humans, ...bots], this.randomInt) as FourSeatSetups;
     try {
-      this.deps.startGame(seats, lobby.timeControl, entries[0]?.timeControlLabel);
+      this.deps.startGame(seats, lobby.timeControl, entries[0]?.timeControlLabel, lobby.variant);
     } catch (err) {
       console.error(`[fourMatchmaker] starting a game for lobby ${lobby.key} failed; the ${entries.length} humans stay queued:`, err);
       this.restore(lobby, entries);

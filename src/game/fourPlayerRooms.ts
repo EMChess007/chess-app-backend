@@ -52,6 +52,7 @@ import {
   validateFourId,
   validateFourMovePayload,
   validateFourTimeControl,
+  validateFourVariant,
   type FourActiveGameSummary,
   type FourActor,
   type FourAck,
@@ -72,6 +73,7 @@ import {
   type FourSpectateState,
   type FourStatePayload,
   type FourTimeControl,
+  type FourVariant,
   type FourWireEvent,
 } from './fourPlayerWire.js';
 import {
@@ -80,7 +82,7 @@ import {
   QUEEN,
   ROOK,
   addIncrement,
-  chooseBotMove,
+  chooseBotMoveFor,
   clockTick,
   createClock,
   findLegalMove,
@@ -88,9 +90,11 @@ import {
   legalMoves,
   moveLabel,
   parseSquare,
+  piecesLeft,
   playMove,
   promotionOf,
   resign,
+  rulesFor,
   serialize,
   squareName,
   type FourPlayerClock,
@@ -136,6 +140,8 @@ export interface CreateFourRoomParams {
   seats: FourSeatSetups;
   timeControl: FourTimeControl;
   timeControlLabel?: string;
+  /** Which game this room plays; omitted = 4 Player Chess. Fixed for the room's whole life. */
+  variant?: FourVariant;
 }
 
 export interface CreateFourRoomResult {
@@ -164,6 +170,8 @@ interface FourSeatRuntime {
 
 interface FourRoom {
   id: string;
+  /** 4 Player Chess ('ffa') or 4 Player Giveaway: picks the start rules, the default bot and what `scores` mean in `four_game_over`. */
+  variant: FourVariant;
   status: 'active' | 'finished';
   state: FourPlayerState;
   clock: FourPlayerClock;
@@ -226,7 +234,7 @@ export class FourRoomManager {
   constructor(private io: Server, options: { rng?: () => number; botRng?: () => number; chooseBotMove?: FourBotChooser; graceMs?: number } = {}) {
     this.rng = options.rng ?? Math.random;
     this.botRng = options.botRng ?? Math.random;
-    this.chooseBot = options.chooseBotMove ?? chooseBotMove;
+    this.chooseBot = options.chooseBotMove ?? chooseBotMoveFor; // dispatches on the position's rules, so a Giveaway room never gets the Chess bot
     this.graceMs = options.graceMs ?? resolveFourGraceMs();
     // Without a sweep a long-running process would keep every finished game's tiny record until a late rejoin happened to look at it.
     // unref()'d so it never keeps the process alive on its own (same as the 2-player manager).
@@ -243,6 +251,8 @@ export class FourRoomManager {
   createRoom(params: CreateFourRoomParams): CreateFourRoomResult {
     const timeControl = validateFourTimeControl(params.timeControl);
     if (!timeControl.ok) throw new Error(`createRoom: ${timeControl.error}`);
+    const variant = validateFourVariant(params.variant);
+    if (!variant.ok) throw new Error(`createRoom: ${variant.error}`);
     if (!Array.isArray(params.seats) || params.seats.length !== 4) throw new Error('createRoom: exactly four seats are required');
     if (!params.seats.some((s) => s.kind === 'human')) throw new Error('createRoom: at least one human seat is required');
     const humanSockets = params.seats.filter((s) => s.kind === 'human').map((s) => s.socketId);
@@ -273,8 +283,9 @@ export class FourRoomManager {
 
     const room: FourRoom = {
       id,
+      variant: variant.value,
       status: 'active',
-      state: initialState(),
+      state: initialState(rulesFor(variant.value)),
       clock: createClock(timeControl.value.initialSeconds, timeControl.value.incrementSeconds, true),
       turnStartedAt: Date.now(),
       seq: 0,
@@ -301,6 +312,7 @@ export class FourRoomManager {
       this.socketToSeat.set(runtime.socketId, { roomId: id, seat });
       const payload: FourMatchFoundPayload = {
         roomId: id,
+        variant: room.variant,
         seat,
         playerToken: runtime.playerToken as string,
         seats: startingSeats,
@@ -417,7 +429,7 @@ export class FourRoomManager {
   /** The bot on move plays - through the same funnel as any move (time charged, increment added), but nothing about it is trusted: the
    * decision is clamped to FOUR_SERVER_BOT_MAX_ELO and checked against the legal moves, and a faulty bot can never stall a room.
    * EQUIVALENT-MUTANT NOTE (W3 set, "the no-legal-move guard"): the `legal.length === 0` branch is unreachable - the engine hands the turn only to an
-   * active seat that HAS a legal move (one without is eliminated on the spot) - so it is a log-and-return safety net that no test can reach. */
+   * active seat that HAS a legal move (one without is eliminated on the spot in 4 Player Chess; in 4 Player Giveaway it WINS and the game ends) - so it is a log-and-return safety net that no test can reach. */
   private playBotTurn(room: FourRoom, armedFor: number): void {
     room.botTimer = null;
     if (room.status !== 'active' || room.seq !== armedFor) return; // stale: the position moved on since this was armed
@@ -494,7 +506,7 @@ export class FourRoomManager {
   private endAbandoned(room: FourRoom): void {
     room.allGoneTimer = null;
     if (room.status !== 'active' || this.connectedHumans(room) > 0) return;
-    this.finish(room, { roomId: room.id, reason: 'abandoned', winners: [], scores: [...room.state.score], state: serialize(room.state) });
+    this.finish(room, { roomId: room.id, reason: 'abandoned', winners: [], scores: this.scoresOf(room), state: serialize(room.state) });
   }
 
   // --- Moves and resignation ------------------------------------------------------------------------------------------------
@@ -569,7 +581,12 @@ export class FourRoomManager {
   private endGame(room: FourRoom): void {
     const result = room.state.result;
     if (!result) throw new Error('endGame: the engine has not ended this game');
-    this.finish(room, { roomId: room.id, reason: result.reason, winners: [...result.winners], scores: [...room.state.score], state: serialize(room.state) });
+    this.finish(room, { roomId: room.id, reason: result.reason, winners: [...result.winners], scores: this.scoresOf(room), state: serialize(room.state) });
+  }
+
+  /** `four_game_over.scores`: the final POINTS in 4 Player Chess, the PIECES LEFT in 4 Player Giveaway (which has no points; the client knows the variant). */
+  private scoresOf(room: FourRoom): number[] {
+    return room.variant === 'giveaway' ? piecesLeft(room.state.cells) : [...room.state.score];
   }
 
   /**
@@ -694,7 +711,7 @@ export class FourRoomManager {
       .filter((room) => room.status === 'active')
       .reverse()
       .slice(0, FOUR_ACTIVE_GAMES_LIST_MAX)
-      .map((room) => ({ roomId: room.id, timeControlLabel: room.timeControlLabel, seats: room.seats.map((s) => ({ name: s.name, kind: s.controller })) }));
+      .map((room) => ({ roomId: room.id, variant: room.variant, timeControlLabel: room.timeControlLabel, seats: room.seats.map((s) => ({ name: s.name, kind: s.controller })) }));
   }
 
   /** `four_spectate_game`: read-only. A socket that plays in a game, or already watches one, cannot start watching another without leaving.
@@ -788,6 +805,7 @@ export class FourRoomManager {
   private roomState(room: FourRoom): FourRoomState {
     return {
       roomId: room.id,
+      variant: room.variant,
       seats: this.seatInfos(room),
       timeControl: room.timeControl,
       timeControlLabel: room.timeControlLabel,

@@ -710,3 +710,41 @@ above rather than from their own check, which is how that flaw was spotted; they
 step's command is `… nightly-fuzz-online.mjs 200 80 200 200 200 40` (the previous defaults, spelled out, plus 40 four-player games). **Nightly dependency:** the nightly checks out
 the frontend repo's DEFAULT branch, and the 4 Player section imports the app's engine from it, so the frontend's 4 Player work must be merged before (or with) this change —
 otherwise every nightly online fuzz would fail at import (the same pairing rule `ci.yml` already documents for `sync:fourplayer --check`).
+
+## 15. 4 Player Giveaway (server side) — the engine mirror and the wire contract (workstream W1)
+
+Spec: the app repo's `FOUR_PLAYER_GIVEAWAY_SPEC.md`; rules, design and the FFA regression gate are in the app's `TESTING.md` §13. **W1 changes no server behaviour**:
+no room manager, matchmaker, handler or bot file was touched, the server still builds every room with `initialState()` (Chess), and a `four_join_queue` is still handled
+exactly as before (the room-manager plumbing for `variant` is W2). What changed here is only the GENERATED mirror and the tests that guard it.
+
+**Mirror.** `giveaway.ts` joined the manifest (`MIRRORED_TO_BACKEND.json`, now the seven engine modules + the wire file); `npm run sync:fourplayer` regenerated
+`src/game/fourPlayer/{giveaway,moves,elimination,state,index}.ts` and `src/game/fourPlayerWire.ts` (generated, never hand-edited); `sync:fourplayer --check` is green (9 generated files).
+The only hand edits in this repo are tests: `test-fourplayer-sync.mjs` (its pinned manifest assertion: 7 → 8 files, `giveaway.ts` named) and `test-fourplayer.mjs` (below).
+
+**Parity (`npm run test:fourplayer`, 34 → 47 checks).** The script keeps every Chess section unchanged (Chess coverage numbers are
+identical to before: 159 games, 41 395 plies) and gains **section 5b**, with its own coverage tally so it cannot shift the Chess thresholds or shorten the Chess hunt:
+- 30 random full Giveaway games from the start position (human-style moves with every promotion piece, resignations, flag falls through `clockTick`; 2 712 plies) in lockstep app engine vs
+  mirror — position, legal moves, events, clocks, snapshot round trips and cross-engine deserialize at every ply;
+- hand-built scenes asserted exactly on both engines, then a random continuation: the forced capture that hands Green the win, a stuck seat winning, last standing through a flag fall and
+  off-turn resignations, the cap tie, en passant as the forced capture, **en passant against a resigned seat's pawn** (not offered), all four **capture-promotions**, a king capture and walls,
+  no castling with every right set, **outOfPieces on the cap ply** (one `gameOver`), **the mover left stuck by a resignation**, **the cap with an eliminated seat holding the fewest pieces**,
+  and a hand-built position's default of no castling rights;
+- the **wire validators compared behaviourally** (`validateFourVariant`, `validateFourJoinQueue`, `validateFourTimeControl`, `validateFourMovePayload` over 24 inputs each = 96, plus
+  `fourVariantOf` and `FOUR_REASONS`) between the app source and the generated copy — before this, section 1 only checked that the wire's exports exist;
+- a coverage report that fails if a Giveaway rule was never reached (captures, king captured, en passant, all four promotions, resign, flag fall, endings by outOfPieces / stuck / lastStanding /
+  cap, and **no points, no checkmate, no stalemate, no walking king** ever).
+The Giveaway bot is not compared yet (W2).
+
+**Regression gate (this repo, after the engine change):** `test:fourplayerSync` 111, `test:fourplayerRooms` 220, `test:fourplayerBots` 160, `test:fourplayerMatchmaking` 74,
+`test:fourplayerHandlers` 61 checks — all pass unchanged (apart from the one pinned manifest line above); `tsc --noEmit` clean. The socket e2e (`test:fourplayerOnline`) is W4's territory and
+was not re-run for W1: nothing on its path changed (no room / handler / wire behaviour differs for Chess).
+
+**Mutation checks (copy-based, `mutate-gw1-parity.cjs`: a mutated copy of the generated mirror next to the real app engine; the parity script alone is what is measured).** 20 mutants — 18 in the
+Giveaway touch points of the mirror (capture filter, walls capturable, kings not capturable, castling, en passant against a wall, `kings` bookkeeping, points, stuck, outOfPieces winner,
+cap-before-outOfPieces, dead-king instead of frozen, last standing at two, the mover's post-resignation stuck check, cap winners most/eliminated, inverted filter, `GIVEAWAY_RULES`, castling defaults ×2)
+and 2 in the wire copy. First pass **14 killed, 6 survived** — every survivor was a real blind spot of the parity script (the app and the mirror disagreed and nothing noticed): en passant against a wall,
+cap-vs-outOfPieces ordering, the mover re-check after a resignation, eliminated seats at the cap, the hand-built castling default, and the wire validators (never compared behaviourally).
+Each was closed with a named scene / the validator battery above: **20/20 killed**. No equivalents. (`sync:fourplayer --check` would also reject every one of these textually; that is a separate net.)
+
+**Performance, payload size, cross-feature.** See the app's `TESTING.md` §13 (engine cost is shared code: Giveaway `legalMoves` 5.8 µs vs Chess 16.1 µs on the same positions; the snapshot is 428 characters,
+Chess 430, so `four_state` size is unchanged). Nothing in the 2-player server (`socketHandlers`, `rooms`, `engine`) or in the Chess 4-player server path was modified.

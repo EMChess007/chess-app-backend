@@ -6,7 +6,7 @@
  * 4 Player Chess ONLINE — the wire contract: every payload, ack and event name of the `four_*` Socket.IO protocol, the limits both
  * sides must agree on, and the few pure validators that enforce them. See FOUR_PLAYER_ONLINE_SPEC.md §3 for the design.
  *
- * ONE SOURCE OF TRUTH, COPIED BY A GENERATOR. This file (and the six engine modules it builds on) is the only place the protocol is
+ * ONE SOURCE OF TRUTH, COPIED BY A GENERATOR. This file (and the engine modules it builds on) is the only place the protocol is
  * written down. The backend's `src/game/fourPlayerWire.ts` is GENERATED from it by `backend/scripts/sync-fourplayer.mjs` — never edited
  * by hand — so the client and the server cannot disagree about a field name or a limit; a protocol change is one edit here plus
  * `npm run sync:fourplayer` in the backend. The backend CI fails if the committed copy is stale. Consequences for this file:
@@ -25,6 +25,7 @@
 
 import { parseSquare, squareName, type Seat } from './fourPlayer/board.js';
 import type { GameEvent } from './fourPlayer/elimination.js';
+import type { FourPlayerResult } from './fourPlayer/state.js';
 
 // --- Limits both sides enforce ------------------------------------------------------------------------------------------------
 
@@ -52,8 +53,21 @@ export interface FourTimeControl {
 
 export type FourPromotion = 'q' | 'r' | 'b' | 'n';
 
-/** Why a game ended. `abandoned` = every human left: no result (winners is empty, scores are not shown). */
-export type FourReason = 'elimination' | 'cap' | 'deadPosition' | 'abandoned';
+/**
+ * Which four-player game a room / queue / payload is about. `'ffa'` is 4 Player Chess (what the protocol did before Giveaway existed, so
+ * an OMITTED variant always means `'ffa'`); `'giveaway'` is 4 Player Giveaway. A room has exactly one variant, fixed when it is created.
+ */
+export type FourVariant = 'ffa' | 'giveaway';
+
+/**
+ * Why a game ended: the engine's own result reasons (FFA: elimination | cap | deadPosition; Giveaway: outOfPieces | stuck | lastStanding |
+ * cap) plus `abandoned` = every human left: no result (winners is empty, scores are not shown). Derived from the engine type on purpose, so
+ * a reason added to the engine cannot be missing from the wire; `FOUR_REASONS` below is the runtime list (and fails to compile if it lags).
+ */
+export type FourReason = FourPlayerResult['reason'] | 'abandoned';
+
+const REASON_FLAGS: Record<FourReason, true> = { elimination: true, cap: true, deadPosition: true, outOfPieces: true, stuck: true, lastStanding: true, abandoned: true };
+export const FOUR_REASONS: readonly FourReason[] = Object.keys(REASON_FLAGS) as FourReason[];
 
 export type FourActor = 'human' | 'bot' | 'clock' | 'resign';
 
@@ -98,6 +112,8 @@ export type FourWireEvent = GameEvent;
 export interface FourJoinQueuePayload {
   timeControl: FourTimeControl;
   timeControlLabel?: string;
+  /** Which game to queue for. OMITTED = `'ffa'` (4 Player Chess), exactly what every client released before Giveaway sends. Lobbies never mix variants. */
+  variant?: FourVariant;
 }
 export interface FourMakeMovePayload {
   roomId: string;
@@ -128,6 +144,10 @@ export interface FourQueueUpdatePayload {
 
 export interface FourMatchFoundPayload {
   roomId: string;
+  /** The room's game; a server that knows Giveaway ALWAYS sends it. Optional in the TYPE because an older server does not send it (read it with `fourVariantOf`):
+   * a client that asked for Giveaway MUST see `'giveaway'` echoed here - an older server ignores the field it does not know and would start a 4 Player
+   * Chess game - so the client refuses to play on when the echo is missing or different (decision D15). */
+  variant?: FourVariant;
   /** THIS recipient's seat and token (every human gets their own). */
   seat: Seat;
   playerToken: string;
@@ -159,8 +179,9 @@ export interface FourSeatUpdatePayload {
 export interface FourGameOverPayload {
   roomId: string;
   reason: FourReason;
-  /** Highest score(s); empty when `reason` is `abandoned`. */
+  /** FFA: the seat(s) with the highest score. Giveaway: the winning seat, or the seats tied for the fewest pieces at the cap. Empty when `reason` is `abandoned`. */
   winners: Seat[];
+  /** Per seat. FFA: the final POINTS. Giveaway: the PIECES LEFT (there are no points; the client knows the variant). */
   scores: number[];
   state: string;
 }
@@ -175,6 +196,9 @@ export interface FourChatMessagePayload {
 /** Everything a client needs to (re)build a room it is part of or watching. */
 export interface FourRoomState {
   roomId: string;
+  /** The room's game (also carried by a spectate / rejoin answer, so a client reads the snapshot with the right rules). Always sent by a server that knows
+   * Giveaway; absent from an older one (read it with `fourVariantOf`). */
+  variant?: FourVariant;
   seats: FourSeats;
   timeControl: FourTimeControl;
   timeControlLabel: string;
@@ -190,6 +214,8 @@ export type FourSpectateState = FourRoomState;
 
 export interface FourActiveGameSummary {
   roomId: string;
+  /** Always sent by a server that knows Giveaway; absent from an older one (read it with `fourVariantOf`). */
+  variant?: FourVariant;
   timeControlLabel: string;
   seats: { name: string; kind: 'human' | 'bot' }[];
 }
@@ -277,13 +303,30 @@ export function validateFourTimeControl(value: unknown): FourValidation<FourTime
   return { ok: true, value: { initialSeconds, incrementSeconds } };
 }
 
+/**
+ * The game a client asks for. `undefined` (a client that predates Giveaway) is 4 Player Chess; `'ffa'` and `'giveaway'` are accepted; EVERYTHING
+ * else - another string, `null`, a number, an object - is refused with an error rather than quietly played as Chess: queueing for a game the
+ * server does not understand must fail loudly, never start the wrong one.
+ */
+export function validateFourVariant(value: unknown): FourValidation<FourVariant> {
+  if (value === undefined) return { ok: true, value: 'ffa' };
+  if (value === 'ffa' || value === 'giveaway') return { ok: true, value };
+  return fail('Unknown game mode.');
+}
+
+/** The variant of a server payload: what it says, or `'ffa'` when it says nothing (a server that predates Giveaway only ever hosted 4 Player Chess). */
+export const fourVariantOf = (payload: { variant?: FourVariant }): FourVariant => payload.variant ?? 'ffa';
+
 export function validateFourJoinQueue(value: unknown): FourValidation<FourJoinQueuePayload> {
   if (!isRecord(value)) return fail('Invalid request.');
   const timeControl = validateFourTimeControl(value.timeControl);
   if (!timeControl.ok) return timeControl;
   const label = value.timeControlLabel;
   if (label !== undefined && (typeof label !== 'string' || label.length > 40)) return fail('Invalid time control label.');
-  return { ok: true, value: { timeControl: timeControl.value, ...(label === undefined ? {} : { timeControlLabel: label }) } };
+  const variant = validateFourVariant(value.variant);
+  if (!variant.ok) return variant;
+  // The variant is echoed only when the client SENT one, so a payload from an old client validates to exactly what it always did.
+  return { ok: true, value: { timeControl: timeControl.value, ...(label === undefined ? {} : { timeControlLabel: label }), ...(value.variant === undefined ? {} : { variant: variant.value }) } };
 }
 
 const PROMOTIONS: readonly string[] = ['q', 'r', 'b', 'n'];

@@ -20,6 +20,8 @@
  *                 walking (a random legal move to an empty square each time its turn comes round).
  *   'frozen'    — the walking king has itself been checkmated or has no move; the whole seat is inert and skipped.
  * A piece is dead exactly when its owner's status is not 'active': there is no per-piece "dead" flag to keep in sync.
+ * GIVEAWAY uses only 'active' and 'frozen': an eliminated seat (resigned / flagged) is 'frozen' at once - no walking king - and its pieces are
+ * inert WALLS (not capturable, never forcing, never removed; they block squares and slide-rays for good). See giveaway.ts.
  */
 
 import { CELLS, FFA_PROMOTION_COORD, SIZE, VALID, index, parseSquare, squareName, type Seat } from './board.js';
@@ -76,22 +78,34 @@ export const CAPTURE_POINTS: Record<number, number> = {
 };
 
 /**
- * The scoring and rule knobs that differ between the four-player modes. Only FFA exists in this pass, but nothing in the engine
- * hard-codes these numbers, so Teams / Solo can supply their own `rules` (Teams promotes on the 11th rank, for instance).
+ * The rule knobs that differ between the four-player modes, as a union discriminated on `mode`. The engine reads the mode at a handful of
+ * defined touch points (listed in giveaway.ts); everything else is mode-blind, and nothing hard-codes the numbers below, so a future mode
+ * supplies its own rules object (Teams promotes on the 11th rank, for instance).
  */
-export interface FourPlayerRules {
-  mode: 'ffa';
+interface RulesCommon {
   /** Forward coordinate (0..13 along the seat's own axis) on which a pawn promotes. */
   promotionCoord: number;
+  /** The game is scored and ended when this many plies have been played (guards against endless bot games). */
+  maxPlies: number;
+}
+
+/** 4 Player Chess (free for all): checkmate, points, kings never captured. */
+export interface FfaRules extends RulesCommon {
+  mode: 'ffa';
   /** Points for checkmating a player. */
   checkmatePoints: number;
   /** Points the stalemated player receives. */
   stalematedPoints: number;
   /** Points each OTHER still-active player receives when someone is stalemated. */
   stalemateOthersPoints: number;
-  /** The game is scored and ended when this many plies have been played (guards against endless bot games). */
-  maxPlies: number;
 }
+
+/** 4 Player Giveaway (4-seat Antichess): captures are mandatory, kings are ordinary pieces, no points. See giveaway.ts. */
+export interface GiveawayRules extends RulesCommon {
+  mode: 'giveaway';
+}
+
+export type FourPlayerRules = FfaRules | GiveawayRules;
 
 /**
  * An absolute ceiling on game length that no rules object can raise (`maxPlies` may be lowered or tuned, never removed). It is the last
@@ -100,7 +114,7 @@ export interface FourPlayerRules {
  */
 export const HARD_MAX_PLIES = 5000;
 
-export const FFA_RULES: FourPlayerRules = {
+export const FFA_RULES: FfaRules = {
   mode: 'ffa',
   promotionCoord: FFA_PROMOTION_COORD,
   checkmatePoints: 20,
@@ -108,6 +122,22 @@ export const FFA_RULES: FourPlayerRules = {
   stalemateOthersPoints: 10,
   maxPlies: 1000,
 };
+
+/** The Giveaway rules: the same promotion line and ply cap as FFA (at the cap the FEWEST PIECES win there, not the highest score). */
+export const GIVEAWAY_RULES: GiveawayRules = {
+  mode: 'giveaway',
+  promotionCoord: FFA_PROMOTION_COORD,
+  maxPlies: 1000,
+};
+
+/**
+ * Which four-player game a room / queue / screen is about. `'ffa'` is 4 Player Chess (what the protocol did before Giveaway existed, so an OMITTED variant
+ * always means `'ffa'`); `'giveaway'` is 4 Player Giveaway. Defined here, next to the rules it selects, so local screens can use it without touching the wire.
+ */
+export type FourVariant = 'ffa' | 'giveaway';
+
+/** The rules object of a variant: `'ffa'` = 4 Player Chess, `'giveaway'` = 4 Player Giveaway. */
+export const rulesFor = (variant: FourVariant): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : FFA_RULES);
 
 /** En passant opportunity created by a double step: the square that was skipped, the pawn's landing square, and who stepped. */
 export interface EnPassant {
@@ -117,10 +147,14 @@ export interface EnPassant {
 }
 
 export interface FourPlayerResult {
-  /** Seats with the highest score when the game ended (more than one on a tie). */
+  /** FFA: the seats with the highest score when the game ended (more than one on a tie). Giveaway: the seat that won, or the seats tied for the fewest pieces at the cap. */
   winners: Seat[];
-  /** `deadPosition`: every still-active seat is down to a bare king, so no checkmate can ever happen again (see `isDeadPosition`). */
-  reason: 'elimination' | 'cap' | 'deadPosition';
+  /**
+   * FFA: `elimination` (at most one seat left), `cap`, `deadPosition` (every still-active seat is down to a bare king, so no checkmate can ever
+   * happen again - see `isDeadPosition`). Giveaway: `outOfPieces` (a move captured a seat's last piece - that seat wins), `stuck` (the seat to
+   * move has no legal move - it wins), `lastStanding` (resignations / flag falls left one active seat) and `cap` (the fewest pieces win).
+   */
+  reason: 'elimination' | 'cap' | 'deadPosition' | 'outOfPieces' | 'stuck' | 'lastStanding';
 }
 
 export interface FourPlayerState {
@@ -262,7 +296,7 @@ export function initialState(rules: FourPlayerRules = FFA_RULES): FourPlayerStat
     turn: 0,
     status: ['active', 'active', 'active', 'active'],
     score: [0, 0, 0, 0],
-    castling: inferredCastling(cells),
+    castling: rules.mode === 'giveaway' ? 0 : inferredCastling(cells), // Giveaway has no castling: the rights start (and stay) empty
     ep: null,
     kings: kingSquares(cells),
     ply: 0,
@@ -308,7 +342,7 @@ export function stateFromPieces(pieces: readonly string[], options: PositionOpti
     turn: options.turn ?? 0,
     status: options.status ?? ['active', 'active', 'active', 'active'],
     score: options.score ?? [0, 0, 0, 0],
-    castling: options.castling ?? inferredCastling(cells),
+    castling: options.castling ?? (options.rules?.mode === 'giveaway' ? 0 : inferredCastling(cells)),
     ep: options.ep ?? null,
     kings: kingSquares(cells),
     ply: options.ply ?? 0,

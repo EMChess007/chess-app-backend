@@ -93,9 +93,9 @@ export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {
 
   const matchmaker = new FourPlayerMatchmaker({
     ...deps.matchmakerOptions,
-    startGame: (seats, timeControl, timeControlLabel) => {
-      const created = rooms.createRoom({ seats, timeControl, timeControlLabel });
-      console.log(`[fourSocket] match_found room=${created.roomId} humans=${seats.filter((s) => s.kind === 'human').length} bots=${seats.filter((s) => s.kind === 'bot').length} ${timeControl.initialSeconds}+${timeControl.incrementSeconds}`);
+    startGame: (seats, timeControl, timeControlLabel, variant) => {
+      const created = rooms.createRoom({ seats, timeControl, timeControlLabel, variant });
+      console.log(`[fourSocket] match_found room=${created.roomId} variant=${variant} humans=${seats.filter((s) => s.kind === 'human').length} bots=${seats.filter((s) => s.kind === 'bot').length} ${timeControl.initialSeconds}+${timeControl.incrementSeconds}`);
     },
     notify: (socketId, update: FourQueueUpdatePayload) => {
       try {
@@ -129,7 +129,7 @@ export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {
       if (!socket.connected) return; // it left while its username was being looked up: never queue a dead socket
       const late = refusal(); // ...and something else may have happened to this socket meanwhile
       if (late) return reply(late);
-      reply(matchmaker.join({ socketId: socket.id, userId, name, timeControl: parsed.value.timeControl, timeControlLabel: parsed.value.timeControlLabel }));
+      reply(matchmaker.join({ socketId: socket.id, userId, name, timeControl: parsed.value.timeControl, timeControlLabel: parsed.value.timeControlLabel, variant: parsed.value.variant }));
     });
 
     listen(socket, 'four_leave_queue', (_payload, reply) => {

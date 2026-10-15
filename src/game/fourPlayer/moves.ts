@@ -17,6 +17,10 @@
  * player in check from two opponents at once must answer both). A DEAD king (an eliminated seat's king, which keeps walking) obeys
  * the same rule but may only move to EMPTY squares and never castles.
  *
+ * GIVEAWAY (rules.mode === 'giveaway') changes four things here and nothing else - see giveaway.ts: kings are ordinary capturable pieces, an
+ * eliminated seat's pieces are inert walls (not capturable), there is no castling, and legality is "captures are mandatory" instead of king
+ * safety.
+ *
  * EN PASSANT is generic: a double step records the square it skipped; on the very next applied move any enemy pawn — of ANY seat,
  * i.e. in any direction — that can capture onto that square may do so (e.g. a Blue pawn can take a Red pawn en passant).
  */
@@ -38,6 +42,7 @@ import {
   stepForward,
   type Seat,
 } from './board.js';
+import { mandatoryCaptures } from './giveaway.js';
 import {
   BISHOP,
   CAPTURE_POINTS,
@@ -155,7 +160,12 @@ export function isInCheck(state: Pick<FourPlayerState, 'cells' | 'status' | 'kin
 
 // --- Move generation ---------------------------------------------------------------------------------------------------
 
-const isCapturable = (code: number, seat: Seat): boolean => code > 0 && seatOf(code) !== seat && typeOf(code) !== KING;
+/**
+ * Whether the piece `code` is a legal capture target for `seat`. FFA: any other seat's piece except a king (kings are only ever checked).
+ * Giveaway (`giveawayStatus` given): any piece of another ACTIVE seat, kings included; an eliminated seat's pieces are walls and are never targets.
+ */
+const isCapturable = (code: number, seat: Seat, giveawayStatus: readonly SeatStatus[] | null): boolean =>
+  code > 0 && seatOf(code) !== seat && (giveawayStatus === null ? typeOf(code) !== KING : giveawayStatus[seatOf(code)] === 'active');
 
 function pushPawnMove(out: Move[], state: FourPlayerState, seat: Seat, from: number, to: number, captured: number, flags: number): void {
   if (forwardCoord(seat, to) < state.rules.promotionCoord) {
@@ -172,6 +182,7 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
   const out: Move[] = [];
   if (status === 'frozen') return out;
   const cells = state.cells;
+  const giveawayStatus = state.rules.mode === 'giveaway' ? state.status : null;
 
   if (status === 'dead-king') {
     // Only the king walks, and only onto empty squares.
@@ -199,9 +210,9 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
       for (const target of pawnCaptureSquares(seat, from)) {
         if (target < 0) continue;
         const there = cells[target];
-        if (isCapturable(there, seat)) {
+        if (isCapturable(there, seat, giveawayStatus)) {
           pushPawnMove(out, state, seat, from, target, there, 0);
-        } else if (there === EMPTY && state.ep && state.ep.passed === target && state.ep.by !== seat) {
+        } else if (there === EMPTY && state.ep && state.ep.passed === target && state.ep.by !== seat && (giveawayStatus === null || giveawayStatus[state.ep.by] === 'active')) {
           const victim = cells[state.ep.pawn];
           if (victim > 0 && typeOf(victim) === PAWN && seatOf(victim) === state.ep.by) pushPawnMove(out, state, seat, from, target, victim, FLAG_EN_PASSANT);
         }
@@ -210,15 +221,15 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
       const targets = KNIGHT_TARGETS[from];
       for (let i = 0; i < targets.length; i++) {
         const there = cells[targets[i]];
-        if (there === EMPTY || isCapturable(there, seat)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
+        if (there === EMPTY || isCapturable(there, seat, giveawayStatus)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
       }
     } else if (type === KING) {
       const targets = KING_TARGETS[from];
       for (let i = 0; i < targets.length; i++) {
         const there = cells[targets[i]];
-        if (there === EMPTY || isCapturable(there, seat)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
+        if (there === EMPTY || isCapturable(there, seat, giveawayStatus)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
       }
-      for (let side = 0; side < 2; side++) {
+      for (let side = 0; side < 2 && giveawayStatus === null; side++) {
         if (!(state.castling & (1 << (seat * 2 + side))) || from !== KING_START_SQUARE[seat]) continue;
         const castle = CASTLES[seat][side];
         if (cells[castle.rook] !== pieceCode(seat, ROOK)) continue;
@@ -239,7 +250,7 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
             out.push({ from, to: ray[i], captured: 0, flags: 0 });
             continue;
           }
-          if (isCapturable(there, seat)) out.push({ from, to: ray[i], captured: there, flags: 0 });
+          if (isCapturable(there, seat, giveawayStatus)) out.push({ from, to: ray[i], captured: there, flags: 0 });
           break;
         }
       }
@@ -280,10 +291,14 @@ function makeScratch(cells: Int8Array, state: FourPlayerState, move: Move, seat:
   };
 }
 
-/** The moves `seat` may actually play: pseudo-legal moves that leave its own king attacked by no live enemy. */
+/**
+ * The moves `seat` may actually play. FFA: pseudo-legal moves that leave its own king attacked by no live enemy. Giveaway: every pseudo-legal
+ * move, narrowed to the captures when there is any (king safety does not exist there, so no scratch board is needed).
+ */
 export function legalMoves(state: FourPlayerState, seat: Seat): Move[] {
   const pseudo = pseudoMoves(state, seat);
   if (pseudo.length === 0) return pseudo;
+  if (state.rules.mode === 'giveaway') return mandatoryCaptures(pseudo);
   const scratch = state.cells.slice();
   const out: Move[] = [];
   for (const move of pseudo) {
@@ -324,7 +339,10 @@ export function applyMoveRaw(state: FourPlayerState, move: Move): FourPlayerStat
 
   if (move.captured) {
     const victimSeat = seatOf(move.captured);
-    if (state.status[victimSeat] === 'active') score[seat] += CAPTURE_POINTS[typeOf(move.captured)] ?? 0;
+    if (state.rules.mode === 'giveaway') {
+      // No points. A captured king is simply gone: clear its square so `kings` stays what a round trip through serialize would recompute.
+      if (typeOf(move.captured) === KING) kings[victimSeat] = -1;
+    } else if (state.status[victimSeat] === 'active') score[seat] += CAPTURE_POINTS[typeOf(move.captured)] ?? 0;
   }
 
   cells[move.from] = EMPTY;

@@ -7,5 +7,7 @@ export * from './board.js';
 export * from './state.js';
 export * from './moves.js';
 export * from './elimination.js';
+export * from './giveaway.js';
 export * from './bot.js';
+export * from './giveawayBot.js';
 export * from './clock.js';

@@ -60,7 +60,7 @@ const SET = (...names) => new Set(names);
 console.log('\n=== 1. The REAL mirror is exactly "source + banner + .js" (re-derived without the generator) ===');
 {
   const manifest = readManifest(DEFAULT_SOURCE_ROOT);
-  ok(manifest.length === 7 && manifest.includes('fourPlayerWire.ts') && manifest.includes('fourPlayer/bot.ts'), 'the manifest lists the six engine modules and the wire file');
+  ok(manifest.length === 9 && manifest.includes('fourPlayer/giveaway.ts') && manifest.includes('fourPlayer/giveawayBot.ts') && manifest.includes('fourPlayerWire.ts') && manifest.includes('fourPlayer/bot.ts'), 'the manifest lists the eight engine modules (giveaway.ts and giveawayBot.ts joined for 4 Player Giveaway) and the wire file');
   ok(!manifest.some((f) => /setup|presentation|premove|annotations/.test(f)), 'client-only modules (setup, presentation, premove, annotations) are NOT mirrored');
   let relativeSpecifiers = 0;
   for (const rel of manifest) {

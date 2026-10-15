@@ -26,7 +26,7 @@
  */
 import assert from 'node:assert/strict';
 import { io } from 'socket.io-client';
-import { PLAYABLE_SQUARES, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf, squareName } from '../src/game/fourPlayer/index.ts';
+import { PLAYABLE_SQUARES, BISHOP, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, deserialize, initialState, legalMoves, piecesLeft, promotionOf, pseudoMoves, serialize, squareName } from '../src/game/fourPlayer/index.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const SEED = Number(process.env.FOUR_E2E_SEED ?? 20260101);
@@ -135,7 +135,8 @@ const PROMOTION_LETTER = { [QUEEN]: 'q', [ROOK]: 'r', [BISHOP]: 'b', [KNIGHT]: '
  * Four guests join the queue for the same time control; the 4th starts the game at once. Resolves with a room handle:
  * `players[seat]` = { socket, inbox, match, name } indexed by the SEAT the server assigned (seats are shuffled), `roomId`.
  */
-async function startRoom(label) {
+async function startRoom(label, variant = 'ffa') {
+  const rules = variant === 'giveaway' ? GIVEAWAY_RULES : undefined; // a snapshot has no rules in it: the reader brings them
   const names = [0, 1, 2, 3].map((i) => `${label}${i}`);
   const sockets = [];
   for (const name of names) sockets.push(await connect(name));
@@ -143,7 +144,7 @@ async function startRoom(label) {
   const found = sockets.map((s) => waitFor(s, 'four_match_found')); // BEFORE the emits - see waitFor's doc comment
   found.forEach((p) => p.catch(() => {})); // no unhandled rejection if a join fails first; the caller still sees it
   for (let i = 0; i < 4; i++) {
-    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl: TIME_CONTROL, timeControlLabel: TIME_CONTROL_LABEL });
+    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl: TIME_CONTROL, timeControlLabel: TIME_CONTROL_LABEL, ...(variant === 'giveaway' ? { variant } : {}) });
     check(ack.ok === true, `${names[i]} four_join_queue ack is ok`);
   }
   const matches = await Promise.all(found);
@@ -151,7 +152,7 @@ async function startRoom(label) {
   matches.forEach((match, i) => {
     players[match.seat] = { socket: sockets[i], inbox: inboxes[i], match, name: names[i] };
   });
-  return { roomId: matches[0].roomId, players, sockets, names };
+  return { roomId: matches[0].roomId, players, sockets, names, variant, rules };
 }
 
 /** The room's current position as the server last sent it to seat `seat`'s player (state, seq), or the match-found snapshot before any move. */
@@ -161,8 +162,8 @@ function latestOf(player) {
 }
 
 /** Picks one legal move for `seat` from `text` (a serialized snapshot), pseudo-randomly; returns the four_make_move payload parts. */
-function pickMove(text, seat) {
-  const state = deserialize(text);
+function pickMove(text, seat, rules) {
+  const state = deserialize(text, rules);
   assert.equal(state.turn, seat, 'pickMove: it must be that seat\'s turn');
   const moves = legalMoves(state, seat);
   assert.ok(moves.length > 0, 'pickMove: the seat on move has a legal move');
@@ -174,13 +175,31 @@ function pickMove(text, seat) {
 /** Whose turn it is according to the position the server last sent (every player holds the same one - scenario 2 proves it). */
 const turnOf = (room) => deserialize(latestOf(room.players[0]).text).turn;
 
+/**
+ * Keeps one seat under the server's move rate limit (10 four_make_move calls per second per seat, refused ones included - FOUR_MOVE_RATE_LIMIT) by waiting until it
+ * has sent fewer than 8 in the last 1.1 s. A fixed sleep between plies is NOT enough: how often one seat moves depends on how many seats are still in the game and on
+ * how fast the machine and the timers are: a whole Giveaway game (scenario 12) passed on Windows and was refused with "Too many moves - slow down." on the Linux CI
+ * runner, where a 15 ms sleep really is ~15 ms.
+ */
+async function paceSeat(room, seat) {
+  const sent = ((room.moveTimes ??= [[], [], [], []])[seat] ??= []);
+  for (;;) {
+    const now = Date.now();
+    while (sent.length > 0 && now - sent[0] > 1100) sent.shift();
+    if (sent.length < 8) break;
+    await sleep(sent[0] + 1100 - now + 5);
+  }
+  sent.push(Date.now());
+}
+
 /** Plays one legal move for the seat on move, from THAT player's own socket; resolves with the move sent and the server's ack. */
 async function playOne(room) {
   const seat = turnOf(room);
   const player = room.players[seat];
   // The mover chooses from ITS OWN copy of the position (as a real client does), so that copy must have caught up with the one turnOf() read.
   await until(`seat ${seat} has caught up with seat 0`, () => latestOf(player).seq >= latestOf(room.players[0]).seq);
-  const move = pickMove(latestOf(player).text, seat);
+  const move = pickMove(latestOf(player).text, seat, room.rules);
+  await paceSeat(room, seat);
   const ack = await emitAck(player.socket, 'four_make_move', { roomId: room.roomId, ...move });
   // The ack and the four_state it caused travel on different sockets, so the NEXT call to turnOf() (which reads seat 0's inbox) must not run before
   // seat 0 has actually received that state - otherwise two back-to-back moves read a stale turn (an earlier version of scenario 4 flaked on exactly this).
@@ -603,7 +622,7 @@ async function testActiveGamesListing() {
   check(!!game, 'the live room is in the list');
   check(game.timeControlLabel === TIME_CONTROL_LABEL, `...with its time control label "${game.timeControlLabel}"`);
   check(game.seats.length === 4 && game.seats.every((s) => s.kind === 'human' && s.name === 'Guest'), '...and its four seats (guests are listed as "Guest")');
-  check(Object.keys(game).sort().join() === 'roomId,seats,timeControlLabel' && game.seats.every((s) => Object.keys(s).sort().join() === 'kind,name'), '...carrying names and kinds only - no token, socket id or user id');
+  check(Object.keys(game).sort().join() === 'roomId,seats,timeControlLabel,variant' && game.variant === 'ffa' && game.seats.every((s) => Object.keys(s).sort().join() === 'kind,name'), '...carrying names and kinds only - no token, socket id or user id (plus the game it is: "ffa" - the one field 4 Player Giveaway added)');
   const idx = listed.games.findIndex((g) => g.roomId === roomId);
   check(idx >= 0 && listed.games.length <= 100, `the list is capped (${listed.games.length} <= 100) and this room is in it`);
   // It leaves the list when it ends.
@@ -612,6 +631,236 @@ async function testActiveGamesListing() {
   const after = await emitAck(browser, 'four_list_active_games', {});
   check(after.ok === true && !after.games.some((g) => g.roomId === roomId), 'once the game is over it is no longer listed');
   disconnectAll(room.sockets, browser);
+}
+
+
+// --- 4 Player GIVEAWAY (W4 of FOUR_PLAYER_GIVEAWAY_SPEC.md) -----------------------------------------------------------------------------------
+// The same real-socket protocol with `variant: 'giveaway'`. The server is the authority for the mandatory capture; every client here reads its
+// snapshots with the Giveaway rules of the app's own engine (the generated mirror of it). The endings that depend on the position (outOfPieces,
+// stuck) cannot be forced over a socket without a test hook the server must not have, so those are pinned in-process (test-fourplayer-giveaway.mjs);
+// what a socket CAN prove is proved here: the variant, the refusal of a quiet move, a whole natural game, resignations, takeover, rejoin, spectate.
+
+/** Plays random legal moves (through the real sockets) until `predicate(state)` holds for the position with the seat on move, or the game ends. */
+async function playUntil(room, predicate, maxPlies = 400) {
+  for (let i = 0; i < maxPlies; i++) {
+    const state = deserialize(latestOf(room.players[0]).text, room.rules);
+    if (state.result) return { state, found: false };
+    if (predicate(state)) return { state, found: true };
+    const res = await playOne(room);
+    if (!res.ack.ok) throw new Error(`a legal move was refused while playing towards a position: ${res.ack.error}`);
+    await sleep(15); // stay under the server's 10 moves per seat per second
+  }
+  throw new Error('the position the scenario needs was not reached');
+}
+
+/** The Giveaway rule a four_game_over claims, checked against the final position, independently of the engine's own result object. */
+function checkGiveawayResult(over, final) {
+  const active = [0, 1, 2, 3].filter((seat) => final.status[seat] === 'active');
+  const winner = over.winners[0];
+  check(JSON.stringify(over.scores) === JSON.stringify(piecesLeft(final.cells)), 'four_game_over.scores are the PIECES LEFT in the final position (Giveaway has no points)');
+  check(final.score.every((v) => v === 0), '...and the points inside the snapshot are all zero');
+  if (over.reason === 'outOfPieces') check(over.winners.length === 1 && over.scores[winner] === 0 && active.includes(winner), 'outOfPieces: the single winner has no piece left');
+  else if (over.reason === 'stuck') check(over.winners.length === 1 && final.turn === winner && legalMoves(final, winner).length === 0 && over.scores[winner] > 0, 'stuck: the winner is the seat on move, it has pieces and no legal move');
+  else if (over.reason === 'lastStanding') check(active.length === 1 && active[0] === winner && over.winners.length === 1, 'lastStanding: exactly one active seat is left and it wins');
+  else if (over.reason === 'cap') {
+    const fewest = Math.min(...active.map((seat) => over.scores[seat]));
+    check(JSON.stringify(active.filter((seat) => over.scores[seat] === fewest)) === JSON.stringify([...over.winners].sort((a, b) => a - b)), 'cap: the winners are the active seats with the fewest pieces');
+  } else check(false, `a Giveaway game ended with an unexpected reason "${over.reason}"`);
+}
+
+async function testGiveawayQueueAndStart() {
+  console.log('\n=== 10. Giveaway: four sockets queue for the variant and are matched into ONE Giveaway room ===');
+  const room = await startRoom('GQ', 'giveaway');
+  const matches = room.players.map((player) => player.match);
+  check(matches.every((m) => m.variant === 'giveaway'), 'every four_match_found names the game: variant "giveaway"');
+  check(new Set(matches.map((m) => m.roomId)).size === 1 && new Set(matches.map((m) => m.seat)).size === 4, 'one room, four distinct seats');
+  check(new Set(matches.map((m) => m.state)).size === 1 && matches[0].state === serialize(initialState(GIVEAWAY_RULES)), 'the four starting snapshots are byte-identical and equal the Giveaway start position');
+  check(matches[0].state.split(' ')[4] === '0' && matches[0].state.split(' ')[3] === '0,0,0,0', '...with no castling rights and no points');
+  check(deserialize(matches[0].state, GIVEAWAY_RULES).turn === 0, 'Red is to move');
+  const watcher = await connect('GQ-watch');
+  const listed = await emitAck(watcher, 'four_list_active_games', {});
+  const row = listed.games.find((g) => g.roomId === room.roomId);
+  check(!!row && row.variant === 'giveaway', 'the active-games list tags the room "giveaway"');
+  check(Object.keys(row).sort().join() === 'roomId,seats,timeControlLabel,variant', '...with the same fields as a Chess row (no token, socket id or user id)');
+  const spec = await emitAck(watcher, 'four_spectate_game', { roomId: room.roomId });
+  check(spec.ok === true && spec.state.variant === 'giveaway' && spec.state.state === matches[0].state, 'a spectator\'s room state names the variant too');
+  disconnectAll(room.sockets, watcher);
+}
+
+async function testGiveawayForcedCapture() {
+  console.log('\n=== 11. Giveaway: with a capture available a QUIET move is refused by the server, and the capture is accepted ===');
+  const room = await startRoom('GF', 'giveaway');
+  const { players, roomId } = room;
+  const { state, found } = await playUntil(room, (st) => legalMoves(st, st.turn).every((m) => m.captured !== 0));
+  check(found, 'random play reached a position where the seat on move must capture');
+  const seat = state.turn;
+  const quiet = pseudoMoves(state, seat).filter((m) => m.captured === 0);
+  check(quiet.length > 0, `...and has quiet moves it may NOT play (${quiet.length} of them)`);
+  const player = players[seat];
+  await until(`seat ${seat} has caught up`, () => latestOf(player).seq >= latestOf(players[0]).seq);
+  const seqBefore = latestOf(players[0]).seq;
+  const countsBefore = players.map((p) => p.inbox.states.length);
+  const refused = await emitAck(player.socket, 'four_make_move', { roomId, from: squareName(quiet[0].from), to: squareName(quiet[0].to) });
+  check(refused.ok === false && refused.error === 'Illegal move.', `the quiet move ${squareName(quiet[0].from)}-${squareName(quiet[0].to)} is refused: "${refused.error}"`);
+  await sleep(150);
+  check(players.every((p, i) => p.inbox.states.length === countsBefore[i]) && latestOf(players[0]).seq === seqBefore, '...and nothing was published to anyone: the room is untouched');
+  const captures = legalMoves(state, seat);
+  const take = captures[Math.floor(rng() * captures.length)];
+  const accepted = await emitAck(player.socket, 'four_make_move', { roomId, from: squareName(take.from), to: squareName(take.to), ...(promotionOf(take) ? { promotion: PROMOTION_LETTER[promotionOf(take)] } : {}) });
+  check(accepted.ok === true && accepted.seq === seqBefore + 1, 'a capture is then accepted (the refusal did not disturb the room)');
+  await waitForSeq(players, accepted.seq);
+  const after = players.map((p) => p.inbox.states.find((st) => st.seq === accepted.seq).state);
+  check(new Set(after).size === 1, 'all four players hold the identical snapshot after it');
+  const next = deserialize(after[0], GIVEAWAY_RULES);
+  check(piecesLeft(next.cells).reduce((a, b) => a + b, 0) === piecesLeft(state.cells).reduce((a, b) => a + b, 0) - 1, '...and exactly one piece left the board');
+  disconnectAll(room.sockets);
+}
+
+async function testGiveawayWholeGame() {
+  console.log('\n=== 12. Giveaway: a whole natural game over four sockets and a spectator - identical snapshots, a consistent result ===');
+  const room = await startRoom('GW', 'giveaway');
+  const { players, roomId } = room;
+  const spectator = await connect('GW-spectator');
+  const specInbox = record(spectator);
+  const specAck = await emitAck(spectator, 'four_spectate_game', { roomId });
+  check(specAck.ok === true && specAck.state.variant === 'giveaway', 'a spectator joined the Giveaway room');
+  const { state: end } = await playUntil(room, () => false, 1500); // random legal moves from whoever is on move, until the engine ends the game
+  check(end.result !== null, 'the game ended by itself (no resignation involved)');
+  await until('four_game_over reached all four seats and the spectator', () => players.every((p) => p.inbox.gameOvers.length === 1) && specInbox.gameOvers.length === 1, 8000);
+  const over = specInbox.gameOvers[0];
+  check(players.every((p) => JSON.stringify(p.inbox.gameOvers[0]) === JSON.stringify(over)), 'every seat received the same four_game_over as the spectator');
+  const final = deserialize(over.state, GIVEAWAY_RULES);
+  check(final.result !== null && final.result.reason === over.reason && JSON.stringify([...final.result.winners]) === JSON.stringify([...over.winners].sort((a, b) => a - b)), `reason "${over.reason}", winner(s) ${over.winners.join(',')} - equal to the result inside its final snapshot`);
+  checkGiveawayResult(over, final);
+  check(specInbox.states.at(-1).state === over.state, 'the last four_state and four_game_over carry the same snapshot');
+  check(specInbox.states.every((st, i) => st.seq === i + 1), 'the spectator saw four_state seqs 1..N with no gap');
+  check(players.every((p) => p.inbox.states.every((st, i) => st.seq === i + 1) && p.inbox.states.length === specInbox.states.length), 'so did all four players');
+  // identical snapshots at EVERY seq
+  let mismatches = 0;
+  for (const st of specInbox.states) for (const p of players) if (p.inbox.states[st.seq - 1].state !== st.state) mismatches++;
+  check(mismatches === 0, `all four players held the byte-identical snapshot at every one of the ${specInbox.states.length} seqs`);
+  const late = await connect('GW-late');
+  const lateAck = await emitAck(late, 'four_rejoin', { roomId, playerToken: players[1].match.playerToken });
+  check(lateAck.ok === true && lateAck.finished === true && JSON.stringify(lateAck.gameOver) === JSON.stringify(over), 'a late rejoin of the finished game answers the same result (scores = pieces left included)');
+  disconnectAll(room.sockets, spectator, late);
+}
+
+async function testGiveawayResignations() {
+  console.log('\n=== 13. Giveaway: resignations freeze the seat (its pieces become walls) and the last seat standing wins ===');
+  const room = await startRoom('GR', 'giveaway');
+  const { players, roomId } = room;
+  const r1 = await emitAck(players[1].socket, 'four_resign', { roomId });
+  check(r1.ok === true, 'seat 1 resigned off its turn');
+  await until('the resignation reached everyone', () => players.every((p) => p.inbox.states.length >= 1));
+  const st = players[0].inbox.states[0];
+  const after = deserialize(st.state, GIVEAWAY_RULES);
+  check(st.actor === 'resign' && st.move === null && st.events.some((e) => e.kind === 'eliminated' && e.seat === 1 && e.reason === 'resign' && e.credit === null), 'a four_state (actor resign) with the eliminated event and no credit');
+  check(after.status.join() === 'active,frozen,active,active' && after.turn === 0 && after.result === null, 'seat 1 is FROZEN (never a walking dead king), the turn is still Red\'s and the game goes on');
+  check(piecesLeft(after.cells)[1] === 16, 'its 16 pieces stay on the board as walls');
+  const out = await emitAck(players[1].socket, 'four_make_move', { roomId, from: 'a8', to: 'a9' });
+  check(out.ok === false, 'the eliminated seat can no longer move');
+  for (const seat of [2, 3]) await emitAck(players[seat].socket, 'four_resign', { roomId });
+  await until('four_game_over reached all four seats', () => players.every((p) => p.inbox.gameOvers.length === 1));
+  const over = players[0].inbox.gameOvers[0];
+  check(over.reason === 'lastStanding' && over.winners.join() === '0', 'the third resignation ends the game: lastStanding, the one seat left (Red) wins');
+  check(over.scores.join() === '16,16,16,16', 'scores = pieces left: [16,16,16,16] (nobody moved)');
+  checkGiveawayResult(over, deserialize(over.state, GIVEAWAY_RULES));
+  disconnectAll(room.sockets);
+}
+
+async function testGiveawayTakeoverForcedCapture() {
+  console.log('\n=== 14. Giveaway: a takeover bot facing a mandatory capture plays a capture; the human then retakes the seat ===');
+  const room = await startRoom('GT', 'giveaway');
+  const { players, roomId } = room;
+  const { state, found } = await playUntil(room, (st) => legalMoves(st, st.turn).every((m) => m.captured !== 0));
+  check(found, 'random play reached a position where the seat on move must capture');
+  const victim = state.turn;
+  const others = [0, 1, 2, 3].filter((seat) => seat !== victim).map((seat) => players[seat]);
+  const victimName = players[victim].match.seats[victim].name;
+  const seatUpdatesBefore = others.map((p) => p.inbox.seatUpdates.length);
+  players[victim].socket.disconnect(); // the player whose turn it is - and who must capture - drops off the network
+  await until('the other three were told the seat is away', () => others.every((p, i) => p.inbox.seatUpdates.length > seatUpdatesBefore[i]));
+  const away = others[0].inbox.seatUpdates.at(-1).seats[victim];
+  if (away.graceMsLeft > 15_000) throw new Error(`the server's takeover grace is ${away.graceMsLeft} ms: start the dev server with FOUR_GRACE_MS=1500`);
+  const seqBefore = latestOf(others[0]).seq;
+  await until('the takeover is announced', () => others.every((p) => p.inbox.seatUpdates.some((u) => u.seats[victim].kind === 'bot')), away.graceMsLeft + 5000);
+  const taken = others[0].inbox.seatUpdates.find((u) => u.seats[victim].kind === 'bot').seats[victim];
+  check(taken.botReason === 'takeover' && taken.name === victimName, 'the seat became a bot (reason takeover) that keeps the player\'s name');
+  await until('the takeover bot has moved', () => others.every((p) => p.inbox.states.some((s) => s.actor === 'bot' && s.seq > seqBefore)), 8000);
+  const botState = others[0].inbox.states.find((s) => s.actor === 'bot' && s.seq > seqBefore);
+  check(botState.move.seat === victim && botState.seq === seqBefore + 1, 'the bot moved for the absent seat, as the very next state');
+  check(/x/.test(botState.move.label), `...and, as the rules demand, it CAPTURED (${botState.move.label})`);
+  const legalLabels = legalMoves(state, victim).map((m) => squareName(m.from) + squareName(m.to));
+  check(legalLabels.includes(botState.move.from + botState.move.to), '...with one of the moves the app engine lists as legal for that position');
+  const back = await connect('GT-back');
+  const backInbox = record(back);
+  const rejoin = await emitAck(back, 'four_rejoin', { roomId, playerToken: players[victim].match.playerToken });
+  check(rejoin.ok === true && !rejoin.finished && rejoin.state.seat === victim && rejoin.state.variant === 'giveaway', 'the player rejoins with the original token and the answer names the variant');
+  check(rejoin.state.seats[victim].kind === 'human' && rejoin.state.seats[victim].connected === true, '...the seat is the human\'s again');
+  void backInbox;
+  disconnectAll(room.sockets, back);
+}
+
+async function testGiveawayListingNextToChess() {
+  console.log('\n=== 15. The listing and spectating tell a Giveaway room from a Chess room, and neither is the other ===');
+  const giveaway = await startRoom('GL', 'giveaway');
+  const chess = await startRoom('GC', 'ffa');
+  check(giveaway.roomId !== chess.roomId, 'two live rooms at the same time control, one per variant');
+  const browser = await connect('GL-browser');
+  const listed = await emitAck(browser, 'four_list_active_games', {});
+  const g = listed.games.find((x) => x.roomId === giveaway.roomId);
+  const c = listed.games.find((x) => x.roomId === chess.roomId);
+  check(g && c && g.variant === 'giveaway' && c.variant === 'ffa', 'the list tags them "giveaway" and "ffa" respectively');
+  const sg = await emitAck(browser, 'four_spectate_game', { roomId: giveaway.roomId });
+  check(sg.ok === true && sg.state.variant === 'giveaway', 'spectating the Giveaway room: its state says giveaway');
+  await emitAck(browser, 'four_stop_spectating', {});
+  const sc = await emitAck(browser, 'four_spectate_game', { roomId: chess.roomId });
+  check(sc.ok === true && sc.state.variant === 'ffa' && sc.state.state === chess.players[0].match.state, 'spectating the Chess room: its state says ffa and is the Chess start position');
+  check(sg.state.state !== sc.state.state, '...which differs from the Giveaway start position (castling rights)');
+  for (const room of [giveaway, chess]) for (const seat of [0, 1, 2]) await emitAck(room.players[seat].socket, 'four_resign', { roomId: room.roomId });
+  await until('both rooms ended', () => giveaway.players.every((p) => p.inbox.gameOvers.length === 1) && chess.players.every((p) => p.inbox.gameOvers.length === 1));
+  const overG = giveaway.players[0].inbox.gameOvers[0];
+  const overC = chess.players[0].inbox.gameOvers[0];
+  check(overG.reason === 'lastStanding' && overG.scores.join() === '16,16,16,16', 'the Giveaway room ended lastStanding with pieces-left scores');
+  check(overC.reason === 'elimination' && overC.scores.every((v) => v === 0) && deserialize(overC.state).result !== null, 'the Chess room ended by elimination with its own (points) scores - the two did not influence each other');
+  disconnectAll(giveaway.sockets, chess.sockets, browser);
+}
+
+async function testLobbiesNeverMix() {
+  console.log('\n=== 16. Lobbies never mix variants - and a bad variant is refused over the wire ===');
+  const names = ['MX-c0', 'MX-c1', 'MX-c2', 'MX-g'];
+  const sockets = [];
+  for (const name of names) sockets.push(await connect(name));
+  const inboxes = sockets.map(record);
+  const join = (i, variant) => emitAck(sockets[i], 'four_join_queue', { timeControl: TIME_CONTROL, timeControlLabel: TIME_CONTROL_LABEL, ...(variant ? { variant } : {}) });
+  check((await join(0)).ok && (await join(1, 'ffa')).ok && (await join(2)).ok, 'three players queue for 4 Player Chess (one of them with an explicit "ffa", two as an older client would: no variant)');
+  check((await join(3, 'giveaway')).ok, 'a fourth queues for 4 Player GIVEAWAY at the same time control');
+  await until('the Giveaway player was told it is alone', () => inboxes[3].queueUpdates.some((u) => u.queued === 1 && u.fillInMs === null));
+  await until('the three Chess players were told three are waiting', () => inboxes.slice(0, 3).every((b) => b.queueUpdates.some((u) => u.queued === 3)));
+  check(inboxes.slice(0, 3).every((b) => b.queueUpdates.every((u) => u.queued <= 3)), '...and never saw the Giveaway player counted among them');
+  await sleep(1200);
+  check(inboxes.every((b) => b.matchFound.length === 0), 'four humans are waiting at one time control, but NO game started: three + one is not a lobby of four');
+  // a fourth Chess player completes the Chess lobby
+  const fourth = await connect('MX-c3');
+  const fourthInbox = record(fourth);
+  const found = waitFor(fourth, 'four_match_found');
+  found.catch(() => {});
+  check((await emitAck(fourth, 'four_join_queue', { timeControl: TIME_CONTROL, timeControlLabel: TIME_CONTROL_LABEL })).ok, 'a fourth Chess player arrives');
+  await until('the Chess lobby started', () => inboxes.slice(0, 3).every((b) => b.matchFound.length === 1));
+  const matches = [...inboxes.slice(0, 3).map((b) => b.matchFound[0]), await found];
+  check(matches.every((m) => m.variant === 'ffa') && new Set(matches.map((m) => m.roomId)).size === 1, 'the four Chess players were matched into one Chess room (variant ffa)');
+  await sleep(600);
+  check(inboxes[3].matchFound.length === 0, '...and the Giveaway player, still waiting, was NOT pulled into it');
+  const left = await emitAck(sockets[3], 'four_leave_queue', {});
+  check(left.ok === true, 'the Giveaway player leaves the queue');
+  // bad variants over the real wire
+  const probe = sockets[3];
+  const bad = [];
+  for (const variant of ['bughouse', 'Giveaway', '', null, 3]) bad.push(await emitAck(probe, 'four_join_queue', { timeControl: TIME_CONTROL, variant }));
+  check(bad.every((a) => a.ok === false && a.error === 'Unknown game mode.'), 'five malformed variants ("bughouse", "Giveaway", "", null, 3) are each refused with "Unknown game mode."');
+  check((await emitAck(probe, 'four_leave_queue', {})).ok === true, '...and none of them queued the socket');
+  disconnectAll(sockets, fourth);
+  void fourthInbox;
 }
 
 async function main() {
@@ -625,6 +874,13 @@ async function main() {
   await testSpectator();
   await testChatFanOut();
   await testActiveGamesListing();
+  await testGiveawayQueueAndStart();
+  await testGiveawayForcedCapture();
+  await testGiveawayWholeGame();
+  await testGiveawayResignations();
+  await testGiveawayTakeoverForcedCapture();
+  await testGiveawayListingNextToChess();
+  await testLobbiesNeverMix();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

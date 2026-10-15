@@ -5,6 +5,38 @@ several places, because some of this backend's own test scripts import the front
 directly (see "Why some backend tests import frontend code" below). This document covers what
 exists in **this repo**; see the frontend's own `TESTING.md` for its half of the picture.
 
+## 4 Player Giveaway — roll-up (read this first for the whole feature)
+
+**What it is.** 4-seat Antichess served by the SAME 4 Player machinery as Free-for-All: `FourRoomManager`, the matchmaker and the nine socket handlers. A room carries a `variant` (`'ffa'` | `'giveaway'`); the matchmaker's lobby key is `timeControl|variant`, so the two never mix; the engine mirror
+(generated from the app, now including `giveaway.ts` and `giveawayBot.ts`) dispatches on the rules; the server bot is the heuristic Giveaway bot (`chooseBotMoveFor` is the room manager's default chooser; no Stockfish anywhere). On the wire `variant` is optional on every server payload (absent = Free-for-All, so older clients
+and servers keep working), `four_game_over.scores` are **pieces left** in Giveaway, and a join with an unknown variant is refused (`Unknown game mode.`). Spec: the app repo's `FOUR_PLAYER_GIVEAWAY_SPEC.md`; the app's half is in the frontend's `TESTING.md` (same roll-up at its top).
+
+**Where each workstream is documented**
+
+| | What | Backend | Frontend |
+|---|---|---|---|
+| W1 | engine mirror + wire contract + parity script | §15 | §13 |
+| W2 | the variant through rooms / lobbies / handlers, the server Giveaway bot, `test:fourplayerGiveaway` | §16 | §14 |
+| W3 | what changed here for the screens | §17 | §15 |
+| W4 | real-socket e2e scenarios 10–16, the Giveaway nightly fuzz, CI wiring | §18 | §16 |
+| W5 | this roll-up, the last mutation re-run on the final code | §19 | §17 |
+
+**What runs where.** In CI (`ci.yml`): the mirror drift check, then the in-process scripts (`test:fourplayerSync`, `test:fourplayer`, `Rooms`, `Bots`, `Matchmaking`, `Handlers`, `Giveaway`), then `test:fourplayerOnline` against the live dev server. Nightly (`nightly.yml`): `nightly-fuzz-online.mjs ... 40 40` (4 Player Chess and 4 Player Giveaway, four sockets per game).
+
+**Final numbers (end of W5, all run green).** `sync:fourplayer --check` in sync (10 generated files); sync 114, engine parity 53 (159 random games incl. Giveaway, lockstep with the mirror), rooms 220, bots 160, matchmaking 74, handlers 61, **Giveaway 89**; real-socket e2e 287 (not re-run in W5: no server code changed since W4); `tsc --noEmit` clean.
+**Mutation checks, every workstream's set re-run on the final code** (disposable copies; W4's mutants spawn a mutated server of their own on a private port, stopped by proven pid): **192 planted, 187 killed, 5 equivalent, 0 real survivors** (the table is in the frontend roll-up: W1 72/72, W2 45 + 2, W3 53 + 1, W4 17 + 2).
+
+**The equivalent mutants that live in THIS repo, each justified and marked `EQUIVALENT-MUTANT NOTE` in the source** (the frontend's two are listed in its roll-up):
+- W2 — `queue entries forget their variant`: the lobby, keyed by variant, is what `start` / `restore` read; the entry's own copy is informational.
+- W4 e2e — `the variant is not validated` in the matchmaker: over a socket the handler's shared validator refuses an unknown variant first; the matchmaker's own check is killed in-process by §16's direct join.
+- W4 fuzz — `cap winners are the MOST pieces`: a game never reaches the 1000-ply cap through random play (the cap rule is pinned by the engine tests and the parity script instead).
+Two honest details of the final fuzz run: "last standing at two seats" is only killed at the CI setting of 80 plies, and "the rejoin room state has no variant" was killed by the harness failing without a summary line (the earlier run killed it with 3 named issues).
+
+**What was NOT verified.** The player screens were looked at in a real browser for the first time in W5 (the owner's logged-in tab + a scripted guest socket; frontend §17), except: the D15 refusal screen (needs a server that does not echo the variant), a bot takeover seen in the browser, and the 4 Player Chess online screens. Also open by design: the cap (1000 plies) is not reachable by
+random play, so over sockets it is only pinned by hand-built positions in-process.
+
+**Merge order.** `ci.yml` checks out the same-named branch of the frontend repo: push / merge the frontend's `fourPlayerGiveaway` first (or together with this one). Nothing has been pushed.
+
 ## 4 Player Chess Online — roll-up (read this first for the whole feature)
 
 **What it is.** Online Free-for-All 4 Player Chess. Players queue per time control (live Bullet/Blitz/Rapid only); four humans start a game at once, and with at least two the matchmaker fills the empty seats with Amateur bots after 30 s.
@@ -710,3 +742,130 @@ above rather than from their own check, which is how that flaw was spotted; they
 step's command is `… nightly-fuzz-online.mjs 200 80 200 200 200 40` (the previous defaults, spelled out, plus 40 four-player games). **Nightly dependency:** the nightly checks out
 the frontend repo's DEFAULT branch, and the 4 Player section imports the app's engine from it, so the frontend's 4 Player work must be merged before (or with) this change —
 otherwise every nightly online fuzz would fail at import (the same pairing rule `ci.yml` already documents for `sync:fourplayer --check`).
+
+## 15. 4 Player Giveaway (server side) — the engine mirror and the wire contract (workstream W1)
+
+Spec: the app repo's `FOUR_PLAYER_GIVEAWAY_SPEC.md`; rules, design and the FFA regression gate are in the app's `TESTING.md` §13. **W1 changes no server behaviour**:
+no room manager, matchmaker, handler or bot file was touched, the server still builds every room with `initialState()` (Chess), and a `four_join_queue` is still handled
+exactly as before (the room-manager plumbing for `variant` is W2). What changed here is only the GENERATED mirror and the tests that guard it.
+
+**Mirror.** `giveaway.ts` joined the manifest (`MIRRORED_TO_BACKEND.json`, now the seven engine modules + the wire file); `npm run sync:fourplayer` regenerated
+`src/game/fourPlayer/{giveaway,moves,elimination,state,index}.ts` and `src/game/fourPlayerWire.ts` (generated, never hand-edited); `sync:fourplayer --check` is green (9 generated files).
+The only hand edits in this repo are tests: `test-fourplayer-sync.mjs` (its pinned manifest assertion: 7 → 8 files, `giveaway.ts` named) and `test-fourplayer.mjs` (below).
+
+**Parity (`npm run test:fourplayer`, 34 → 47 checks).** The script keeps every Chess section unchanged (Chess coverage numbers are
+identical to before: 159 games, 41 395 plies) and gains **section 5b**, with its own coverage tally so it cannot shift the Chess thresholds or shorten the Chess hunt:
+- 30 random full Giveaway games from the start position (human-style moves with every promotion piece, resignations, flag falls through `clockTick`; 2 712 plies) in lockstep app engine vs
+  mirror — position, legal moves, events, clocks, snapshot round trips and cross-engine deserialize at every ply;
+- hand-built scenes asserted exactly on both engines, then a random continuation: the forced capture that hands Green the win, a stuck seat winning, last standing through a flag fall and
+  off-turn resignations, the cap tie, en passant as the forced capture, **en passant against a resigned seat's pawn** (not offered), all four **capture-promotions**, a king capture and walls,
+  no castling with every right set, **outOfPieces on the cap ply** (one `gameOver`), **the mover left stuck by a resignation**, **the cap with an eliminated seat holding the fewest pieces**,
+  and a hand-built position's default of no castling rights;
+- the **wire validators compared behaviourally** (`validateFourVariant`, `validateFourJoinQueue`, `validateFourTimeControl`, `validateFourMovePayload` over 24 inputs each = 96, plus
+  `fourVariantOf` and `FOUR_REASONS`) between the app source and the generated copy — before this, section 1 only checked that the wire's exports exist;
+- a coverage report that fails if a Giveaway rule was never reached (captures, king captured, en passant, all four promotions, resign, flag fall, endings by outOfPieces / stuck / lastStanding /
+  cap, and **no points, no checkmate, no stalemate, no walking king** ever).
+The Giveaway bot is not compared yet (W2).
+
+**Regression gate (this repo, after the engine change):** `test:fourplayerSync` 111, `test:fourplayerRooms` 220, `test:fourplayerBots` 160, `test:fourplayerMatchmaking` 74,
+`test:fourplayerHandlers` 61 checks — all pass unchanged (apart from the one pinned manifest line above); `tsc --noEmit` clean. The socket e2e (`test:fourplayerOnline`) is W4's territory and
+was not re-run for W1: nothing on its path changed (no room / handler / wire behaviour differs for Chess).
+
+**Mutation checks (copy-based, `mutate-gw1-parity.cjs`: a mutated copy of the generated mirror next to the real app engine; the parity script alone is what is measured).** 20 mutants — 18 in the
+Giveaway touch points of the mirror (capture filter, walls capturable, kings not capturable, castling, en passant against a wall, `kings` bookkeeping, points, stuck, outOfPieces winner,
+cap-before-outOfPieces, dead-king instead of frozen, last standing at two, the mover's post-resignation stuck check, cap winners most/eliminated, inverted filter, `GIVEAWAY_RULES`, castling defaults ×2)
+and 2 in the wire copy. First pass **14 killed, 6 survived** — every survivor was a real blind spot of the parity script (the app and the mirror disagreed and nothing noticed): en passant against a wall,
+cap-vs-outOfPieces ordering, the mover re-check after a resignation, eliminated seats at the cap, the hand-built castling default, and the wire validators (never compared behaviourally).
+Each was closed with a named scene / the validator battery above: **20/20 killed**. No equivalents. (`sync:fourplayer --check` would also reject every one of these textually; that is a separate net.)
+
+**Performance, payload size, cross-feature.** See the app's `TESTING.md` §13 (engine cost is shared code: Giveaway `legalMoves` 5.8 µs vs Chess 16.1 µs on the same positions; the snapshot is 428 characters,
+Chess 430, so `four_state` size is unchanged). Nothing in the 2-player server (`socketHandlers`, `rooms`, `engine`) or in the Chess 4-player server path was modified.
+
+## 16. 4 Player Giveaway (server side) — the variant through rooms, lobbies and handlers (workstream W2)
+
+Spec: the app repo's `FOUR_PLAYER_GIVEAWAY_SPEC.md` §3.4 and §7; the bot and the rules are in the app's `TESTING.md` §13–§14. W2 changes the **server**:
+
+- **Room manager** (`fourPlayerRooms.ts`): `createRoom({ variant })` (default and omitted = 4 Player Chess; an unknown value **throws**, including `null` and `""` — it never falls back to Chess quietly). The room keeps
+  its variant for life and uses it for: the start state (`initialState(rulesFor(variant))`), `variant` in `four_match_found`, in the room state of a **spectate** and a **rejoin** answer, and in every row of the
+  **active-games list**; and for `four_game_over.scores` — the final **points** for Chess, the **pieces left** (`piecesLeft`) for Giveaway, on every path including `abandoned`. The default **bot chooser** is now
+  `chooseBotMoveFor` (dispatches on the position's rules), still injectable through the same `chooseBotMove` option. Nothing else in the manager knows a rule: the commit funnel, clocks, grace/takeover/retake,
+  all-gone, fast-forward, chat and retention are unchanged and are exercised on Giveaway rooms by the new script.
+- **Matchmaker** (`fourPlayerMatchmaking.ts`): lobbies are keyed by **time control and variant** (`300|0|giveaway` vs `300|0|ffa`), so a Chess player and a Giveaway player can never be matched; `join` validates
+  the variant (error ack `Unknown game mode.`); `startGame(seats, timeControl, label, variant)`; `lobbySize(tc, variant = 'ffa')`.
+- **Handlers** (`fourPlayerHandlers.ts`): `four_join_queue` accepts an optional `variant` (validated by the shared wire validator, so an unknown value never reaches the matchmaker) and passes it on; the other eight
+  events are untouched. An old client's payload (no `variant`) is a Chess join.
+
+**`npm run test:fourplayerGiveaway`** (new, wired into `ci.yml` after the handlers step; **89 checks**, no server, stub io / fake sockets / Node fake timers):
+1. a room has one variant and says so everywhere (match found ×4, spectate, rejoin, the list), Chess traffic unchanged, `createRoom` refuses five bad variants and creates nothing;
+2. **the server enforces the mandatory capture itself**: a quiet move while a capture exists → `Illegal move.`, nothing published, seq unchanged; the same position in a Chess room accepts it;
+3. every ending reaches `four_game_over` with the right reason, winners and `scores`: `outOfPieces`, `stuck`, `lastStanding` (by resignations, one off-turn, frozen seat's walls), the ply cap (ties shared),
+   a **flag fall** (`actor: clock`, eliminates the mover, 16 walls stay), `abandoned` (scores `[16,16,16,16]`); exactly one `four_game_over` per player, the room gone, **no timer left behind**, a late rejoin gets the same result;
+4. **the bots**: the default chooser is the dispatching one; **12 whole Giveaway games with three bots at mixed ELOs** (1 172 published states) with `console.error` spied — **no bot ever returned a fault or an
+   illegal move**; every snapshot has no points and no castling rights; endings `outOfPieces` 11, `stuck` 1; a **takeover bot** on a position where its seat must capture plays the capture, and the retaking human's
+   answer still says `giveaway`; a Chess room with the same default chooser plays a whole game (398 states) under Chess rules with no fault and `scores` still points;
+5. the matchmaker: a Chess and a Giveaway player at the same time control sit in different lobbies, are told "1 queued, no timer", nothing starts however long they wait; each lobby's fill timer starts its own
+   variant (passed to `startGame`); four Giveaway players start at once; unknown variants refused;
+6. the real handlers on fake sockets: two Giveaway clients and two **old clients** (no `variant`) queue at the same time control and are matched into two different rooms announcing `giveaway` and `ffa`; the Giveaway
+   room starts without castling rights and the Chess room with all of them; an unknown variant is refused by the validator with its own message and the socket is not queued; a seated socket can't queue again.
+
+**Parity (`npm run test:fourplayer`, 47 → 53 checks).** The Giveaway section now also plays **bot games in lockstep** (8 games, 618 decisions at ELO 600 / 1200 / 3000, plus the dispatching chooser) and three
+**constructed sweeps** where the heuristic's constants sit mid-decision (the last-piece capture over 4 900 decisions, the victim term over 6 000 — 71 % take the richer victim: not never, not always — the exposure term
+over 3 200, and the "do not leave the next seat stuck" jump over 3 000): app engine and generated mirror choose **identically** every time. The Chess coverage numbers are unchanged (159 games, 41 395 plies).
+
+**Mutation checks (copy-based, `mutate-gw2.cjs backend`).** 17 planted bugs in rooms / matchmaker / handlers against the new script: first pass **15 killed, 2 survived** — `lobbySize` defaulting to the wrong
+variant (the first test had one player in each lobby, so it could not tell; now asymmetric → killed) and "queue entries forget their variant", which is **equivalent and documented inline** (the lobby, keyed by the variant,
+is what `start`/`restore` read; the entry's copy is informational). **16/16 killable killed + 1 equivalent.** Mirrored bot: 8 mutants, **8/8 killed** (one needed a new constructed sweep — see above).
+
+**Regression gate.** `test:fourplayerSync` 114, `test:fourplayer` 53, `test:fourplayerRooms` 220, `test:fourplayerBots` 160, `test:fourplayerMatchmaking` 74, `test:fourplayerHandlers` 61 — all unchanged and passing; `tsc`
+clean; `sync:fourplayer --check` green (10 generated files). **The real-socket e2e (`test:fourplayerOnline`), run against a throwaway server on :3101 (stopped afterwards by PID), caught one assertion that is
+now different: 198 checks pass, with the active-games listing check changed from `roomId,seats,timeControlLabel` to also allow `variant` (`"ffa"`) — an additive field, still no token / socket id / user id.** That is the only
+change a Chess client can see on the wire: a `variant: "ffa"` key on `four_match_found`, the rejoin/spectate room state and the list rows.
+
+**Existing tests edited in W2:** `test-fourplayer-sync.mjs` (manifest 8 → 9 files), `test-fourplayer-online.mjs` (the listing key set above). Nothing was relaxed beyond the new field. `fourplayer-test-kit.mjs`
+gained an optional `variant` option for `newGame`.
+
+**Known limits / next.** No Giveaway real-socket scenarios yet (W4: forced capture refused over a socket, last-piece win, stuck win, lobbies never mixing, the nightly fuzz section). The "new client Giveaway + old
+server" row of the compatibility matrix is a client behaviour (W3). Deploy order stays: backend first, then the app.
+
+## 17. 4 Player Giveaway (server side) — what W3 changed here (workstream W3)
+
+W3 is the app's screens (frontend `TESTING.md` §15); **no server behaviour changed**. The one thing that touched this repo: `FourVariant` (`'ffa' | 'giveaway'`) moved from the wire file into the engine's
+`state.ts` (next to `rulesFor`, which uses it) and `fourPlayerWire.ts` now re-exports it (`export type { FourVariant }`), so the app's local screens can use the type without importing the wire. Both files are GENERATED
+mirrors: `npm run sync:fourplayer` regenerated them (`--check` green, 10 generated files) and nothing else in `src/` changed. The type-only move is invisible at runtime; the parity script's wire-validator battery and
+every other four-player script pass unchanged: `test:fourplayerSync` 114, `test:fourplayer` 53, `test:fourplayerRooms` 220, `test:fourplayerBots` 160, `test:fourplayerMatchmaking` 74, `test:fourplayerHandlers` 61,
+`test:fourplayerGiveaway` 89; `tsc` clean. No Giveaway real-socket scenarios yet (W4).
+
+## 18. 4 Player Giveaway (server side) — real sockets: the e2e scenarios and the nightly fuzz (workstream W4)
+
+Spec: the app repo's `FOUR_PLAYER_GIVEAWAY_SPEC.md` §9–§10. W4 adds no server behaviour: it proves, over REAL socket.io connections, what the in-process tests (§16) proved on stubs. Changes: `scripts/test-fourplayer-online.mjs` (7 new
+scenarios), `scripts/nightly-fuzz-online.mjs` (a 4 Player Giveaway section), `ci.yml` (the e2e step label/comment) and `nightly.yml` (the new argument). One comment-only edit in `fourPlayerMatchmaking.ts` (an equivalent-mutant note).
+
+**`npm run test:fourplayerOnline` — 198 → 287 checks.** The Chess scenarios 1–9 are untouched (apart from the listing key set, W2); scenarios 10–16 are new and use FOUR real clients per room, each reading its snapshots with the Giveaway rules:
+10. four sockets queue with `variant: "giveaway"` → one room, every `four_match_found` names `giveaway`, the four starting snapshots are byte-identical and equal the Giveaway start (castling `0`, scores `0,0,0,0`); the listing row and a spectator's state say `giveaway`;
+11. **a quiet move while a capture is mandatory is refused** (`Illegal move.`, nothing published to anyone, seq unchanged), then a capture is accepted and exactly one piece leaves the board — reached by playing random legal moves through the sockets until the seat on move must capture;
+12. **a whole natural game** with a spectator: identical `four_game_over` to all four seats and the spectator, the result equal to the one inside its final snapshot, `scores` = pieces left, the Giveaway rule it names checked against the final position (outOfPieces: the winner has none left; stuck: the seat on move has pieces and no legal move; lastStanding; cap = the fewest pieces), `four_state` seqs 1..N with no gap, **all four players holding the byte-identical snapshot at every one of the 127 seqs** (in the first run), and a late rejoin answering the same result;
+13. resignations: a seat resigning off-turn is **frozen** (never a walking king), its 16 pieces stay as walls, it can no longer move, and the third resignation ends the game `lastStanding` with scores `[16,16,16,16]`;
+14. **takeover over real sockets on a forced capture**: the seat on move (which must capture) drops, the grace passes, the bot takes the seat (keeping the name), and its very next move is a **capture** that the app engine lists as legal; the human then retakes the seat by token and the answer names the variant;
+15. a Giveaway and a Chess room live at once: the listing tags them `giveaway` / `ffa`, spectating each returns its own start position, and each ends with its own kind of `scores` (pieces vs points);
+16. **lobbies never mix**: three Chess players (one with an explicit `"ffa"`, two as an older client would) and one Giveaway player at the same time control — four humans waiting, **no game starts**, each side is told its own count; a fourth Chess player starts the Chess room without the Giveaway player; five malformed variants (`"bughouse"`, `"Giveaway"`, `""`, `null`, `3`) are refused over the wire with `Unknown game mode.`.
+Run 3 times with different `FOUR_E2E_SEED`s: 287 checks each, no flake (scenario 12's moves are paced under the server's 10-moves-per-second limit).
+**What a socket cannot force:** the positions that end a game by `outOfPieces` or `stuck` (and the cap) need hand-built positions, which the real server has no hook for (and must not). Those are pinned in-process (§16: the scripted games, `test-fourplayer-giveaway.mjs`) and in the engine's property test; over sockets they are exercised only when a random game happens to end that way (scenario 12 and the fuzz check whichever it is).
+
+**Nightly fuzz (`nightly-fuzz-online.mjs`, new 7th argument `[fourPlayerGiveawayGames]`, defaults to the 4 Player Chess count; `nightly.yml` now runs `200 80 200 200 200 40 40`).** `playFourPlayerGame(game, variant)` is the Chess driver parametrised: the clients read snapshots with the Giveaway rules from the
+**app's own engine** (independent of the server's mirror), join with `variant: "giveaway"` as the app does, and check, per game: byte-identical snapshots at every seq, contiguous seqs, every client-computed legal move accepted, illegal / out-of-turn moves refused with the room untouched, **plus a quiet move while a capture is mandatory refused**,
+`four_match_found` and the rejoin answer naming the variant, resignations, random disconnects with a bot takeover and a retake, and at the end the `four_game_over` agreeing across seats, with the app engine's reading of the final position (reason, winners, `scores` = pieces left) and with the Giveaway rule it names (outOfPieces / stuck / lastStanding / cap), and a late rejoin returning the result.
+First runs against a throwaway server: 8 games at 80 plies (624 plies, 426 illegal / out-of-turn / quiet-while-capture-mandatory moves refused, 3 rejoin cycles, 5 takeovers, 17 resignations, 3 natural ends) and 8 games at 400 plies (901 plies, all 8 ended by the engine itself): **0 issues**. The 4 Player Chess section is unchanged in behaviour (6 games, 0 issues).
+**A bug the fuzz found — in the harness, not the server:** the first long Giveaway run reported 59 `implausible-clocks`: the check capped a clock at 300 s + 60 s, but with the 2 s increment a seat that has moved ~34 times legitimately holds 368 s (Chess games were capped at 80 plies and never got there). The ceiling is now initial + increment × states so far; the fix is in the fuzz, the server was right.
+
+**Mutation checks (copy-based; each mutant runs a SPAWNED server from a mutated copy of `backend/` on its own port — the script owns the process and stops it by pid — against the real-socket e2e).** 12 planted server bugs: the start position ignoring the variant, `four_match_found` / the listing / the spectate-and-rejoin room state carrying no variant, game-over `scores` as points, the lobby key ignoring the variant, the variant not validated, the handler dropping the variant, the capture not mandatory, a resigned seat walking as a dead king,
+the last-piece win missing, last-standing at two seats. **11 killed, 1 survived — and the survivor is equivalent at socket level and documented inline** (`matchmaker: the variant is not validated`: over a socket the handler's shared validator refuses an unknown variant before the matchmaker is reached; it is killed in-process by §16's direct join). One caveat on "the capture is not mandatory": the e2e's own clients use the server's mirror, so that mutant is killed by the scenario not being able to reach a must-capture position
+at all; the nightly fuzz (independent app-engine clients) kills it by `server-ACCEPTED-quiet-move-while-capture-mandatory` — see next. **Fuzz mutation checks** (a mutated server, the fuzz's Giveaway section against it): 7 bugs; the capture filter (18 issues), points-as-scores (12), the missing variant on match-found (6) and on rejoin (3), the missing last-piece win (6) are killed; **last standing at two seats** survived at 400 plies (those games all end naturally) and is killed at the CI setting of 80 plies, where games end by resignation (`giveaway-lastStanding-with-several-seats-left`); the cap-winner mutant cannot be reached (a game never lasts 1000 plies) and is covered by the engine's tests and the parity script.
+
+**CI / nightly.** `ci.yml`: the existing e2e step (the same script, now holding the Giveaway scenarios; it already starts the dev server with `FOUR_GRACE_MS`); `nightly.yml`: the fuzz invocation gains `40` Giveaway games (about 4 more minutes). The in-process `test:fourplayerGiveaway` step was added in W2.
+The throwaway servers used for these runs (ports 3101-3103) were started by this session and stopped by pid after their process chains were checked; nothing on the usual ports was touched.
+
+## 19. 4 Player Giveaway (server side) — close-out (workstream W5)
+
+No server behaviour or script changed in W5. What was done here: every workstream's mutation set re-run on the final code (results in the roll-up at the top; the raw per-mutant lists are the harness outputs of the session, the equivalent ones are named in the source), the full set of four-player scripts and `sync:fourplayer --check`
+re-run green, and the online browser pass in the app repo (frontend §17) was driven against the owner's own dev backend with a scripted unauthenticated guest socket as the second human. That pass found one app-side wording gap (the online Resign dialog) and nothing on the server.
+The throwaway servers used by the mutation harnesses (ports 3101-3103) were started by the harnesses, owned by pid, and none is left running.

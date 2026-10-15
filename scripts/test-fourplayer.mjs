@@ -24,6 +24,8 @@ import * as fePresentation from '../../src/logic/fourPlayer/presentation.ts';
 import * as fePremove from '../../src/logic/fourPlayer/premove.ts';
 import * as feAnnotations from '../../src/logic/fourPlayer/annotations.ts';
 import * as BE from '../src/game/fourPlayer/index.ts';
+import * as feWire from '../../src/logic/fourPlayerWire.ts';
+import * as beWire from '../src/game/fourPlayerWire.ts';
 
 // The app's package is not "type": "module", so tsx loads its files as CommonJS: a namespace import of its `export *` barrel exposes
 // the real exports only under `.default` (the backend's own files are genuine ES modules and need no unwrapping).
@@ -38,6 +40,7 @@ const FESetup = unwrap(feSetup);
 const FEPresentation = unwrap(fePresentation);
 const FEPremove = unwrap(fePremove);
 const FEAnnotations = unwrap(feAnnotations);
+const BEWire = unwrap(beWire);
 
 /**
  * Developer / mutation-testing switch (CI never sets it): PARITY_ONLY_CONSTRUCTED=1 skips the random-game sections (2, 3, the hunt and the
@@ -87,24 +90,29 @@ const coverage = {
   deepBotComparisons: 0,
 };
 
+/** 4 Player Giveaway has its OWN tally (section 4c), so adding it cannot shift the Chess coverage thresholds or shorten the Chess hunt. */
+const giveawayCoverage = { ...JSON.parse(JSON.stringify(coverage)), kingCaptures: 0, endings: { cap: 0, outOfPieces: 0, stuck: 0, lastStanding: 0 } };
+let tally = coverage;
+
 function countEvents(events) {
   for (const e of events) {
     if (e.kind === 'move') {
-      coverage.moves++;
-      if (e.move.captured) coverage.captures++;
+      tally.moves++;
+      if (e.move.captured) tally.captures++;
+      if (e.move.captured && FE.typeOf(e.move.captured) === FE.KING) tally.kingCaptures = (tally.kingCaptures ?? 0) + 1;
       const f = e.move.flags;
-      if (f & FE.FLAG_DOUBLE_STEP) coverage.doubleSteps++;
-      if (f & FE.FLAG_CASTLE) coverage.castles++;
-      if (f & FE.FLAG_EN_PASSANT) coverage.enPassant++;
-      if (f & FE.FLAG_PROMOTION) coverage.promotions['qrbn'[FE.PROMOTABLE_TYPES.indexOf(FE.promotionOf(e.move))]]++;
-    } else if (e.kind === 'deadKingMove') coverage.deadKingMoves++;
-    else if (e.kind === 'frozen') coverage.frozen++;
+      if (f & FE.FLAG_DOUBLE_STEP) tally.doubleSteps++;
+      if (f & FE.FLAG_CASTLE) tally.castles++;
+      if (f & FE.FLAG_EN_PASSANT) tally.enPassant++;
+      if (f & FE.FLAG_PROMOTION) tally.promotions['qrbn'[FE.PROMOTABLE_TYPES.indexOf(FE.promotionOf(e.move))]]++;
+    } else if (e.kind === 'deadKingMove') tally.deadKingMoves++;
+    else if (e.kind === 'frozen') tally.frozen++;
     else if (e.kind === 'eliminated') {
-      if (e.reason === 'checkmate') coverage.checkmates++;
-      else if (e.reason === 'stalemate') coverage.stalemates++;
-      else if (e.reason === 'resign') coverage.resigns++;
-      else if (e.reason === 'timeout') coverage.timeouts++;
-    } else if (e.kind === 'gameOver') coverage.endings[e.result.reason]++;
+      if (e.reason === 'checkmate') tally.checkmates++;
+      else if (e.reason === 'stalemate') tally.stalemates++;
+      else if (e.reason === 'resign') tally.resigns++;
+      else if (e.reason === 'timeout') tally.timeouts++;
+    } else if (e.kind === 'gameOver') tally.endings[e.result.reason] = (tally.endings[e.result.reason] ?? 0) + 1;
   }
 }
 
@@ -128,17 +136,21 @@ class Lockstep {
 }
 
 const ELOS_EVERY_PLY = [1200, 1700];
+const ELOS_GIVEAWAY = [600, 1200, 3000]; // greedy, careful, and the top of the dial (the Giveaway bot has no deep tier)
 const ELOS_DEEP = [1800, 3000];
 
 /** The bots, given identically seeded RNGs, must pick the same move (and the evaluator must score identically). */
 function compareBots(ls, seedBase, elos, deep = false) {
+  const giveaway = ls.fe.rules.mode === 'giveaway'; // a Giveaway position is played by the Giveaway bot (and has no Chess evaluator to compare)
+  const choose = giveaway ? 'chooseGiveawayFourBotMove' : 'chooseBotMove';
   for (const elo of elos) {
     const seed = (seedBase * 7919 + elo) >>> 0;
-    ls.same(`bot move at ELO ${elo}`, FE.chooseBotMove(ls.fe, elo, mulberry32(seed)), BE.chooseBotMove(ls.be, elo, mulberry32(seed)));
-    coverage.botComparisons++;
-    if (deep) coverage.deepBotComparisons++;
+    ls.same(`bot move at ELO ${elo}`, FE[choose](ls.fe, elo, mulberry32(seed)), BE[choose](ls.be, elo, mulberry32(seed)));
+    ls.same(`dispatching bot at ELO ${elo}`, FE.chooseBotMoveFor(ls.fe, elo, mulberry32(seed)), BE.chooseBotMoveFor(ls.be, elo, mulberry32(seed)));
+    tally.botComparisons++;
+    if (deep) tally.deepBotComparisons++;
   }
-  for (const seat of FE.SEATS) ls.same(`evaluate(seat ${seat})`, String(FE.evaluate(ls.fe, seat)), String(BE.evaluate(ls.be, seat)));
+  if (!giveaway) for (const seat of FE.SEATS) ls.same(`evaluate(seat ${seat})`, String(FE.evaluate(ls.fe, seat)), String(BE.evaluate(ls.be, seat)));
 }
 
 /** Compares everything a position exposes that is not a plain field. */
@@ -165,7 +177,7 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
     const seat = ls.fe.turn;
     const feMoves = FE.legalMoves(ls.fe, seat);
     compareQueries(ls, seat);
-    if (step % botEvery === 0) compareBots(ls, seed * 1000 + step, ELOS_EVERY_PLY);
+    if (step % botEvery === 0) compareBots(ls, seed * 1000 + step, ls.fe.rules.mode === 'giveaway' ? ELOS_GIVEAWAY : ELOS_EVERY_PLY);
     if (deepEvery && step % deepEvery === 0) compareBots(ls, seed * 1000 + step, ELOS_DEEP, true);
 
     const r = script();
@@ -203,8 +215,8 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
         let feMove;
         let beMove;
         if (style === 'bot') {
-          feMove = FE.chooseBotMove(ta.state, 1200, mulberry32(rngSeed));
-          beMove = BE.chooseBotMove(tb.state, 1200, mulberry32(rngSeed));
+          feMove = FE.chooseBotMoveFor(ta.state, 1200, mulberry32(rngSeed));
+          beMove = BE.chooseBotMoveFor(tb.state, 1200, mulberry32(rngSeed));
         } else {
           const pick = feMoves[Math.floor(script() * feMoves.length)];
           const promotionType = FE.PROMOTABLE_TYPES[Math.floor(script() * 4)];
@@ -231,8 +243,8 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
     ls.same('deserialize round trip', fingerprint(FE, FE.deserialize(text)), fingerprint(BE, BE.deserialize(text)));
     ls.same('cross-engine deserialize', fingerprint(FE, FE.deserialize(text)), fingerprint(FE, BE.deserialize(text)));
   }
-  coverage.games++;
-  coverage.plies += ls.fe.ply;
+  tally.games++;
+  tally.plies += ls.fe.ply;
   return ls;
 }
 
@@ -396,7 +408,7 @@ console.log("\n=== 4b. A stalemate and the bot's castling bonus, BUILT (not left
  * it shows up as a SHIFT IN FREQUENCY over many seeds - which is exactly what a parity test can pin: a divergent constant on one side
  * flips some of the pairs.
  */
-function botSweep(label, build, elos, seedsPerElo, isTarget) {
+function botSweep(label, build, elos, seedsPerElo, isTarget, choose = 'chooseBotMove') {
   const ls = new Lockstep(label, build(FE), build(BE));
   const targetOf = (E, move) => isTarget(E, move);
   const result = { decisions: 0, hits: 0, byElo: {} };
@@ -404,15 +416,15 @@ function botSweep(label, build, elos, seedsPerElo, isTarget) {
     let hits = 0;
     for (let s = 1; s <= seedsPerElo; s++) {
       const seed = (s * 7919 + elo) >>> 0;
-      const a = FE.chooseBotMove(ls.fe, elo, mulberry32(seed));
-      const b = BE.chooseBotMove(ls.be, elo, mulberry32(seed));
+      const a = FE[choose](ls.fe, elo, mulberry32(seed));
+      const b = BE[choose](ls.be, elo, mulberry32(seed));
       ls.same(`bot move (ELO ${elo}, seed ${s})`, a, b);
       if (a && targetOf(FE, a)) hits++;
     }
     result.byElo[elo] = hits;
     result.decisions += seedsPerElo;
     result.hits += hits;
-    coverage.botComparisons += seedsPerElo;
+    tally.botComparisons += seedsPerElo;
   }
   return result;
 }
@@ -486,6 +498,251 @@ if (!ONLY_CONSTRUCTED) {
   const started = Date.now();
   while (!wanted() && seed < 2400) playGame(seed++, { style: seed % 3 === 0 ? 'bot' : 'human', maxPlies: 400, chaos: 0.01, initialSeconds: 300, botEvery: 20 });
   ok(wanted(), `stalemate/checkmate/frozen/timeout/resign were all reached (${seed - 2000} extra games, ${Date.now() - started} ms; the hunt itself found ${coverage.stalemates - stalematesBefore} stalemate(s)): stalemates ${coverage.stalemates}, checkmates ${coverage.checkmates}, frozen ${coverage.frozen}, timeouts ${coverage.timeouts}, resigns ${coverage.resigns}`);
+}
+
+console.log('\n=== 5b. 4 Player Giveaway: the same engine under the Giveaway rules, app vs mirror, in lockstep ===');
+{
+  tally = giveawayCoverage;
+  const GA = (E) => E.GIVEAWAY_RULES;
+  const gBuild = (pieces, options = {}) => (E) => E.stateFromPieces(pieces, { rules: GA(E), ...options });
+  /** Resigns / flags `who` on BOTH engines at a scripted moment (an off-turn resignation is the case clockTick cannot produce). */
+  function scriptedResign(ls, who, reason = 'resign') {
+    const a = FE.resign(ls.fe, who, mulberry32(11), reason);
+    const b = BE.resign(ls.be, who, mulberry32(11), reason);
+    ls.same('events', a.events, b.events);
+    countEvents(a.events);
+    ls.fe = a.state;
+    ls.be = b.state;
+    ls.lastEvents = a.events;
+    ls.states();
+  }
+  const GK = ['rK@h1', 'bK@a8', 'yK@g14', 'gK@n7'];
+  const sqn = (name) => FE.parseSquare(name);
+
+  // 1. Random full games from the start position: human-style moves with every promotion piece, resignations and flag falls (chaos), no bots
+  //    (the Giveaway bot arrives in W2). A 400-ply cap keeps a game short; the lockstep compares position, legal moves, events and clocks every ply.
+  const started = Date.now();
+  for (let seed = 3001; seed <= 3030; seed++) {
+    playGame(seed, { style: 'human', maxPlies: 400, botEvery: 0, chaos: 0.02, initialSeconds: 300, label: 'giveaway random', build: (E) => E.initialState({ ...GA(E), maxPlies: 400 }) });
+  }
+  ok(giveawayCoverage.games === 30, `30 random Giveaway games, ${giveawayCoverage.plies} plies, identical at every ply (positions, legal moves, events, clocks, snapshot round trips) - ${Date.now() - started} ms`);
+
+  // 2. Built scenes: each rule scripted on both engines, asserted exactly, then a random continuation.
+  playGame(3101, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway forced capture hands Green the win',
+    build: gBuild(['rK@h1', 'bK@a9', 'yR@g8', 'gP@m8'], { turn: 0 }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'h1', 'h2');
+      scripted(ls, 1, 'a9', 'a10');
+      assert.deepEqual(FE.legalMoves(ls.fe, 2).map((m) => FE.moveLabel(m)), ['g8xm8'], 'Yellow\'s only legal move is the capture of Green\'s last pawn');
+      scripted(ls, 2, 'g8', 'm8');
+      assert.deepEqual(ls.fe.result, { winners: [3], reason: 'outOfPieces' }, 'Green lost its last piece, so Green wins at once');
+    },
+  });
+  playGame(3102, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway stuck seat wins',
+    build: gBuild(['rP@g5', 'bP@f5', 'rK@h1', 'yK@g14', 'gK@n7'], { turn: 0 }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'h1', 'h2');
+      assert.deepEqual(ls.fe.result, { winners: [1], reason: 'stuck' }, 'Blue\'s pawn is blocked, so Blue wins when its turn arrives');
+    },
+  });
+  playGame(3103, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway last standing',
+    build: gBuild(GK, { turn: 0 }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'h1', 'h2');
+      scriptedResign(ls, 1, 'timeout'); // Blue flags while to move -> Yellow
+      assert.equal(ls.fe.turn, 2, 'the turn passed to Yellow');
+      scriptedResign(ls, 0); // Red resigns off-turn
+      scriptedResign(ls, 3, 'timeout'); // Green flags: Yellow is the last one standing
+      assert.deepEqual(ls.fe.result, { winners: [2], reason: 'lastStanding' }, 'one active seat is left, so it wins');
+    },
+  });
+  playGame(3104, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway cap: fewest pieces, ties shared',
+    build: gBuild(['rK@h1', 'rP@e3', 'bK@a8', 'bP@b9', 'yK@g14', 'yP@e12', 'yP@f12', 'gK@n7', 'gP@m6', 'gP@m5'], { ply: 5, rules: { ...FE.GIVEAWAY_RULES, maxPlies: 6 } }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'h1', 'h2');
+      assert.deepEqual(ls.fe.result, { winners: [0, 1], reason: 'cap' }, 'Red and Blue tie for the fewest pieces');
+    },
+  });
+  playGame(3105, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway en passant is the only (and forced) capture',
+    build: gBuild(['yP@i13', 'gP@j11', ...GK], { turn: 2 }),
+    prelude: (ls) => {
+      scripted(ls, 2, 'i13', 'i11');
+      assert.deepEqual(FE.legalMoves(ls.fe, 3).map((m) => FE.moveLabel(m)), ['j11xi12 e.p.'], 'Green must capture en passant');
+      const capture = scripted(ls, 3, 'j11', 'i12');
+      assert.ok(capture.flags & FE.FLAG_EN_PASSANT);
+    },
+  });
+  for (const type of FE.PROMOTABLE_TYPES) {
+    playGame(3110 + type, {
+      style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: `giveaway promotion by capture to type ${type}`,
+      build: gBuild(['rP@e7', 'bR@f8', 'bP@b9', 'rK@h1', 'yK@g14', 'gK@n7'], { turn: 0 }),
+      prelude: (ls) => {
+        assert.equal(FE.legalMoves(ls.fe, 0).length, 4, 'only the four capturing promotions are legal (the quiet push is not)');
+        const move = scripted(ls, 0, 'e7', 'f8', type);
+        assert.ok(move.captured && FE.promotionOf(move) === type, 'a promotion that captures');
+      },
+    });
+  }
+  playGame(3120, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway king capture and a wall',
+    build: gBuild(['rR@d5', 'bK@d9', 'bP@b9', 'bN@e5', 'rK@h1', 'yK@g14', 'gK@n7'], { turn: 0 }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'd5', 'd9'); // the rook takes Blue's king (the knight on e5 was a second capture option: the mover chooses)
+      assert.equal(ls.fe.kings[1], -1, 'a captured king leaves `kings`');
+      scriptedResign(ls, 1); // Blue resigns: its pawn and knight become walls
+      assert.ok(FE.legalMoves(ls.fe, 0).every((m) => m.captured === 0), 'a wall is never a forced capture');
+      assert.equal(FE.legalMoves(ls.fe, 0).some((m) => m.to === sqn('b9') || m.to === sqn('e5')), false, 'and never a destination (the Red rook on d9 stops before the wall on b9)');
+    },
+  });
+  playGame(3121, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway no castling with every right set',
+    build: gBuild(['rK@h1', 'rR@d1', 'rR@k1', ...GK.slice(1)], { turn: 0, castling: 0xff }),
+    prelude: (ls) => {
+      assert.equal(FE.legalMoves(ls.fe, 0).some((m) => m.flags & FE.FLAG_CASTLE), false, 'no castling in Giveaway');
+    },
+  });
+
+  // 3. Scenes added after the first mutation pass found the parity script blind to them (each was a divergence it did not notice).
+  //    Both engines are asked for the legal moves of the seat that matters, not only for the resulting position.
+  const sameLegal = (ls, seat, what) => ls.same(what, FE.legalMoves(ls.fe, seat), BE.legalMoves(ls.be, seat));
+  playGame(3130, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway en passant against a wall',
+    build: gBuild(['yP@i13', 'gP@j11', ...GK], { turn: 2 }),
+    prelude: (ls) => {
+      scripted(ls, 2, 'i13', 'i11'); // Yellow double-steps; Green could take it en passant...
+      scriptedResign(ls, 2); // ...but Yellow resigns first: its pawn is a wall
+      sameLegal(ls, 3, 'legal moves of Green');
+      assert.equal(FE.legalMoves(ls.fe, 3).some((m) => m.flags & FE.FLAG_EN_PASSANT), false, 'no en passant against a wall');
+      assert.ok(ls.fe.ep !== null, 'the opportunity is still recorded (that is what makes the guard matter)');
+    },
+  });
+  playGame(3131, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway outOfPieces on the cap ply',
+    build: gBuild(['rR@e5', 'gP@m5', 'rK@h1', 'bK@a8', 'yK@g14'], { turn: 0, ply: 9, rules: { ...FE.GIVEAWAY_RULES, maxPlies: 10 } }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'e5', 'm5');
+      assert.deepEqual(ls.fe.result, { winners: [3], reason: 'outOfPieces' }, 'the last-piece win beats the cap tie-break');
+      assert.deepEqual(ls.lastEvents.map((e) => e.kind), ['move', 'gameOver'], 'and is announced exactly once');
+    },
+  });
+  playGame(3132, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway mover left stuck by a resignation',
+    build: gBuild(['bP@e5', 'rP@f5', 'yN@f6', 'rK@h1', 'yK@g14', 'gK@n7'], { turn: 1 }),
+    prelude: (ls) => {
+      assert.deepEqual(FE.legalMoves(ls.fe, 1).map((m) => FE.moveLabel(m)), ['e5xf6'], 'the forced capture is Blue\'s only move');
+      scriptedResign(ls, 2); // Yellow resigns: the knight becomes a wall, Blue (to move) has nothing left
+      assert.deepEqual(ls.fe.result, { winners: [1], reason: 'stuck' }, 'the seat already to move is stuck, and wins');
+    },
+  });
+  playGame(3133, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway cap with an eliminated seat holding the fewest pieces',
+    build: gBuild(['rK@h1', 'rP@e3', 'bK@a8', 'yK@g14', 'yP@e12', 'yP@f12', 'gK@n7', 'gP@m6', 'gP@m5'], { ply: 5, rules: { ...FE.GIVEAWAY_RULES, maxPlies: 6 }, status: ['active', 'frozen', 'active', 'active'] }),
+    prelude: (ls) => {
+      scripted(ls, 0, 'h1', 'h2');
+      assert.deepEqual(ls.fe.result, { winners: [0], reason: 'cap' }, 'Blue holds the fewest pieces but is eliminated: Red wins the cap');
+    },
+  });
+  playGame(3134, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'giveaway hand-built position has no castling rights by default',
+    build: gBuild(['rK@h1', 'rR@d1', 'rR@k1', ...GK.slice(1)], { turn: 0 }),
+    prelude: (ls) => {
+      assert.equal(ls.fe.castling, 0, 'the rights start empty although king and rooks are on their start squares');
+      assert.equal(BE.stateFromPieces(['rK@h1', 'rR@d1', 'rR@k1', ...GK.slice(1)], { rules: BE.GIVEAWAY_RULES }).castling, 0, 'on the mirror too');
+    },
+  });
+
+  // 4. The wire validators, behaviourally: the generated copy and the app source must answer every input identically (section 1 only compares that
+  //    the exports exist). The battery includes the variant field.
+  {
+    const FEWire = unwrap(feWire);
+    const inputs = [
+      undefined, null, 0, 1, NaN, '', 'ffa', 'giveaway', 'Giveaway', ' ffa', 'chess', true, [], {}, ['giveaway'], { variant: 'giveaway' },
+      { timeControl: { initialSeconds: 300, incrementSeconds: 0 } },
+      { timeControl: { initialSeconds: 300, incrementSeconds: 0 }, variant: 'giveaway' },
+      { timeControl: { initialSeconds: 300, incrementSeconds: 0 }, variant: 'ffa', timeControlLabel: 'Blitz' },
+      { timeControl: { initialSeconds: 300, incrementSeconds: 0 }, variant: 'nope' },
+      { timeControl: { initialSeconds: 300, incrementSeconds: 0 }, variant: null },
+      { timeControl: { initialSeconds: 5, incrementSeconds: 0 }, variant: 'giveaway' },
+      { roomId: 'r', from: 'e7', to: 'e8', promotion: 'n' },
+      { roomId: 'r', from: 'e7', to: 'e8', promotion: 'k' },
+    ];
+    let compared = 0;
+    for (const name of ['validateFourVariant', 'validateFourJoinQueue', 'validateFourTimeControl', 'validateFourMovePayload']) {
+      for (const input of inputs) {
+        assert.equal(JSON.stringify(FEWire[name](input)), JSON.stringify(BEWire[name](input)), `${name}(${JSON.stringify(input)}) differs between the app source and the backend copy`);
+        compared++;
+      }
+    }
+    for (const v of [{}, { variant: 'ffa' }, { variant: 'giveaway' }]) assert.equal(FEWire.fourVariantOf(v), BEWire.fourVariantOf(v));
+    assert.deepEqual([...FEWire.FOUR_REASONS], [...BEWire.FOUR_REASONS]);
+    assert.equal(FEWire.validateFourVariant(undefined).value, 'ffa');
+    ok(compared === 4 * inputs.length, `the wire validators (variant, join, time control, move) answer ${compared} inputs identically in the app source and the backend copy; omitted variant = ffa; FOUR_REASONS equal`);
+  }
+
+  // 5. The GIVEAWAY BOT (W2). Whole games played by the bot (chooser = the dispatching one) in lockstep, with the bots compared at 600 / 1200 / 3000 every
+  //    5th ply of the random games above and every 4th of these; then constructed sweeps where the heuristic's constants sit MID-DECISION, so a divergent
+  //    constant on one side flips seeded choices (the same technique as section 4b for the Chess bot).
+  for (let seed = 3201; seed <= 3208; seed++) {
+    playGame(seed, { style: 'bot', maxPlies: 400, chaos: 0, botEvery: 4, initialSeconds: 3600, incrementSeconds: 5, label: 'giveaway bot game', build: (E) => E.initialState({ ...GA(E), maxPlies: 400 }) });
+  }
+  ok(giveawayCoverage.botComparisons >= 400, `8 bot-played Giveaway games in lockstep: identical positions, events and bot choices (${giveawayCoverage.botComparisons} bot decisions compared so far, at ELO 600 / 1200 / 3000, plus the dispatching chooser)`);
+  {
+    // Hand a seat the win or not: a capture of Green's LAST pawn (which also lands where Blue can recapture - exposure) versus a Yellow capture that is safe.
+    const HAND = ['rR@e5', 'rK@h1', 'gP@m5', 'yP@e12', 'yK@d14', 'bR@m9', 'bK@a8'];
+    const build = (E) => E.stateFromPieces(HAND, { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot vs handing the win', build, [400, 800, 1000, 1200, 1500, 2000, 3000], 700, (E, m) => m.to === E.parseSquare('m5'), 'chooseGiveawayFourBotMove');
+    console.log(`      the last-piece capture chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    ok(sweep.decisions === 4900 && sweep.byElo[400] > sweep.byElo[1500] && sweep.byElo[1500] > sweep.byElo[3000], `the Giveaway bot chooses identically in both engines over ${sweep.decisions} decisions, and the weaker the bot the more often it hands the win away (400: ${sweep.byElo[400]}, 1500: ${sweep.byElo[1500]}, 3000: ${sweep.byElo[3000]} of 700)`);
+  }
+  {
+    // The victim term (4 / (1 + pieces the victim has left)): two exposure-free captures; the careful tiers should prefer the richer victim, with noise that keeps it mid-decision.
+    const PIECES = ['rR@e5', 'rK@h1', 'gP@m5', 'gK@n7', 'yP@e12', 'yP@d11', 'yP@f11', 'yP@h11', 'yP@i11', 'yK@d14', 'bK@a8'];
+    const build = (E) => E.stateFromPieces(PIECES, { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot victim term', build, [1000, 1100, 1200, 1400], 1500, (E, m) => m.to === E.parseSquare('e12'), 'chooseGiveawayFourBotMove');
+    console.log(`      the richer victim chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    const rate = sweep.hits / sweep.decisions;
+    ok(sweep.decisions === 6000 && rate > 0.55 && rate < 0.97, `...and the careful bot's victim preference is MID-DECISION (${(100 * rate).toFixed(0)}% take the richer victim: not never, not always), so the constant matters in both directions`);
+  }
+  {
+    // The exposure term: offering a knight to Blue's pawn versus quiet moves.
+    const build = (E) => E.stateFromPieces(['rN@e5', 'rK@h1', 'bP@e6', 'bK@a8', 'yK@d14', 'gK@n7'], { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot exposure', build, [400, 1000, 1500, 3000], 800, (E, m) => m.to === E.parseSquare('f7'), 'chooseGiveawayFourBotMove');
+    console.log(`      the exposing move chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    ok(sweep.decisions === 3200 && sweep.byElo[3000] > sweep.byElo[400], `...identical over ${sweep.decisions} decisions, and the stronger the bot the more it offers the piece (400: ${sweep.byElo[400]}, 3000: ${sweep.byElo[3000]} of 800)`);
+  }
+
+  {
+    // The "do not leave the next seat stuck" term: Red's knight has seven jumps, all equally (un)exposed, but the jump to g5 blocks Blue's lone pawn for good (Blue is
+    // then stuck, which WINS it the game). Careful bots must never play it from their scored branch; greedy ones cannot see it.
+    const build = (E) => E.stateFromPieces(['rN@e4', 'bP@f5', 'yK@d14', 'gK@n7'], { turn: 0, rules: GA(E) });
+    const sweep = botSweep('giveaway bot vs leaving the next seat stuck', build, [400, 600, 1000, 1500, 3000], 600, (E, m) => m.to === E.parseSquare('g5'), 'chooseGiveawayFourBotMove');
+    console.log(`      the blocking jump chosen ${sweep.hits}/${sweep.decisions} (by ELO: ${JSON.stringify(sweep.byElo)})`);
+    ok(sweep.decisions === 3000 && sweep.byElo[3000] < sweep.byElo[400], `...identical over ${sweep.decisions} decisions, and the careful bots avoid the blocking jump (400: ${sweep.byElo[400]}, 3000: ${sweep.byElo[3000]} of 600; 3000 only ever plays it in its 10% random moments)`);
+  }
+
+  const g = giveawayCoverage;
+  const reachedG = {
+    'captures taken': g.captures >= 100,
+    'king captured': g.kingCaptures >= 1,
+    'en passant': g.enPassant >= 1,
+    'promotion to q/r/b/n': Object.values(g.promotions).every((n) => n >= 1),
+    resignation: g.resigns >= 1,
+    'flag fall (timeout)': g.timeouts >= 1,
+    'ends by outOfPieces': g.endings.outOfPieces >= 2,
+    'ends by stuck': g.endings.stuck >= 1,
+    'ends by lastStanding': g.endings.lastStanding >= 1,
+    'ends by cap': g.endings.cap >= 1,
+    'Giveaway bots compared': g.botComparisons >= 400,
+    'no points were ever scored and no seat ever walked': g.deadKingMoves === 0 && g.checkmates === 0 && g.stalemates === 0 && g.frozen === 0,
+  };
+  for (const [name, hit] of Object.entries(reachedG)) ok(hit, `giveaway exercised: ${name}`);
+  console.log(`      ${g.games} Giveaway games, ${g.plies} plies, ${g.moves} moves; coverage ${JSON.stringify(g)}`);
+  tally = coverage;
 }
 
 console.log('\n=== 6. The suite says what it covered - and fails if a rare rule was never reached ===');

@@ -1,0 +1,2 @@
+# Hooks run under sh: a CRLF checkout (core.autocrlf=true on Windows) would break the shebang line.
+.githooks/* text eol=lf

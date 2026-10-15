@@ -1,0 +1,4 @@
+#!/bin/sh
+# Blocks a push when a GitHub Actions workflow would be rejected before any job starts (invalid YAML etc.). See scripts/check-workflows.mjs.
+# Installed by `npm install` (the "prepare" script points core.hooksPath at this folder). Bypass once with: git push --no-verify
+npm run --silent check:workflows || { echo "pre-push: a workflow file is invalid - push blocked." >&2; exit 1; }

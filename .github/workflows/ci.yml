@@ -185,7 +185,7 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:fourplayerHandlers
 
-      - name: Run 4 Player Giveaway server tests (variant plumbing: rooms, lobbies that never mix, handlers, the Giveaway bot over a whole game in-process)
+      - name: "Run 4 Player Giveaway server tests (variant plumbing: rooms, lobbies that never mix, handlers, the Giveaway bot over a whole game in-process)"
         working-directory: chess-app/backend
         run: npm run test:fourplayerGiveaway
 

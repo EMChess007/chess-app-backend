@@ -29,7 +29,9 @@
     "test:fourplayerHandlers": "tsx scripts/test-fourplayer-handlers.mjs",
     "test:fourplayerOnline": "tsx scripts/test-fourplayer-online.mjs",
     "test:fourplayerGiveaway": "tsx scripts/test-fourplayer-giveaway.mjs",
-    "duck-opponent": "tsx scripts/duck-opponent.mjs"
+    "duck-opponent": "tsx scripts/duck-opponent.mjs",
+    "check:workflows": "node scripts/check-workflows.mjs",
+    "prepare": "node scripts/install-hooks.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",
@@ -51,7 +53,8 @@
     "prisma": "^6.3.1",
     "socket.io-client": "^4.8.3",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "yaml": "^2.9.1"
   },
   "allowScripts": {
     "@prisma/client@6.19.3": true,

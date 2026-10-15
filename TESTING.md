@@ -5,6 +5,38 @@ several places, because some of this backend's own test scripts import the front
 directly (see "Why some backend tests import frontend code" below). This document covers what
 exists in **this repo**; see the frontend's own `TESTING.md` for its half of the picture.
 
+## 4 Player Giveaway — roll-up (read this first for the whole feature)
+
+**What it is.** 4-seat Antichess served by the SAME 4 Player machinery as Free-for-All: `FourRoomManager`, the matchmaker and the nine socket handlers. A room carries a `variant` (`'ffa'` | `'giveaway'`); the matchmaker's lobby key is `timeControl|variant`, so the two never mix; the engine mirror
+(generated from the app, now including `giveaway.ts` and `giveawayBot.ts`) dispatches on the rules; the server bot is the heuristic Giveaway bot (`chooseBotMoveFor` is the room manager's default chooser; no Stockfish anywhere). On the wire `variant` is optional on every server payload (absent = Free-for-All, so older clients
+and servers keep working), `four_game_over.scores` are **pieces left** in Giveaway, and a join with an unknown variant is refused (`Unknown game mode.`). Spec: the app repo's `FOUR_PLAYER_GIVEAWAY_SPEC.md`; the app's half is in the frontend's `TESTING.md` (same roll-up at its top).
+
+**Where each workstream is documented**
+
+| | What | Backend | Frontend |
+|---|---|---|---|
+| W1 | engine mirror + wire contract + parity script | §15 | §13 |
+| W2 | the variant through rooms / lobbies / handlers, the server Giveaway bot, `test:fourplayerGiveaway` | §16 | §14 |
+| W3 | what changed here for the screens | §17 | §15 |
+| W4 | real-socket e2e scenarios 10–16, the Giveaway nightly fuzz, CI wiring | §18 | §16 |
+| W5 | this roll-up, the last mutation re-run on the final code | §19 | §17 |
+
+**What runs where.** In CI (`ci.yml`): the mirror drift check, then the in-process scripts (`test:fourplayerSync`, `test:fourplayer`, `Rooms`, `Bots`, `Matchmaking`, `Handlers`, `Giveaway`), then `test:fourplayerOnline` against the live dev server. Nightly (`nightly.yml`): `nightly-fuzz-online.mjs ... 40 40` (4 Player Chess and 4 Player Giveaway, four sockets per game).
+
+**Final numbers (end of W5, all run green).** `sync:fourplayer --check` in sync (10 generated files); sync 114, engine parity 53 (159 random games incl. Giveaway, lockstep with the mirror), rooms 220, bots 160, matchmaking 74, handlers 61, **Giveaway 89**; real-socket e2e 287 (not re-run in W5: no server code changed since W4); `tsc --noEmit` clean.
+**Mutation checks, every workstream's set re-run on the final code** (disposable copies; W4's mutants spawn a mutated server of their own on a private port, stopped by proven pid): **192 planted, 187 killed, 5 equivalent, 0 real survivors** (the table is in the frontend roll-up: W1 72/72, W2 45 + 2, W3 53 + 1, W4 17 + 2).
+
+**The equivalent mutants that live in THIS repo, each justified and marked `EQUIVALENT-MUTANT NOTE` in the source** (the frontend's two are listed in its roll-up):
+- W2 — `queue entries forget their variant`: the lobby, keyed by variant, is what `start` / `restore` read; the entry's own copy is informational.
+- W4 e2e — `the variant is not validated` in the matchmaker: over a socket the handler's shared validator refuses an unknown variant first; the matchmaker's own check is killed in-process by §16's direct join.
+- W4 fuzz — `cap winners are the MOST pieces`: a game never reaches the 1000-ply cap through random play (the cap rule is pinned by the engine tests and the parity script instead).
+Two honest details of the final fuzz run: "last standing at two seats" is only killed at the CI setting of 80 plies, and "the rejoin room state has no variant" was killed by the harness failing without a summary line (the earlier run killed it with 3 named issues).
+
+**What was NOT verified.** The player screens were looked at in a real browser for the first time in W5 (the owner's logged-in tab + a scripted guest socket; frontend §17), except: the D15 refusal screen (needs a server that does not echo the variant), a bot takeover seen in the browser, and the 4 Player Chess online screens. Also open by design: the cap (1000 plies) is not reachable by
+random play, so over sockets it is only pinned by hand-built positions in-process.
+
+**Merge order.** `ci.yml` checks out the same-named branch of the frontend repo: push / merge the frontend's `fourPlayerGiveaway` first (or together with this one). Nothing has been pushed.
+
 ## 4 Player Chess Online — roll-up (read this first for the whole feature)
 
 **What it is.** Online Free-for-All 4 Player Chess. Players queue per time control (live Bullet/Blitz/Rapid only); four humans start a game at once, and with at least two the matchmaker fills the empty seats with Amateur bots after 30 s.
@@ -831,3 +863,9 @@ at all; the nightly fuzz (independent app-engine clients) kills it by `server-AC
 
 **CI / nightly.** `ci.yml`: the existing e2e step (the same script, now holding the Giveaway scenarios; it already starts the dev server with `FOUR_GRACE_MS`); `nightly.yml`: the fuzz invocation gains `40` Giveaway games (about 4 more minutes). The in-process `test:fourplayerGiveaway` step was added in W2.
 The throwaway servers used for these runs (ports 3101-3103) were started by this session and stopped by pid after their process chains were checked; nothing on the usual ports was touched.
+
+## 19. 4 Player Giveaway (server side) — close-out (workstream W5)
+
+No server behaviour or script changed in W5. What was done here: every workstream's mutation set re-run on the final code (results in the roll-up at the top; the raw per-mutant lists are the harness outputs of the session, the equivalent ones are named in the source), the full set of four-player scripts and `sync:fourplayer --check`
+re-run green, and the online browser pass in the app repo (frontend §17) was driven against the owner's own dev backend with a scripted unauthenticated guest socket as the second human. That pass found one app-side wording gap (the online Resign dialog) and nothing on the server.
+The throwaway servers used by the mutation harnesses (ports 3101-3103) were started by the harnesses, owned by pid, and none is left running.

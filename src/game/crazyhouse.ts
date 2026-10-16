@@ -141,6 +141,8 @@ export function legalDropSquares(state: CrazyhouseState, color: PieceColor, piec
   const { checkers, blockSquares } = crazyhouseCheckInfo(kingSquare, color, pieceAt);
   if (checkers === 0) return empties;
   const blocking = new Set(blockSquares);
+  // EQUIVALENT-MUTANT NOTE (Crazyhouse mutation set, "a drop may answer a double check"): crazyhouseCheckInfo already returns an EMPTY blockSquares list unless exactly
+  // one piece gives check, so `empties.filter((sq) => blocking.has(sq))` is [] for a double check too; the explicit `checkers === 1 ?` only spells the rule out.
   return checkers === 1 ? empties.filter((sq) => blocking.has(sq)) : [];
 }
 
@@ -175,6 +177,9 @@ export function applyCrazyhouseMove(state: CrazyhouseState, mover: PieceColor, m
   promoted.delete(move.from);
 
   if (move.captured) {
+    // EQUIVALENT-MUTANT NOTE (Crazyhouse mutation set, "an en passant capture is banked from the wrong square"): the pawn taken en passant is never a promoted piece (the
+    // promoted marks sit on queens / rooks / bishops / knights), so neither its square nor the (empty) target square is ever in `promoted`: the mark lookup and the
+    // delete below cannot tell the two squares apart in any reachable state. The correct square is kept because it is the one that is true.
     const capturedSquare = move.enPassant ? `${move.to[0]}${move.from[1]}` : move.to;
     // A captured promoted piece goes into the reserve as a PAWN.
     const type = (promoted.has(capturedSquare) ? 'p' : move.captured) as ReservePieceType;

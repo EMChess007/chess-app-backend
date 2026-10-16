@@ -343,6 +343,8 @@ export class RoomManager {
     // Crazyhouse: a DROP rides in the same make_move as a move (`drop` set, `to` = the square). Anything that is not one of the
     // five reserve piece types, outside Crazyhouse, or without a target square is refused here before it touches the room; whether
     // the reserve actually holds that piece and the square is legal is decided by RoomChessEngine.drop (the authority).
+    // EQUIVALENT-MUTANT NOTE (Crazyhouse mutation set, "a drop of a junk piece type is accepted"): the RESERVE_PIECE_TYPES test is defence in depth - legalDropSquares
+    // already answers [] for a piece type the reserve has no slot for, so RoomChessEngine.drop refuses it anyway. The `!room.crazyhouse` term is NOT redundant (test-crazyhouse.mjs).
     if (payload.drop !== undefined && (!room.crazyhouse || !RESERVE_PIECE_TYPES.includes(payload.drop) || typeof payload.to !== 'string')) {
       return { ok: false, error: 'Invalid move.' };
     }

@@ -286,6 +286,17 @@ function czRoom({ fen, white = {}, black = {}, promoted = [], crazyhouse = true 
   check(hadEp && ep.getFen().split(' ')[3] === '-', "a drop clears an en passant square left by the opponent's double step");
 }
 
+// A `drop` in the payload is a Crazyhouse-only thing: in any other room it is REFUSED, even when from->to happens to be a legal ordinary move (gap found by the
+// mutation check of the merged Crazyhouse: without the refusal the ordinary move would be played and the drop silently ignored).
+{
+  const classic = czRoom({ crazyhouse: false });
+  const refused = classic.manager.applyMove('W', { roomId: classic.created.roomId, from: 'e2', to: 'e4', drop: 'p' });
+  check(refused.ok === false && refused.error === 'Invalid move.', 'a payload with a drop is refused in a classic room, even when e2-e4 would be a legal ordinary move');
+  check(classic.room().engine.getFen().split(' ')[1] === 'w', '...and nothing was played');
+  const crazy = czRoom();
+  check(crazy.manager.applyMove('W', { roomId: crazy.created.roomId, from: 'e2', to: 'e4', drop: 'p' }).ok === false, 'in a Crazyhouse room the same payload is a DROP request (an empty reserve: refused too)');
+}
+
 // --- 3. Parity with the mobile app --------------------------------------------------------------------
 console.log('\n=== 3. The server and mobile engines agree ===');
 {

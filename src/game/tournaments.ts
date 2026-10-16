@@ -299,6 +299,7 @@ export class TournamentManager {
         duckChess: false, // ...nor Duck Chess
         spellChess: false, // ...nor Spell Chess
         horde: false, // ...nor Horde
+        crazyhouse: false, // ...nor Crazyhouse
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;

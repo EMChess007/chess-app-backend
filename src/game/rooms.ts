@@ -19,6 +19,7 @@ import {
   type SpellChessState,
 } from './spellChess.js';
 import { HORDE_START_FEN, getHordeWinnerFromFen } from './horde.js';
+import { RESERVE_PIECE_TYPES, type CrazyhouseState } from './crazyhouse.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
 import { RoomChessEngine, START_FEN, type AppliedMove, type PieceColor } from './RoomChessEngine.js';
@@ -90,6 +91,9 @@ interface Room {
   spellChess: boolean;
   /** Horde -- see horde.ts. */
   horde: boolean;
+  /** Crazyhouse -- see crazyhouse.ts. The reserves/promoted squares live INSIDE room.engine (it updates them on every move/drop);
+   * this flag only says whether to expose them. */
+  crazyhouse: boolean;
   /** Spell Chess only: charges/cooldowns/pending Freeze+Jump effects — see spellChess.ts. */
   spellState: SpellChessState;
   /** Atomic only: the FEN of the starting position and after every move, for the history-based threefold
@@ -141,6 +145,8 @@ export interface CreateRoomParams {
   spellChess: boolean;
   /** Horde -- see horde.ts: the room starts from HORDE_START_FEN (36 White pawns, no White king). */
   horde: boolean;
+  /** Crazyhouse -- see crazyhouse.ts: an ordinary start position; a turn is a move OR a drop from the capturer's reserve. */
+  crazyhouse: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
    * both players' armies. Every other variant's production caller omits it and still self-generates
    * its own starting position (classical, or a random Chess960 back rank) as before; the regression
@@ -183,6 +189,11 @@ function initialClockMs(timeControl: TimeControl): number {
   // time control) — represented as a very large remaining time rather than 0, and the timeout
   // timer is never scheduled for it (see scheduleTimeout), so it's effectively never checked.
   return timeControl.initialSeconds > 0 ? timeControl.initialSeconds * 1000 : Number.MAX_SAFE_INTEGER;
+}
+
+/** The `[Variant]` tag a finished room's PGN carries (undefined for the standard/Chess960-style modes, which replay as ordinary chess). */
+export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'crazyhouse'>): string | undefined {
+  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.crazyhouse ? 'Crazyhouse' : undefined;
 }
 
 /**
@@ -228,6 +239,7 @@ export class RoomManager {
       duckChess: params.duckChess,
       spellChess: params.spellChess,
       horde: params.horde,
+      crazyhouse: params.crazyhouse,
     });
     const ms = initialClockMs(params.timeControl);
     const whitePlayerToken = randomUUID();
@@ -248,6 +260,7 @@ export class RoomManager {
       duckSquare: null,
       spellChess: params.spellChess,
       horde: params.horde,
+      crazyhouse: params.crazyhouse,
       spellState: initialSpellChessState(),
       atomicFens: [initialFen],
       timeControl: params.timeControl,
@@ -297,6 +310,7 @@ export class RoomManager {
     visibleSquares?: string[];
     duckSquare?: string | null;
     spellState?: SpellChessState;
+    crazyhouse?: CrazyhouseState;
   }> {
     const location = this.socketToRoom.get(socketId);
     if (!location || location.roomId !== payload.roomId) {
@@ -324,6 +338,13 @@ export class RoomManager {
     // king captures and king promotion, so Giveaway applies through movePseudoLegal like Fog of War.
     if (room.giveaway && !isLegalGiveawayMove(room.engine, payload.from, payload.to, payload.promotion)) {
       return { ok: false, error: describeGiveawayRejection(room.engine) };
+    }
+
+    // Crazyhouse: a DROP rides in the same make_move as a move (`drop` set, `to` = the square). Anything that is not one of the
+    // five reserve piece types, outside Crazyhouse, or without a target square is refused here before it touches the room; whether
+    // the reserve actually holds that piece and the square is legal is decided by RoomChessEngine.drop (the authority).
+    if (payload.drop !== undefined && (!room.crazyhouse || !RESERVE_PIECE_TYPES.includes(payload.drop) || typeof payload.to !== 'string')) {
+      return { ok: false, error: 'Invalid move.' };
     }
 
     // A king promotion only exists in Giveaway; chess.js would refuse it for the other variants too, but
@@ -395,9 +416,11 @@ export class RoomManager {
       ? duckTurn.result
       : spellTurn
         ? spellTurn.result
-        : room.fogOfWar || room.giveaway
-          ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
-          : room.engine.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
+        : room.crazyhouse && payload.drop !== undefined
+          ? room.engine.drop(payload.drop, payload.to)
+          : room.fogOfWar || room.giveaway
+            ? room.engine.movePseudoLegal(payload.from, payload.to, payload.promotion)
+            : room.engine.move(payload.from, payload.to, payload.promotion as 'n' | 'b' | 'r' | 'q' | undefined);
     if (!result) {
       return { ok: false, error: 'Invalid move.' };
     }
@@ -470,6 +493,7 @@ export class RoomManager {
         san: result.san,
         ...(room.duckChess ? { duck: result.duck, duckSquare: room.duckSquare } : {}),
         ...(room.spellChess ? { spell: result.spell, spellState: room.spellState } : {}),
+        ...(room.crazyhouse ? { drop: result.drop, crazyhouse: result.crazyhouse } : {}),
         fen: room.engine.getFen(),
         turn: newTurn,
         whiteMs: room.whiteMs,
@@ -597,6 +621,7 @@ export class RoomManager {
       visibleSquares: moverVisibleSquares,
       duckSquare: room.duckChess ? room.duckSquare : undefined,
       spellState: room.spellChess ? room.spellState : undefined,
+      crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
     };
   }
 
@@ -653,7 +678,9 @@ export class RoomManager {
         duckSquare: room.duckChess ? room.duckSquare : undefined,
         isSpellChess: room.spellChess,
         isHorde: room.horde,
+        isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
+        crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.fogOfWar ? redactedMovesFor(room, color) : room.moves,
@@ -818,7 +845,9 @@ export class RoomManager {
         duckSquare: room.duckChess ? room.duckSquare : undefined,
         isSpellChess: room.spellChess,
         isHorde: room.horde,
+        isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
+        crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
         moves: room.moves,
@@ -934,7 +963,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result, room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : undefined);
+    const pgn = buildPgn(room.initialFen, room.moves, result, variantPgnTag(room));
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));

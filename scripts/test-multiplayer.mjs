@@ -1047,6 +1047,20 @@ async function testHordeOnline() {
   check((await turn(black, 'a7', 'a6')).ok === true, '1...a6');
   check((await turn(white, 'd4', 'd5')).ok === true, '2.d5');
 
+  // A spectator and a rejoin must both be told it is a Horde game (a client that misses the flag would build a normal-chess engine and refuse the double step).
+  const watcher = await connect('HWatcher');
+  const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+  check(spectate.ok === true && spectate.state.isHorde === true, 'a spectator is told it is a Horde game');
+  watcher.disconnect();
+  const blackMatch = matchA.color === 'b' ? matchA : matchB;
+  const whiteSeesDrop = waitFor(white.socket, 'opponent_disconnected');
+  black.socket.disconnect();
+  await whiteSeesDrop;
+  const back = await connect('HBlack (reconnected)');
+  const rejoin = await emitAck(back, 'rejoin_game', { roomId, playerToken: blackMatch.playerToken });
+  check(rejoin.ok === true && rejoin.state.isHorde === true, 'a rejoin answer says it is a Horde game');
+  black.socket = back;
+
   const whiteOver = waitFor(white.socket, 'game_over');
   const blackOver = waitFor(black.socket, 'game_over');
   const resign = await emitAck(black.socket, 'resign', { roomId });

@@ -1,2 +1,28 @@
-# Hooks run under sh: a CRLF checkout (core.autocrlf=true on Windows) would break the shebang line.
+# Line endings: every text file is stored with LF in the repository AND checked out with LF on every OS (eol=lf overrides
+# core.autocrlf), so a tool or an editor that writes CRLF can never turn into a whole-file diff / merge conflict again
+# (the spell-chess, horde-chess and crazyhouse branches did exactly that: ~20 existing files stored as CRLF).
+# `text=auto` leaves real binaries alone; the explicit entries below make sure of the types this project ships.
+* text=auto eol=lf
+
+# Hooks run under sh: a CRLF checkout would break the shebang line.
 .githooks/* text eol=lf
+
+# Binary: never normalised, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.wasm binary
+*.nnue binary
+*.bin binary
+*.zip binary
+*.pdf binary

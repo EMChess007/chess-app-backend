@@ -35,7 +35,7 @@ Two honest details of the final fuzz run: "last standing at two seats" is only k
 **What was NOT verified.** The player screens were looked at in a real browser for the first time in W5 (the owner's logged-in tab + a scripted guest socket; frontend §17), except: the D15 refusal screen (needs a server that does not echo the variant), a bot takeover seen in the browser, and the 4 Player Chess online screens. Also open by design: the cap (1000 plies) is not reachable by
 random play, so over sockets it is only pinned by hand-built positions in-process.
 
-**Merge order.** `ci.yml` checks out the same-named branch of the frontend repo: push / merge the frontend's `fourPlayerGiveaway` first (or together with this one). Nothing has been pushed.
+**Merge order.** `ci.yml` checked out the same-named branch of the frontend repo (since §20 only a `paired/<x>` branch does): push / merge the frontend's `fourPlayerGiveaway` first (or together with this one).
 
 ## 4 Player Chess Online — roll-up (read this first for the whole feature)
 
@@ -96,7 +96,7 @@ kills were re-classified (see the frontend roll-up). The older harnesses edited 
 (the matchmaker needs at least two humans), so the check needs a second human (a second account, or a scripted guest socket), and the backend must be started with `FOUR_FILL_MS=3000 FOUR_GRACE_MS=3000`. Also open by design: the 4 Player nightly games never end by the
 engine itself within 80 plies, and `FOUR_ALL_GONE_MS` has no override.
 
-**Merge order.** `ci.yml` checks out the same-named branch of the frontend repo, and the nightly checks out its default branch: merge the frontend's `fourPlayerOnline` first (or together with this one).
+**Merge order.** `ci.yml` checked out the same-named branch of the frontend repo (since §20 only a `paired/<x>` branch does), and the nightly checks out its default branch: merge the frontend's `fourPlayerOnline` first (or together with this one).
 
 ## 1. What runs on every commit/PR (`.github/workflows/ci.yml`)
 
@@ -446,7 +446,7 @@ a 1000-entry move log, an extreme case, is 28 KB.
 hand are only reached by random games — the promotion nudge (+1) is the known example (a +1.1 variant survives; promotion's material gain
 swamps it except against a near-equal capture, which has not been constructed). The stalemate constant is pinned to within +/-1 of -6 in
 both directions, not to the exact digit. The *textual* identity check (`--check`) is what makes a behavioural gap unlikely in the
-first place. (2) CI checks against the same-named EM-Chess branch (`ci.yml` header): push both repos' `fourPlayerOnline` branches together,
+first place. (2) CI checked against the same-named EM-Chess branch (`ci.yml` header; since §20 only for `paired/<x>` branches): push both repos' `fourPlayerOnline` branches together,
 or `--check` runs against a frontend that has no wire file. (3) The generator needs the app checked out at `../` and `typescript` (already a
 devDependency). (4) `index.ts` is the only generated file that is not a copy; it lists the `fourPlayer/` entries in manifest order.
 (5) `parseSquare` in the engine accepts a leading zero (`e02` reads as `e2`); the wire validator therefore requires the canonical spelling
@@ -869,3 +869,21 @@ The throwaway servers used for these runs (ports 3101-3103) were started by this
 No server behaviour or script changed in W5. What was done here: every workstream's mutation set re-run on the final code (results in the roll-up at the top; the raw per-mutant lists are the harness outputs of the session, the equivalent ones are named in the source), the full set of four-player scripts and `sync:fourplayer --check`
 re-run green, and the online browser pass in the app repo (frontend §17) was driven against the owner's own dev backend with a scripted unauthenticated guest socket as the second human. That pass found one app-side wording gap (the online Resign dialog) and nothing on the server.
 The throwaway servers used by the mutation harnesses (ports 3101-3103) were started by the harnesses, owned by pid, and none is left running.
+
+## 20. CI frontend pairing is explicit (`paired/<x>`), never by coincidence of names
+
+**What it does now.** The first step of `ci.yml` ("Pick the frontend ref") decides which EM-Chess ref the backend CI checks out (the backend's tests import the app's engine and the mirror check compares against it). The rule:
+
+| Backend branch (`github.head_ref` / `github.ref_name`) | EM-Chess has the same name? | Frontend ref used |
+|---|---|---|
+| `paired/<x>` | yes | `paired/<x>` |
+| `paired/<x>` | no | the default branch |
+| anything else (`main`, `fourPlayerGiveaway`, `workflow-yaml-precheck`, ...) | yes or no | the default branch (a same-named frontend branch is ignored on purpose) |
+
+The nightly always uses the default branch (unchanged). The frontend CI never checks out the backend.
+
+**Why.** It used to pair on ANY same-named branch. Two unrelated tooling branches that both happened to be called `workflow-yaml-precheck` made PR #6 test against a frontend branch that predated the Giveaway engine, and the mirror check failed for a reason that had nothing to do with the change. Opting in by a name prefix is visible in both repos, behaves the same on `push` and `pull_request` runs (a commit-message or PR-body tag would not: the PR body exists only on one of them), and cannot happen by accident.
+
+**How to use it.** A feature that needs unmerged code in BOTH repos: name the branch `paired/<x>` in both, push the frontend first, then the backend. Merge the frontend PR first and delete its `paired/<x>` branch afterwards: a stale paired branch that predates the code now on the default branch would keep being used for as long as it exists. The step prints its decision and writes it as a notice annotation ("Frontend ref" / "Frontend checkout", visible on the run page and through the API without a login).
+
+**How it was checked.** The step's script, extracted from the workflow, was run locally against a fake `git ls-remote` for eight cases (paired with a twin, paired without one, an unprefixed same-named branch, `main`, a bare `paired/`, a name with a space, `xpaired/x`, and a name containing `$(touch pwned)` to show the name is never executed): all as expected. Then a throwaway pair of branches in both repos ran the real CI (see the commit message of this change for the run ids); the throwaway branches were deleted afterwards.

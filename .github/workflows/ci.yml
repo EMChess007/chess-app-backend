@@ -10,11 +10,15 @@ name: CI
 # layout: chess-app/ (frontend) with chess-app/backend/ (this repo) nested inside it. Since this
 # is a separate GitHub repo, that layout is recreated here by checking out EM-Chess first and this
 # repo into chess-app/backend afterward, rather than at the default location.
-# Which frontend branch? The same-named one if EM-Chess has it, else its default branch. A backend feature
-# branch that depends on frontend code not merged yet (e.g. spell-chess: scripts/test-spell.mjs imports the new
-# src/logic/spellChess.ts) is therefore tested against its own matching frontend branch instead of failing on a
-# default branch that has never heard of the feature. Push the two branches under the same name to pair them;
-# main (and any branch without a frontend twin) is tested against the frontend's default branch, as before.
+# Which frontend branch? Only an EXPLICITLY paired one: a backend branch named `paired/<x>` is tested against
+# EM-Chess's `paired/<x>` if that exists. Everything else (main, any branch without the `paired/` prefix, a
+# `paired/<x>` with no twin) is tested against the frontend's default branch. A backend feature branch that
+# depends on frontend code not merged yet (e.g. spell-chess: scripts/test-spell.mjs imports the new
+# src/logic/spellChess.ts) is therefore tested against its own frontend branch instead of failing on a default
+# branch that has never heard of the feature - but only when both branches opted in by name. Matching by
+# plain name used to pair unrelated branches by coincidence (two tooling branches both called
+# `workflow-yaml-precheck` made a backend run test against a frontend that predated the engine mirror).
+# The step reports its choice as a notice annotation, so the run page and the API show which ref was used.
 # Pushes to ANY branch run CI too (not just main): with branch protection requiring the `test`
 # check on main, a commit can only reach main once that exact commit already has a passing check —
 # so it has to be validated on a branch first.
@@ -49,19 +53,29 @@ jobs:
       PORT: 3000
 
     steps:
-      - name: Pick the frontend ref — the same-named EM-Chess branch if there is one, else its default branch
+      - name: Pick the frontend ref — an EM-Chess branch only when this branch is paired/X and EM-Chess has paired/X, else its default branch
         id: frontend_ref
         env:
           # Passed through the environment, never interpolated into the script: a branch name is untrusted input.
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          if git ls-remote --exit-code --heads https://github.com/EMChess007/EM-Chess.git "refs/heads/$BRANCH" > /dev/null 2>&1; then
-            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
-            echo "Using EM-Chess branch '$BRANCH'"
-          else
-            echo "ref=" >> "$GITHUB_OUTPUT"
-            echo "EM-Chess has no branch '$BRANCH' — using its default branch"
-          fi
+          ref=""
+          case "$BRANCH" in
+            paired/?*)
+              if git ls-remote --exit-code --heads https://github.com/EMChess007/EM-Chess.git "refs/heads/$BRANCH" > /dev/null 2>&1; then
+                ref="$BRANCH"
+                msg="Paired: using EM-Chess branch '$BRANCH' (this branch opted in with the paired/ prefix and EM-Chess has the same name)."
+              else
+                msg="'$BRANCH' asks to be paired but EM-Chess has no branch '$BRANCH' - using EM-Chess's default branch."
+              fi
+              ;;
+            *)
+              msg="'$BRANCH' is not a paired/ branch - using EM-Chess's default branch (a same-named EM-Chess branch, if any, is ignored on purpose)."
+              ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "$msg"
+          echo "::notice title=Frontend ref::$msg"
 
       - name: Checkout frontend (EM-Chess) — several test scripts import its chess logic directly
         uses: actions/checkout@v4
@@ -69,6 +83,9 @@ jobs:
           repository: EMChess007/EM-Chess
           ref: ${{ steps.frontend_ref.outputs.ref }}
           path: chess-app
+
+      - name: Report which frontend commit was checked out
+        run: echo "::notice title=Frontend checkout::EM-Chess $(git -C chess-app rev-parse --abbrev-ref HEAD) at $(git -C chess-app rev-parse --short HEAD)"
 
       - name: Checkout backend (this repo) into chess-app/backend — matches local dev layout
         uses: actions/checkout@v4
@@ -99,8 +116,8 @@ jobs:
 
       # The server's 4 Player Chess engine and wire contract are GENERATED from the app's source (scripts/sync-fourplayer.mjs) and
       # committed. This fails the build if the committed copy is stale, hand-edited, missing a file or has a stray one - so it runs
-      # right after the type-check, before anything slower. Like every cross-repo test here it checks against the same-named
-      # EM-Chess branch (see the frontend-ref step above): push both repos' feature branches under the same name.
+      # right after the type-check, before anything slower. Like every cross-repo test here it checks against the frontend ref
+      # chosen by the frontend-ref step above: name both repos' feature branches `paired/<x>` to test them together.
       - name: Check the 4 Player engine mirror is in sync with the app source
         working-directory: chess-app/backend
         run: npm run sync:fourplayer -- --check

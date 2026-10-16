@@ -156,6 +156,19 @@ function hordeRoom(initialFen) {
 check(hordeFirstRankDoubleStep('e1', () => false) === 'e3' && hordeFirstRankDoubleStep('e2', () => false) === null, 'the shared double-step rule: rank 1 only (rank 2 is chess.js\'s own)');
 check(getHordeWinnerFromFen('4k3/8/8/8/8/8/8/8 w - - 0 1') === 'b' && getHordeWinnerFromFen(HORDE_START_FEN) === null, 'the shared winner rule: Black wins exactly when White has no pieces');
 
+// --- 2b. The room engine on its own (gaps found by the mutation check of the merged Horde) ----------------------------------------------------
+console.log('\n=== 2b. RoomChessEngine: game over, the fifty-move rule, the double step is a pawn rule ===');
+{
+  const horde = (fen) => new RoomChessEngine(fen, { horde: true });
+  check(horde('4k3/8/8/8/8/8/8/8 b - - 0 1').isGameOver() === true, 'with Black to move and no White piece left the game is over (chess.js alone would say "playing")');
+  check(horde('4k3/8/8/8/8/8/P7/8 b - - 0 1').isGameOver() === false, '...but not while White still has a piece');
+  check(horde('4k3/8/8/8/8/8/P7/8 w - - 100 80').getStatus() === 'draw', 'the fifty-move rule still draws a Horde game (halfmove clock 100)');
+  check(horde('4k3/8/8/8/8/8/P7/8 w - - 99 80').getStatus() === 'playing', '...and not one move earlier (clock 99)');
+  check(horde('4k3/8/8/8/8/8/8/1N6 w - - 0 1').move('b1', 'b3') === null, 'a White KNIGHT on rank 1 cannot "double step" (the rule belongs to pawns)');
+  check(horde('4k3/8/8/8/8/8/8/1P6 w - - 0 1').move('b1', 'b3') !== null, '...while a pawn on b1 can (control)');
+  check(horde('4k3/8/8/8/8/8/8/p7 w - - 0 1').move('a1', 'a3') === null, 'and a BLACK pawn has no such step even when it is (oddly) White to move: the rule is White-only');
+}
+
 // --- 3. Parity with the mobile app --------------------------------------------------------------------
 console.log('\n=== 3. The server and mobile engines agree ===');
 {

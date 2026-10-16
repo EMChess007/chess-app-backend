@@ -71,16 +71,17 @@ interface PairableEntry {
   isAtomic: boolean;
   isDuckChess: boolean;
   isSpellChess: boolean;
+  isHorde: boolean;
 }
 
-/** Giveaway, Atomic, Duck Chess and Spell Chess cannot be combined with any other variant (see game/giveaway.ts,
- * atomic.ts, duckChess.ts, spellChess.ts) — a client that sends one of them together with another flag is
+/** Giveaway, Atomic, Duck Chess, Spell Chess and Horde cannot be combined with any other variant (see game/giveaway.ts,
+ * atomic.ts, duckChess.ts, spellChess.ts, horde.ts) — a client that sends one of them together with another flag is
  * misbehaving, so reject it instead of silently picking one. */
-function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown; isDuckChess?: unknown; isSpellChess?: unknown }): string | null {
-  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic, flags.isDuckChess, flags.isSpellChess];
-  if (!flags.isGiveaway && !flags.isAtomic && !flags.isDuckChess && !flags.isSpellChess) return null;
+function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown; isDuckChess?: unknown; isSpellChess?: unknown; isHorde?: unknown }): string | null {
+  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic, flags.isDuckChess, flags.isSpellChess, flags.isHorde];
+  if (!flags.isGiveaway && !flags.isAtomic && !flags.isDuckChess && !flags.isSpellChess && !flags.isHorde) return null;
   if (all.filter(Boolean).length < 2) return null;
-  return `${flags.isGiveaway ? 'Giveaway' : flags.isAtomic ? 'Atomic' : flags.isDuckChess ? 'Duck Chess' : 'Spell Chess'} cannot be combined with another variant.`;
+  return `${flags.isGiveaway ? 'Giveaway' : flags.isAtomic ? 'Atomic' : flags.isDuckChess ? 'Duck Chess' : flags.isSpellChess ? 'Spell Chess' : 'Horde'} cannot be combined with another variant.`;
 }
 
 function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
@@ -126,6 +127,7 @@ export function registerSocketHandlers(io: Server): void {
       atomic: a.isAtomic,
       duckChess: a.isDuckChess,
       spellChess: a.isSpellChess,
+      horde: a.isHorde,
     });
 
     const basePayload = {
@@ -140,6 +142,7 @@ export function registerSocketHandlers(io: Server): void {
       isAtomic: a.isAtomic,
       isDuckChess: a.isDuckChess,
       isSpellChess: a.isSpellChess,
+      isHorde: a.isHorde,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
     };
@@ -197,6 +200,7 @@ export function registerSocketHandlers(io: Server): void {
         isAtomic: Boolean(payload.isAtomic),
         isDuckChess: Boolean(payload.isDuckChess),
         isSpellChess: Boolean(payload.isSpellChess),
+        isHorde: Boolean(payload.isHorde),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
       };
@@ -242,6 +246,7 @@ export function registerSocketHandlers(io: Server): void {
         isAtomic: Boolean(payload.isAtomic),
         isDuckChess: Boolean(payload.isDuckChess),
         isSpellChess: Boolean(payload.isSpellChess),
+        isHorde: Boolean(payload.isHorde),
       });
       ack?.({ ok: true, code: challenge.code });
     });
@@ -284,6 +289,7 @@ export function registerSocketHandlers(io: Server): void {
         isAtomic: challenge.isAtomic,
         isDuckChess: challenge.isDuckChess,
         isSpellChess: challenge.isSpellChess,
+        isHorde: challenge.isHorde,
       };
       const joinerEntry = {
         socketId: socket.id,
@@ -299,6 +305,7 @@ export function registerSocketHandlers(io: Server): void {
         isAtomic: challenge.isAtomic,
         isDuckChess: challenge.isDuckChess,
         isSpellChess: challenge.isSpellChess,
+        isHorde: challenge.isHorde,
       };
       // Same "no room until both blind armies are in" branch as join_queue above.
       if (challenge.isSetupChess) {

@@ -955,3 +955,7 @@ illegal-move probes, checking every `game_over` against the mobile verdict).
 **Known limits**
 - The socket test plays only a short game; the endings (mate, capture-everything, stalemate) are covered through
   `RoomManager` with a stub socket server in `test-horde.mjs` and by the nightly online fuzz, not by a scripted socket game.
+
+**Mutation check on the merged code (CHECKLIST §2; on a copy; each mutant runs `test-horde.mjs` and then the real-socket e2e against a server SPAWNED from the mutated copy).** 12 server bugs: a Horde room starting from the standard position, Black not winning when White has no pieces, the `isHorde` flag missing from the rejoin and from the spectate answer,
+Horde combinable with another variant, Horde seekers paired with classic seekers, the first-rank double step not applied, an empty horde not game over, insufficient material drawing a Horde game, the fifty-move rule dropped, and the double step working for any piece or for Black. **First pass 6 killed, 6 survived — all real gaps** (no engine-level test of the empty horde with Black to move,
+of the fifty-move rule or of the pawn-only / White-only double step, and nothing read `isHorde` in the rejoin and spectate answers). Closed by section 2b of `test-horde.mjs` and the Horde e2e scenario: **12/12 killed (8 by the in-process script, 4 by the e2e), 0 equivalents.**

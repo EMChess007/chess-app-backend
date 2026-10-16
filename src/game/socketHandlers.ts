@@ -285,6 +285,8 @@ export function registerSocketHandlers(io: Server): void {
         isDuckChess: challenge.isDuckChess,
         isSpellChess: challenge.isSpellChess,
       };
+      // EQUIVALENT-MUTANT NOTE (Spell Chess mutation set, "the challenge joiner entry forgets the variant"): pairAndCreateRoom reads every variant flag from the
+      // FIRST entry only (the challenge creator's, `a`); the joiner's flags are carried for symmetry only and cannot change a room.
       const joinerEntry = {
         socketId: socket.id,
         userId,

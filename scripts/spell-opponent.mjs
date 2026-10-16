@@ -12,8 +12,8 @@
  *   gets exercised), --draws=accept|decline (default decline), --once (stop after one game instead of starting another).
  * BACKEND_URL overrides the default http://localhost:3000.
  *
- * From the app: in challenge mode, Challenge a Friend -> Join by Code -> enter the printed code (no dev flag needed). In queue mode, Play Online ->
- * Spell Chess (needs the Spell Chess online dev flag) -> the SAME time control as --time.
+ * From the app: in challenge mode, Challenge a Friend -> Join by Code -> enter the printed code. In queue mode, Quick Match -> the Spell Chess variant ->
+ * the SAME time control as --time.
  *
  * Every turn is assembled with the mobile app's OWN Spell Chess engine, exactly like its Bot screen does: an optional cast (chooseSpellChessBotCast, plus
  * random extra casts), the turn context (spellTurnContext: frozen squares read BEFORE the cast, jump square AFTER it, the Freeze zone that may waive check),

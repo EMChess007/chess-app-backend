@@ -1101,6 +1101,20 @@ async function testSpellChessOnline() {
   black.socket = back;
   check((await turn(black, 'b8', 'c6')).ok === true, 'Black plays on after the rejoin: 3...Nc6');
 
+  // Jump is on cooldown now (three of White's own turns), whatever else is true - the same refusal Freeze had above.
+  const jumpAgain = await turn(white, 'f1', 'c4', { type: 'jump', square: 'e5' });
+  check(jumpAgain.ok === false && /Jump is not available/.test(jumpAgain.error), 'Jump is on cooldown right after the cast (a second Jump is refused)');
+
+  // A spectator joining mid-game gets the spell state and the casts too.
+  const watcher = await connect('Watcher');
+  const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+  check(spectate.ok === true && spectate.state.isSpellChess === true, 'a spectator is told it is a Spell Chess game');
+  check(
+    spectate.state.spellState && spectate.state.spellState.w.charges.jump === 1 && spectate.state.moves[0].spell && spectate.state.moves[0].spell.type === 'freeze',
+    "...with the spell state (White: Jump 1) and the casts in the move list"
+  );
+  watcher.disconnect();
+
   // The king-capture ending (a Jump over a blocker) is covered in-process by test-spell.mjs; over a socket it needs a long forced line, so the
   // game here ends by resignation.
   const whiteOver = waitFor(white.socket, 'game_over');

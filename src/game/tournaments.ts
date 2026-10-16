@@ -297,6 +297,7 @@ export class TournamentManager {
         giveaway: false, // ...nor Giveaway (1v1 Online only)
         atomic: false, // ...nor Atomic
         duckChess: false, // ...nor Duck Chess
+        spellChess: false, // ...nor Spell Chess
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;

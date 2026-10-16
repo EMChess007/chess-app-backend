@@ -986,6 +986,171 @@ async function testDuckChessOnline() {
   bob.disconnect();
 }
 
+async function testSpellChessOnline() {
+  console.log('\n=== Spell Chess: matchmaking, a turn is an optional cast + a move, Freeze/Jump rules, cooldown, rejoin restores the spell state ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  // Isolation: a Spell Chess seeker is never paired with a classic seeker, and Spell Chess cannot be combined with another variant.
+  const spellSeeker = await connect('Spela');
+  const classicSeeker = await connect('Cass');
+  check((await emitAck(spellSeeker, 'join_queue', { timeControl, isSpellChess: true })).ok === true, 'Spela queues for Spell Chess');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Cass queues for a classic game');
+  let wronglyPaired = false;
+  spellSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Spell Chess seeker and a classic seeker are never paired with each other');
+  await emitAck(spellSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  spellSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused4');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isSpellChess: true, isDuckChess: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Spell Chess + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isSpellChess: true, isGiveaway: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  // A challenge carries the variant to the joiner.
+  const host = await connect('Hosty');
+  const guest = await connect('Guesty');
+  const created = await emitAck(host, 'create_challenge', { timeControl, isSpellChess: true });
+  check(created.ok === true && typeof created.code === 'string', 'a Spell Chess challenge is created');
+  const hostMatch = waitFor(host, 'match_found'); // BEFORE the emit that provokes it — see waitFor's doc comment
+  hostMatch.catch(() => {});
+  const guestMatch = waitFor(guest, 'match_found');
+  guestMatch.catch(() => {});
+  check((await emitAck(guest, 'join_challenge', { code: created.code })).ok === true, 'the guest joins by code');
+  const [hm, gm] = await Promise.all([hostMatch, guestMatch]);
+  check(hm.isSpellChess === true && gm.isSpellChess === true, 'both sides of a challenge are told isSpellChess: true');
+  host.disconnect();
+  guest.disconnect();
+
+  // The real game.
+  const alice = await connect('Spellbound');
+  const bob = await connect('Wizard');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isSpellChess: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isSpellChess: true });
+      return matchFound;
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Spell Chess seekers are paired');
+  check(matchA.isSpellChess === true && matchB.isSpellChess === true && matchA.isDuckChess === false, 'match_found tells both clients isSpellChess: true');
+
+  const white = matchA.color === 'w' ? { socket: alice, match: matchA } : { socket: bob, match: matchB };
+  const black = matchA.color === 'b' ? { socket: alice, match: matchA } : { socket: bob, match: matchB };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to, spell) => emitAck(who.socket, 'make_move', { roomId, from, to, ...(spell ? { spell } : {}) });
+
+  // Bad casts refuse the WHOLE turn (the move is not played).
+  const bogus = await turn(white, 'e2', 'e4', { type: 'bogus' });
+  check(bogus.ok === false && bogus.error === 'Invalid spell cast.', 'an unknown spell type is refused');
+  const jumpEmpty = await turn(white, 'e2', 'e4', { type: 'jump', square: 'e5' });
+  check(jumpEmpty.ok === false && /Jump is not available/.test(jumpEmpty.error), 'Jump on an EMPTY square is refused');
+  const noCenter = await turn(white, 'e2', 'e4', { type: 'freeze' });
+  check(noCenter.ok === false && /Freeze is not available/.test(noCenter.error), 'Freeze with no center is refused');
+
+  // 1.e4 casting Freeze on e7: the 3x3 zone d6-f8 holds Black's d7 e7 f7 pawns, queen, king and bishop.
+  const blackSees = waitFor(black.socket, 'opponent_move');
+  const first = await turn(white, 'e2', 'e4', { type: 'freeze', center: 'e7' });
+  check(first.ok === true && first.spellState && first.spellState.w.charges.freeze === 4, '1.e4 with a Freeze on e7 is accepted and spends one charge (5 -> 4)');
+  const seen = await blackSees;
+  check(seen.spell && seen.spell.type === 'freeze' && seen.spell.center === 'e7' && seen.spell.squares.includes('d8') && seen.spell.squares.includes('f6'), 'Black receives the move WITH the cast and its 3x3 zone');
+  check(seen.spellState && seen.spellState.w.charges.freeze === 4, '...and the whole spell state (charges, cooldowns, pending effects)');
+
+  const frozenPawn = await turn(black, 'e7', 'e5');
+  check(frozenPawn.ok === false && frozenPawn.error === 'Invalid move.', 'Black cannot move the frozen e7 pawn');
+  check((await turn(black, 'd7', 'd5')).ok === false, '...nor the frozen d7 pawn');
+  check((await turn(black, 'f8', 'c5')).ok === false, '...nor the frozen f8 bishop');
+  check((await turn(black, 'a7', 'a6')).ok === true, '...but a piece outside the zone moves: 1...a6');
+
+  // The freeze lasted one reply: after Black has moved, the same pawn is free again.
+  check((await turn(white, 'g1', 'f3')).ok === true, '2.Nf3');
+  check((await turn(black, 'e7', 'e5')).ok === true, '2...e5: the Freeze expired after the one reply it covered');
+
+  // Cooldown: a spell cannot be recast until three of the caster's own turns have passed.
+  const recast = await turn(white, 'b1', 'c3', { type: 'freeze', center: 'a7' });
+  check(recast.ok === false && /Freeze is not available/.test(recast.error), 'Freeze is on cooldown right after the cast');
+
+  // Jump is a different spell with its own charges and cooldown: casting it spends one of its 2 charges.
+  const jumped = await turn(white, 'b1', 'c3', { type: 'jump', square: 'e5' });
+  check(jumped.ok === true && jumped.spellState.w.charges.jump === 1 && jumped.spellState.w.charges.freeze === 4, '3.Nc3 with a Jump on e5 spends a Jump charge (2 -> 1) and leaves Freeze alone');
+
+  // Rejoin: Black drops, comes back with the token, and gets the spell state and the casts in the move list.
+  const whiteSeesDrop = waitFor(white.socket, 'opponent_disconnected');
+  black.socket.disconnect();
+  await whiteSeesDrop;
+  const back = await connect('Wizard (reconnected)');
+  const rejoin = await emitAck(back, 'rejoin_game', { roomId, playerToken: black.match.playerToken });
+  check(rejoin.ok === true, 'rejoin_game with the right token succeeds in a Spell Chess room');
+  check(rejoin.state.spellState && rejoin.state.spellState.w.charges.jump === 1 && rejoin.state.spellState.w.charges.freeze === 4, 'the rejoin answer restores the spell state (White: Freeze 4, Jump 1)');
+  check(
+    Array.isArray(rejoin.state.moves) && rejoin.state.moves[0].spell && rejoin.state.moves[0].spell.type === 'freeze' && rejoin.state.moves[4].spell && rejoin.state.moves[4].spell.type === 'jump',
+    'the rebuilt move list carries both casts (ply 1 Freeze, ply 5 Jump)'
+  );
+  black.socket = back;
+  check((await turn(black, 'b8', 'c6')).ok === true, 'Black plays on after the rejoin: 3...Nc6');
+
+  // The king-capture ending (a Jump over a blocker) is covered in-process by test-spell.mjs; over a socket it needs a long forced line, so the
+  // game here ends by resignation.
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  await emitAck(black.socket, 'resign', { roomId });
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'resignation' && wr.winner === 'w' && br.reason === 'resignation', 'the game ends normally (resignation) and both sides are told');
+  alice.disconnect();
+  bob.disconnect();
+  back.disconnect();
+
+  // The Spell-only ending, over real sockets: a Jump over a blocker captures the KING outright (reason "spellChess"). 1.e4 a6 2.Qh5 a5 3.Qxe8 with a Jump on f7:
+  // the queen's h5-e8 diagonal is blocked ONLY by the f7 pawn, and the king on e8 is the first piece beyond it.
+  const p1 = await connect('Jumpy');
+  const p2 = await connect('Capy');
+  const [m1, m2] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(p1, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(p1, 'join_queue', { timeControl, isSpellChess: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(p2, 'match_found');
+      matchFound.catch(() => {});
+      await emitAck(p2, 'join_queue', { timeControl, isSpellChess: true });
+      return matchFound;
+    })(),
+  ]);
+  const w2 = m1.color === 'w' ? { socket: p1 } : { socket: p2 };
+  const b2 = m1.color === 'b' ? { socket: p1 } : { socket: p2 };
+  const room2 = m1.roomId;
+  const play = (who, from, to, spell) => emitAck(who.socket, 'make_move', { roomId: room2, from, to, ...(spell ? { spell } : {}) });
+  check((await play(w2, 'e2', 'e4')).ok === true && (await play(b2, 'a7', 'a6')).ok === true, '1.e4 a6');
+  check((await play(w2, 'd1', 'h5')).ok === true && (await play(b2, 'a6', 'a5')).ok === true, '2.Qh5 a5 (no check: the f7 pawn still blocks the diagonal)');
+  const noJump = await play(w2, 'h5', 'e8');
+  check(noJump.ok === false && noJump.error === 'Invalid move.', 'Qxe8 WITHOUT a Jump is refused: the king is not reachable through f7');
+  const wrongJump = await play(w2, 'h5', 'e8', { type: 'jump', square: 'e7' });
+  check(wrongJump.ok === false && wrongJump.error === 'Invalid move.', '...and a Jump on e7 (not between the queen and the king) does not help');
+  const over1 = waitFor(w2.socket, 'game_over');
+  const over2 = waitFor(b2.socket, 'game_over');
+  const kill = await play(w2, 'h5', 'e8', { type: 'jump', square: 'f7' });
+  check(kill.ok === true && kill.san.startsWith('Qxe8'), '3.Qxe8 with a Jump over f7 captures the king');
+  const [o1, o2] = await Promise.all([over1, over2]);
+  check(o1.reason === 'spellChess' && o1.winner === 'w' && o2.reason === 'spellChess' && o2.winner === 'w', 'both players get game_over {reason: spellChess, winner: white}');
+  p1.disconnect();
+  p2.disconnect();
+}
+
 async function testNoTimeLimitOnline() {
   console.log('\n=== No time limit: live-only game with no clock ===');
   const unlimited = { initialSeconds: 0, incrementSeconds: 0 };
@@ -1162,6 +1327,7 @@ async function main() {
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
   await testDuckChessOnline();
+  await testSpellChessOnline();
   await testNoTimeLimitOnline();
   await testRejoinAfterGameEnded();
   await testPairingSurvivesABusyClient();

@@ -31,6 +31,7 @@
     "test:fourplayerOnline": "tsx scripts/test-fourplayer-online.mjs",
     "test:fourplayerGiveaway": "tsx scripts/test-fourplayer-giveaway.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs",
+    "spell-opponent": "tsx scripts/spell-opponent.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },

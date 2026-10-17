@@ -113,6 +113,7 @@ export class SetupChessPairingManager {
       atomic: false, // ...nor Atomic
       duckChess: false, // ...nor Duck Chess
       spellChess: false, // ...nor Spell Chess
+      horde: false, // ...nor Horde
       initialFen: fen,
     });
 
@@ -128,6 +129,7 @@ export class SetupChessPairingManager {
       isAtomic: false,
       isDuckChess: false,
       isSpellChess: false,
+      isHorde: false,
       fen: created.fen,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,

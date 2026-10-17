@@ -36,8 +36,8 @@
  *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
  *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
  *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames]
- * (the others default to the same count as fogGames; the last defaults to fourPlayerGames.) BACKEND_URL env var overrides the
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames]
+ * (the others default to the same count as fogGames; fourPlayerGiveawayGames defaults to fourPlayerGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
 import { writeFileSync } from 'node:fs';
@@ -54,6 +54,7 @@ import { BISHOP, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, deserialize } from '../../
 import { legalMoves, promotionOf, pseudoMoves } from '../../src/logic/fourPlayer/moves.ts';
 import { piecesLeft } from '../../src/logic/fourPlayer/giveaway.ts';
 const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf, pseudoMoves, piecesLeft, GIVEAWAY_RULES };
+import { HORDE_START_FEN, getHordeMoves, getHordeWinnerFromFen } from '../../src/logic/horde.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const GAMES = Number(process.argv[2] ?? 100);
@@ -63,6 +64,7 @@ const ATOMIC_GAMES = Number(process.argv[5] ?? GAMES);
 const DUCK_GAMES = Number(process.argv[6] ?? GAMES);
 const FOUR_GAMES = Number(process.argv[7] ?? GAMES);
 const FOUR_GIVEAWAY_GAMES = Number(process.argv[8] ?? FOUR_GAMES);
+const HORDE_GAMES = Number(process.argv[9] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -910,8 +912,126 @@ function until(test, ms = 4000) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * One real Horde game through the server: two socket clients, every move chosen from the mobile app's own getHordeMoves
+ * (including the rank-1 double step) and MUST be accepted with exactly the position the mobile engine computes; a fraction of
+ * turns first submit a move the mobile engine does not offer, which the server MUST refuse. Every game_over must match the
+ * mobile app's verdict: White mates (checkmate/w), Black takes every White piece (horde/b — never the 'stalemate' chess.js
+ * reports for it), a stalemate or fifty-move draw (stalemate|draw/null).
+ */
+async function playHordeGame(gameIndex) {
+  const alice = await connect(`HAlice${gameIndex}`);
+  const bob = await connect(`HBob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isHorde: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isHorde: true });
+      return matchFound;
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: false, blackWins: 0 };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  if (matchA.isHorde !== true) issues.push({ kind: 'match-found-missing-isHorde', game: gameIndex });
+  if (fen !== HORDE_START_FEN) issues.push({ kind: 'horde-start-position-differs', game: gameIndex, fen });
+
+  const squares = [];
+  for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) squares.push(`${f}${r}`);
+
+  for (; stats.plies < MAX_PLIES * 2; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = new ChessEngine(fen, { horde: true });
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const legal = getHordeMoves(engine);
+    if (legal.length === 0) break;
+
+    // Server authority: a move the mobile engine does not offer must bounce.
+    if (Math.random() < 0.25) {
+      const offered = new Set(legal.map((m) => `${m.from}${m.to}`));
+      const from = squares[randInt(64)];
+      const to = squares[randInt(64)];
+      if (from !== to && !offered.has(`${from}${to}`)) {
+        stats.illegalProbes++;
+        const refusal = await emitAck(mover, 'make_move', { roomId, from, to, promotion: 'q' });
+        if (refusal.ok) {
+          issues.push({ kind: 'server-ACCEPTED-illegal-horde-move', game: gameIndex, ply: stats.plies, fen, move: { from, to } });
+          break;
+        }
+      }
+    }
+
+    const pick = legal[randInt(legal.length)];
+    const after = new ChessEngine(fen, { horde: true });
+    after.move(pick.from, pick.to, pick.promotion);
+    const opponent = players[turn === 'w' ? 'b' : 'w'];
+    const opponentMove = waitFor(opponent, 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-horde-move', game: gameIndex, ply: stats.plies, fen, pick, error: ack.error });
+      break;
+    }
+    if (ack.fen !== after.getFen()) {
+      issues.push({ kind: 'horde-position-differs-from-mobile', game: gameIndex, ply: stats.plies, fen, pick, server: ack.fen, mobile: after.getFen() });
+      break;
+    }
+    fen = ack.fen;
+    const pushed = await opponentMove;
+    if (pushed && pushed.fen !== ack.fen) {
+      issues.push({ kind: 'opponent-state-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: ack.fen, pushed: pushed.fen });
+      break;
+    }
+
+    const winner = getHordeWinnerFromFen(fen);
+    const status = after.getStatus();
+    const expected = winner
+      ? { reason: 'horde', winner }
+      : status === 'checkmate'
+        ? { reason: 'checkmate', winner: turn }
+        : status === 'stalemate' || status === 'draw'
+          ? { reason: status, winner: null }
+          : null;
+    if (expected) {
+      stats.finished = true;
+      if (winner) stats.blackWins++;
+      await new Promise((r) => setTimeout(r, 150));
+      if (!gameOverPayload || gameOverPayload.reason !== expected.reason || gameOverPayload.winner !== expected.winner) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile', game: gameIndex, ply: stats.plies, fen, expected, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
 async function main() {
-  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess + ${FOUR_GAMES} 4 Player Chess games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
+  console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess + ${FOUR_GAMES} 4 Player Chess + ${FOUR_GIVEAWAY_GAMES} 4 Player Giveaway + ${HORDE_GAMES} Horde games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
@@ -1023,6 +1143,24 @@ async function main() {
   }
   allIssues.push(...fourGaStats.issues.map((i) => ({ ...i, variant: 'fourPlayerGiveaway' })));
 
+  // --- Horde ---
+  const hordeStats = { games: 0, plies: 0, probes: 0, finished: 0, blackWins: 0, issues: [] };
+  for (let g = 0; g < HORDE_GAMES; g++) {
+    try {
+      const { stats, issues } = await playHordeGame(g);
+      hordeStats.games++;
+      hordeStats.plies += stats.plies;
+      hordeStats.probes += stats.illegalProbes;
+      if (stats.finished) hordeStats.finished++;
+      hordeStats.blackWins += stats.blackWins;
+      hordeStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${HORDE_GAMES} Horde games played`);
+    } catch (err) {
+      hordeStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...hordeStats.issues.map((i) => ({ ...i, variant: 'horde' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
@@ -1033,10 +1171,11 @@ async function main() {
   console.log(`Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture).`);
   console.log(`4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games, ${fourStats.plies} plies, ${fourStats.probes} illegal/out-of-turn moves correctly refused, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself).`);
   console.log(`4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games, ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal/out-of-turn/quiet-while-capture-mandatory moves correctly refused, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself).`);
+  console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess + 4 Player Giveaway)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess + 4 Player Giveaway + Horde)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -1049,6 +1188,7 @@ async function main() {
     `- Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused by the server, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture)`,
     `- 4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games (four real sockets each), ${fourStats.plies} plies, ${fourStats.probes} illegal / out-of-turn moves correctly refused by the server, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself); every seq checked for byte-identical snapshots across all four sockets`,
     `- 4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games (four real sockets each), ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal / out-of-turn / quiet-while-a-capture-is-mandatory moves correctly refused by the server, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, pieces-left scores) checked against the app engine`,
+    `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];

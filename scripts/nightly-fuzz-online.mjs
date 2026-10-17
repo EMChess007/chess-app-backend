@@ -10,7 +10,8 @@
  * Variants covered (each section reports separately):
  *  - Fog of War: pseudo-legal moves from each side's own redacted fen. STRICT: the only refusal ever accepted is a quiet pawn push into a
  *    fogged piece (the blind-move mechanic). A refused CASTLE is its own failing kind (server-refused-legal-fow-castle): castling has no check
- *    conditions in Fog of War, and half the available castles are picked on purpose so they are exercised.
+ *    conditions in Fog of War, and half the available castles are picked on purpose so they are exercised. Second strict rule: no player
+ *    is ever told about a check, so no ack / opponent_move may carry a '+'/'#' notation (kind fow-check-notation-leak).
  *  - Duck Chess: a turn is a move AND the duck's new square. Every turn comes from the mobile app's own duck-aware
  *    move generation and legal duck squares and MUST be accepted; a fraction of turns first submit something the
  *    server MUST refuse — a move the duck blocks (landing on it / passing over it), or a legal move with a bad duck
@@ -161,6 +162,8 @@ async function playOneGame(gameIndex) {
   let plies = 0;
   let castlesAttempted = 0;
   let castlesPlayed = 0;
+  let checkNotationLeaks = 0;
+  let notationsSeen = 0;
   let gameOver = false;
   alice.once('game_over', () => {
     gameOver = true;
@@ -218,6 +221,21 @@ async function playOneGame(gameIndex) {
     fenByColor[turn] = ack.fen;
     const opponentPayload = await opponentMovePromise;
     if (opponentPayload) fenByColor[opponentColor] = opponentPayload.fen;
+    // STRICT, second rule: no player is ever told about a check (chess.com). While the game is live, neither the mover's ack nor the
+    // opponent's opponent_move may carry a '+'/'#' notation (or the server-only trueSan). A discovered check by a piece the victim
+    // cannot see used to arrive as "Nc3+". Never whitelist it.
+    for (const [who, notation] of [['ack', ack.san], ['opponent_move', opponentPayload?.san]]) {
+      if (typeof notation === 'string' && /[+#]$/.test(notation)) {
+        issues.push({ kind: 'fow-check-notation-leak', game: gameIndex, ply: plies, via: who, notation, pick });
+        checkNotationLeaks++;
+      }
+    }
+    if (ack.trueSan !== undefined || opponentPayload?.trueSan !== undefined) {
+      issues.push({ kind: 'fow-check-notation-leak', game: gameIndex, ply: plies, via: 'trueSan field', pick });
+      checkNotationLeaks++;
+    }
+    if (typeof ack.san === 'string') notationsSeen++;
+    if (typeof opponentPayload?.san === 'string') notationsSeen++;
   }
 
   const gameOverA = waitFor(alice, 'game_over', 3000).catch(() => null);
@@ -226,7 +244,7 @@ async function playOneGame(gameIndex) {
   bob.disconnect();
   await Promise.all([gameOverA, gameOverB]).catch(() => {});
 
-  return { plies, issues, castlesAttempted, castlesPlayed };
+  return { plies, issues, castlesAttempted, castlesPlayed, notationsSeen };
 }
 
 /** One real Giveaway game through the server — see the file header for what is checked. */
@@ -1199,11 +1217,13 @@ async function main() {
   let completedGames = 0;
   let fogCastlesAttempted = 0;
   let fogCastlesPlayed = 0;
+  let fogNotationsSeen = 0;
 
   for (let g = 0; g < GAMES; g++) {
     try {
-      const { plies, issues, castlesAttempted, castlesPlayed } = await playOneGame(g);
+      const { plies, issues, castlesAttempted, castlesPlayed, notationsSeen } = await playOneGame(g);
       totalPlies += plies;
+      fogNotationsSeen += notationsSeen;
       fogCastlesAttempted += castlesAttempted;
       fogCastlesPlayed += castlesPlayed;
       allIssues.push(...issues);
@@ -1350,6 +1370,7 @@ async function main() {
 
   console.log(`\nCompleted ${completedGames}/${GAMES} games, ${totalPlies} total plies.`);
   console.log(`Expected blind-push-into-fog rejections (not a bug — see script's own doc comment): ${expected.length}`);
+  console.log(`Fog of War notations received by players: ${fogNotationsSeen}, none may carry a '+'/'#' (kind fow-check-notation-leak).`);
   console.log(`Fog of War castles: ${fogCastlesAttempted} attempted, ${fogCastlesPlayed} accepted by the server (a refused one is an unexpected issue, kind server-refused-legal-fow-castle).`);
   console.log(`Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused, ${giveaway.finished} games ended by the stuck-wins rule.`);
   console.log(`Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king).`);
@@ -1369,6 +1390,7 @@ async function main() {
     `- Games completed: ${completedGames}/${GAMES}`,
     `- Total plies: ${totalPlies}`,
     `- Expected blind-push-into-fog rejections: ${expected.length} (normal Fog of War Online behavior, not a failure)`,
+    `- Fog of War notations received by players: ${fogNotationsSeen} (any '+'/'#' fails the run)`,
     `- Fog of War castles: ${fogCastlesAttempted} attempted, ${fogCastlesPlayed} accepted by the server (any refusal fails the run)`,
     `- Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused by the server, ${giveaway.finished} games ended by the stuck-wins rule`,
     `- Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused by the server, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king)`,

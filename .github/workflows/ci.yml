@@ -158,6 +158,7 @@ jobs:
           npm run test:fogOfWarRedactionHistory
           npm run test:fogOfWarVisibilityGroundTruth
           npm run test:fogOfWarCastling
+          npm run test:fogOfWarNotation
 
       - name: Run Giveaway regression suite (server rules, authority, parity with the mobile app)
         working-directory: chess-app/backend

@@ -847,6 +847,86 @@ async function testFogOfWarCastlingInCheck() {
   );
 }
 
+/**
+ * Fog of War never tells a player about a check (chess.com). chess.js writes '+' into the SAN it computes on the TRUE board, which used to
+ * reach the victim as "Bb5+". Real sockets: 1.e4 d6 2.Bb5+ - the bishop's destination is visible to Black (its b-pawn could have pushed there),
+ * so Black is shown the move, and must be shown "Bb5", not "Bb5+". The mover's ack says "Bb5" too, a live rejoin is the same, and a spectator
+ * (who sees the whole board) gets the real "Bb5+". Nothing addressed to either player may carry a '+' or '#' notation or a trueSan field.
+ */
+async function testFogOfWarNoCheckNotification() {
+  console.log('\n=== 13c. Fog of War: a check is never announced in the notation a player receives ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const a = await connect('NoCheckA');
+  const b = await connect('NoCheckB');
+  const watcher = await connect('NoCheckWatcher');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(a, 'match_found'); // BEFORE the emit - see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(a, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(b, 'match_found'); // BEFORE the emit - see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(b, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
+      return matchFound;
+    })(),
+  ]);
+  const white = matchA.color === 'w' ? a : b;
+  const black = matchA.color === 'w' ? b : a;
+  const roomId = matchA.roomId;
+  const whiteToken = (matchA.color === 'w' ? matchA : matchB).playerToken;
+  const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+  check(spectate.ok === true, 'a spectator joins the Fog of War game');
+
+  const received = []; // every notation addressed to a player
+  for (const socket of [white, black]) socket.on('opponent_move', (p) => received.push(p));
+  const spectated = [];
+  watcher.on('spectator_move', (p) => spectated.push(p));
+
+  const plies = [['e2', 'e4'], ['d7', 'd6']];
+  for (const [i, [from, to]] of plies.entries()) {
+    const mover = i % 2 === 0 ? white : black;
+    const opponent = i % 2 === 0 ? black : white;
+    const seen = waitFor(opponent, 'opponent_move');
+    const ack = await emitAck(mover, 'make_move', { roomId, from, to });
+    check(ack.ok === true, `ply ${i + 1} ${from}-${to} accepted`);
+    await seen;
+  }
+  const seenByBlack = waitFor(black, 'opponent_move');
+  const ack = await emitAck(white, 'make_move', { roomId, from: 'f1', to: 'b5' });
+  check(ack.ok === true, '2.Bb5 (a check on e8 along the open diagonal) is accepted');
+  check(ack.san === 'Bb5', `the mover's ack says "Bb5", not "Bb5+" (got "${ack.san}")`);
+  const told = await seenByBlack;
+  check(told.san === 'Bb5' && told.to === 'b5', `Black is shown the move as "Bb5" - not "Bb5+" (got "${told.san}")`);
+  await new Promise((r) => setTimeout(r, 200));
+  check(spectated.at(-1).san === 'Bb5+', `the spectator receives the real "Bb5+" (got "${spectated.at(-1).san}")`);
+  const watcher2 = await connect('NoCheckWatcher2');
+  const late = await emitAck(watcher2, 'spectate_game', { roomId });
+  check(late.state.moves.at(-1).san === 'Bb5+', 'a spectator who joins later sees "Bb5+" in the history');
+
+  const leaks = (value) => JSON.stringify(value, (k, v) => (k === 'san' || k === 'trueSan' ? (k === 'trueSan' || /[+#]$/.test(String(v)) ? '__LEAK__' : v) : v)).includes('__LEAK__');
+  check(!leaks(received) && !leaks(ack) && !leaks(told), 'nothing addressed to a player contains a "+"/"#" notation or a trueSan field');
+
+  // a live rejoin of the player who is not the mover shows the redacted history, still without the marker
+  black.disconnect();
+  await new Promise((r) => setTimeout(r, 200));
+  const black2 = await connect('NoCheckB2');
+  const blackToken = (matchA.color === 'w' ? matchB : matchA).playerToken;
+  const rejoin = await emitAck(black2, 'rejoin_game', { roomId, playerToken: blackToken });
+  check(rejoin.ok === true, 'Black rejoins the live game');
+  check(!leaks(rejoin) && rejoin.state.moves.at(-1).san === 'Bb5', `Black's rejoin history says "Bb5" with no marker anywhere (got "${rejoin.state.moves.at(-1).san}")`);
+  void whiteToken;
+
+  a.disconnect();
+  b.disconnect();
+  black2.disconnect();
+  watcher.disconnect();
+  watcher2.disconnect();
+}
+
 async function testGiveawayMatchmakingAndMandatoryCapture() {
   console.log('\n=== Giveaway: matchmaking, server-side mandatory capture, flag isolation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -1582,6 +1662,7 @@ async function main() {
   await testFogOfWarMatchmaking();
   await testFogOfWarRedactionAndWin();
   await testFogOfWarCastlingInCheck();
+  await testFogOfWarNoCheckNotification();
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
   await testDuckChessOnline();

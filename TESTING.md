@@ -135,6 +135,13 @@ Triggers on every push/PR to `main`. One job:
      unchanged duck square refuses the WHOLE turn, moves the duck blocks are refused, king capture = reason
      `duckChess` with no placement, blockade = draw, castling blocked across the duck but not by attacks), and
      parity with the mobile app over 100 random games (legal moves, legal duck squares, SAN, FEN, blockade).
+   - `npm run test:spell` (`scripts/test-spell.mjs`, no server needed) — Spell Chess's server side: a **no-drift check** of the
+     shared rules block in `src/game/spellChess.ts` against the mobile `src/logic/spellChess.ts`, `RoomManager.applyMove` as
+     the authority for a spell turn (cast, then move), and parity with the mobile engine over random games. Regression
+     cases: a Freeze lasts exactly the victim's next move; a FROZEN player who casts their own Freeze is still frozen that
+     turn (the server used to read the frozen squares after the cast overwrote them); freezing every checking piece waives
+     check (the server used to pass the wrong zone); castling is refused when the rook it moves is frozen. Mutation-checked
+     against each of those three server defects.
    - `npm run test:unlimited` (`scripts/test-unlimited.mjs`, no server needed) — "No time limit" (live-only, no clock):
      time-control validation (finite numbers; an unlimited control may have no increment), an unlimited room's clock
      never ticks or gains an increment and schedules no timeout (move acks, `opponent_move` and rejoin payloads all
@@ -887,3 +894,25 @@ The nightly always uses the default branch (unchanged). The frontend CI never ch
 **How to use it.** A feature that needs unmerged code in BOTH repos: name the branch `paired/<x>` in both, push the frontend first, then the backend. Merge the frontend PR first and delete its `paired/<x>` branch afterwards: a stale paired branch that predates the code now on the default branch would keep being used for as long as it exists. The step prints its decision and writes it as a notice annotation ("Frontend ref" / "Frontend checkout", visible on the run page and through the API without a login).
 
 **How it was checked.** The step's script, extracted from the workflow, was run locally against a fake `git ls-remote` for eight cases (paired with a twin, paired without one, an unprefixed same-named branch, `main`, a bare `paired/`, a name with a space, `xpaired/x`, and a name containing `$(touch pwned)` to show the name is never executed): all as expected. Then a throwaway pair of branches in both repos ran the real CI (see the commit message of this change for the run ids); the throwaway branches were deleted afterwards.
+
+## 21. Spell Chess (server side) — design, decisions and known limits
+
+Branch pair `paired/spell-chess`; the app's half is the frontend `TESTING.md` §18 (rules, UI, browser checks). The server is the only authority: the cast and the move arrive together in `make_move { from, to, promotion?, spell? }`.
+
+**How a turn is validated (`RoomManager.applyMove`).** (1) The cast, if any, is checked against the room's own `SpellChessState` first: an unknown `type` is "Invalid spell cast.", Freeze needs a center and a charge off cooldown, Jump needs an occupied square and a charge off cooldown ("Freeze/Jump is not available right now.") —
+a bad cast refuses the WHOLE turn before the room is touched. The client sends only `{ type, center | square }`; the server recomputes the 3x3 zone itself and never trusts the client's `squares`. (2) `spellTurnContext(room.spellState, mover, cast)` gives the frozen squares (read from the state BEFORE the cast), the jump square (AFTER it) and the zone cast
+this turn, and the check waiver is derived from that zone. (3) The move is tried on a SCRATCH `RoomChessEngine` built with those options; a refusal is "Invalid move." and nothing changed. (4) On success the room adopts the scratch engine and `afterSpellChessMove(stateAfterCast, mover)`. A king capture via a Jump is checked
+BEFORE `isGameOver()` (the kingless position would otherwise be read as a stalemate draw) and ends the game with reason `spellChess`. Every payload that shows a position carries the whole `spellState` (the move ack, `opponent_move` with the `spell`, rejoin, spectate, `match_found`); the PGN gets `{F@e4}` / `{J@d5}` comments and a `Spell` variant tag.
+Mutually exclusive with every other variant: `conflictingVariantError` refuses it combined with another flag, and the matchmaker's exact-match predicate never pairs a Spell seeker with another kind of seeker.
+
+**Tests.** `scripts/test-spell.mjs` (27 checks, in-process with a stub socket server, wired into CI as `npm run test:spell`): the NO-DRIFT layer (the shared rules block is byte-identical to the app's), THE AUTHORITY (frozen pieces, castling with a frozen rook, the check waiver, the turn-context trap) and PARITY (the server and the app engine agree ply by ply over seeded random games).
+`scripts/test-multiplayer.mjs` (real sockets; the Spell scenario is 38 checks, the whole script 224): queue isolation and the "cannot be combined" refusals, a challenge carrying the variant, bad casts refused for the whole turn, Freeze with its zone (frozen pieces refused, one-reply lifetime, cooldown), Jump (charge spent, cooldown), the move
+ack / opponent move / rejoin / spectate answers carrying the spell state and the casts, and the Spell-only ending: `1.e4 a6 2.Qh5 a5 3.Qxe8` with a Jump over f7 captures the king (reason `spellChess`). **`npm run spell-opponent`** (`scripts/spell-opponent.mjs`, same modes as `duck-opponent`) is a dev-only guest that plays random LEGAL Spell turns with the app's own engine
+(`chooseSpellChessBotCast` plus random extra casts, `spellTurnContext`, `getSpellChessLegalMoves`); two of them played a full game against each other on a throwaway server (checkmate, no refusal, casts all along). Not in CI.
+
+**Mutation check (CHECKLIST §2), on a copy; each mutant runs the in-process script and then the real-socket e2e against a server SPAWNED from the mutated copy.** 22 planted server bugs: a Freeze / Jump cast accepted without a charge or cooldown, a Jump on an empty square, an unknown cast type ignored, the frozen squares read after the cast, the check waiver never active,
+the spell state not advanced, the cast / spell state missing from the opponent's move, the ack, the rejoin answer and the spectate answer, a king capture that does not end the game, a wrong starting spell state, Spell combinable with another variant, a challenge forgetting the variant (creator side), Spell seekers paired with classic seekers, and four engine bugs
+(a frozen piece moves, castling with a frozen rook, no Jump captures, the waiver ignored). **21 killed (7 by the in-process script, 14 by the e2e), 1 equivalent, documented inline** (`socketHandlers.ts`: the challenge JOINER's `isSpellChess` is never read, because `pairAndCreateRoom` takes every flag from the first entry). The first pass left four more survivors,
+all real gaps, closed before this count: Jump availability (no test cast Jump twice), the rejoin answer's and the spectate answer's spell state (no test read them), and the king capture (it had no real-socket ending). Two of the 22 first had patterns that matched nothing (they were rewritten, not counted as kills).
+
+**Known limits.** The nightly fuzz has no Spell section (the in-process parity over seeded random games and the e2e scenario cover the rules and the protocol; a Spell fuzz would need cast generation in the fuzz's clients - the dev opponent has it); Spell Chess is excluded from Tournaments and its games are not rated.

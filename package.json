@@ -18,6 +18,7 @@
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",
     "test:duck": "tsx scripts/test-duck.mjs",
+    "test:spell": "tsx scripts/test-spell.mjs",
     "test:unlimited": "tsx scripts/test-unlimited.mjs",
     "test:rejoinFinished": "tsx scripts/test-rejoin-finished.mjs",
     "sync:fourplayer": "node scripts/sync-fourplayer.mjs",
@@ -30,6 +31,7 @@
     "test:fourplayerOnline": "tsx scripts/test-fourplayer-online.mjs",
     "test:fourplayerGiveaway": "tsx scripts/test-fourplayer-giveaway.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs",
+    "spell-opponent": "tsx scripts/spell-opponent.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },

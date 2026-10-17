@@ -265,6 +265,7 @@ with its real SAN in the move list when it should have shown "?". Investigated a
   app's existing diagnostic log (`More → Diagnostics` in the mobile app) — mover, real SAN/
   destination, and each relevant perspective's `revealed` flag + full visibility set at that
   moment. If this recurs, that log (copyable from the device) replaces relying on memory.
+- **Update (nightly #18):** one real source of a hidden-information refusal was found and fixed in §24 — castling was refused whenever a hidden piece attacked the king, which told the player about that piece. That is a plausible cause of the original report.
 - **Status: open, unconfirmed.** Not a known bug with a known fix — a reported symptom without
   a reproduction, investigated as far as it can be without one.
 
@@ -332,7 +333,7 @@ app's `TESTING.md` §8 describes the rules and the UI.
 **Decisions worth knowing**
 - No check anywhere: moving into attack and ignoring a "check" are legal. Castling therefore has no attack restriction
   (`RoomChessEngine.generateRaw` adds back the castles chess.js withholds) but IS blocked when the duck sits on a square the
-  king or rook crosses. This differs from Fog of War, which keeps chess.js's attack-based castling rule.
+  king or rook crosses. Fog of War follows the same rule since §24 (it used to keep chess.js's attack-based castling rule, which was a bug).
 - Wire format: `opponent_move` / `spectator_move` carry `duck` (this turn's placement; absent after a king capture) and
   `duckSquare` (where it stands now); the ack carries `duckSquare`; `rejoin`/spectate state carries `isDuckChess`,
   `duckSquare` and a `duck` per move. Saved PGNs get `[Variant "Duck"]` and a `{@sq}` comment after each move.
@@ -1017,3 +1018,15 @@ no-drift check cannot be what kills them.
 paired with classic seekers, seven engine bugs (a drop with an empty reserve, a drop that does not hand the turn over / keeps the halfmove clock / is not spent from the reserve, a mate declared although a drop could answer it, no fifty-move rule, no check marker in the drop notation) and three in the server's twin of the shared rules block (killed by the no-drift check, which is its job).
 **First pass 15 killed, 2 survived: 1 real gap, 1 equivalent.** The gap: nothing refused a `drop` in the payload of a classic room when from->to happened to be a legal ordinary move (the move would have been played and the drop ignored); closed in section 2 of `test-crazyhouse.mjs` (78 checks now). The equivalent is documented inline in `rooms.ts`: the `RESERVE_PIECE_TYPES` test is defence in depth, since `legalDropSquares`
 already answers [] for a piece type the reserve has no slot for. **16 killed (14 in-process, 3 of them by the no-drift check; 2 by the e2e), 1 equivalent.**
+
+## 24. Fog of War castling has no check conditions (nightly #18 / backend issue #12)
+
+Full spec, the audit table, the bot and the information-leak audit live in the frontend repo's TESTING.md §22; this is the server's half.
+
+- **The rule** (chess.com): in Fog of War the king "can castle while in check, and can castle through, or into check". A castle needs only the castling right on that side, king on e1/e8, rook on its corner, the squares between empty. Nothing about attacks. Chess960 + Fog of War is not combinable (`conflictingVariantError`), so there is nothing to specify for it.
+- **What was wrong.** `RoomChessEngine.movePseudoLegal` is chess.js's `_moves({ legal: false })`, which keeps its castling check conditions. The server sees the TRUE board, the client only its fog, so a castle the client offered (nothing attacks the king in its view) was answered "Invalid move." whenever a piece the player could not see attacked the king or a square it crosses — nightly #18, game 171, ply 42 (hidden bishop b4 against e1). The refusal itself leaked "a hidden piece attacks your king".
+- **The fix.** `addUnrestrictedCastles` in `RoomChessEngine.ts` (byte-identical to `ChessEngine.ts` in the app, `// BEGIN/END unrestricted-castles`), used by `generateRaw` for Duck Chess (plus the duck's obstruction) and for the plain pseudo-legal path = Fog of War. Spell Chess keeps chess.js's castling (its freeze-escape move uses the same API); Giveaway has none. `rooms.ts` is unchanged: it delegates to `movePseudoLegal`.
+- **Tests.** `npm run test:fogOfWarCastling` (61 checks, in CI's Fog of War step): no-drift, out of / through / into check on both engines and both colours, everything that still forbids a castle, the variants that must not change, game 171 through `RoomManager.applyMove`, parity over ~4000 random castling-rich positions, and a strict property — for ~6000 random true positions every move the player's own redacted view offers is accepted except a quiet pawn push (0 other refusals in ~236k moves; ~3800 of them castles the ordinary rule forbids). `test-multiplayer.mjs` §13b: two real-socket games (O-O through a check from a hidden bishop on a6; O-O-O out of a check from a hidden bishop on b4).
+- **The nightly stays strict.** `nightly-fuzz-online.mjs` still accepts exactly one refusal in Fog of War, the blind quiet pawn push (§5), and now picks a castle half the time one is available; a refused castle is its own failing kind, `server-refused-legal-fow-castle`. Do not whitelist it: it is the §24 bug.
+- **Mutation** (copy-based): 15 server mutants (check condition back, Spell Chess let in, one wing, rights/rook/between/b-file/king ignored, wrong rank, duplicate, wrong flag, duck obstruction dropped, drift, `rooms.ts` using the ordinary `move()`) — all killed; the headline ones (check condition back, ordinary `move()`) are killed by the real-socket e2e alone as well.
+- **Known, separate, not fixed here:** the SAN returned for a Fog of War move still carries chess.js's `+`/`#` computed on the true board (a discovered check by a hidden piece notifies the victim) — the frontend's TODO.md has the repro.

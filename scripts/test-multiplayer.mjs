@@ -765,6 +765,88 @@ async function testFogOfWarRedactionAndWin() {
   dirk.disconnect();
 }
 
+/**
+ * Fog of War castling has NO check conditions (chess.com: "the king can castle while in check, and can castle through, or into check").
+ * Found by nightly #18 / backend issue #12 (game 171, ply 42): the server refused a castle the client had offered, because a piece
+ * the player could not see attacked the king — a rules bug and an information leak (the refusal says "a hidden piece attacks you").
+ * Two scripted real-socket games, each ending in a castle the ordinary rule forbids while the attacker is hidden from the castler:
+ *  - THROUGH check: a hidden black bishop on a6 attacks f1 (the king's transit square) -> O-O.
+ *  - OUT OF check: a hidden black bishop on b4 gives check on e1 -> O-O-O. (This is game 171's shape.)
+ */
+async function testFogOfWarCastlingInCheck() {
+  console.log('\n=== 13b. Fog of War: castling through / out of a check from a hidden piece is accepted ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const squareOf = (fen, square) => {
+    const rows = fen.split(' ')[0].split('/');
+    const row = rows[8 - Number(square[1])];
+    let file = 0;
+    for (const c of row) {
+      if (/[1-8]/.test(c)) file += Number(c);
+      else if (file++ === 'abcdefgh'.indexOf(square[0])) return c;
+    }
+    return null;
+  };
+
+  async function scenario(label, plies, castle) {
+    const names = [`${label}A`, `${label}B`];
+    const a = await connect(names[0]);
+    const b = await connect(names[1]);
+    const [matchA, matchB] = await Promise.all([
+      (async () => {
+        const matchFound = waitFor(a, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+        matchFound.catch(() => {});
+        await emitAck(a, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
+        return matchFound;
+      })(),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 150));
+        const matchFound = waitFor(b, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+        matchFound.catch(() => {});
+        await emitAck(b, 'join_queue', { timeControl, isChess960: false, isFogOfWar: true });
+        return matchFound;
+      })(),
+    ]);
+    const white = matchA.color === 'w' ? a : b;
+    const black = matchA.color === 'w' ? b : a;
+    const roomId = matchA.roomId;
+    let whiteFen = (matchA.color === 'w' ? matchA : matchB).fen;
+    for (const [i, [from, to]] of plies.entries()) {
+      const mover = i % 2 === 0 ? white : black;
+      const opponent = i % 2 === 0 ? black : white;
+      const seen = waitFor(opponent, 'opponent_move');
+      const ack = await emitAck(mover, 'make_move', { roomId, from, to });
+      check(ack.ok === true, `${label}: ply ${i + 1} ${from}-${to} accepted`);
+      const payload = await seen;
+      if (mover === white) whiteFen = ack.fen;
+      else whiteFen = payload.fen;
+    }
+    // The premise: the attacker really is hidden from White (its own redacted view has no black piece on that square).
+    check(squareOf(whiteFen, castle.attackerSquare) === null, `${label}: White's own view does not show the black bishop on ${castle.attackerSquare}`);
+    const seenByBlack = waitFor(black, 'opponent_move');
+    const ack = await emitAck(white, 'make_move', { roomId, from: castle.from, to: castle.to });
+    check(ack.ok === true, `${label}: ${castle.from}-${castle.to} is ACCEPTED although a hidden bishop attacks ${castle.attacks} (was: "Invalid move.")`);
+    check(ack.san === castle.san, `${label}: the move is ${castle.san}`);
+    check(ack.fen.split(' ')[0].split('/')[7] === castle.rank1, `${label}: king and rook landed (rank 1 is ${castle.rank1})`);
+    const told = await seenByBlack;
+    check(typeof told.fen === 'string', `${label}: the opponent still receives an updated fen`);
+    const next = await emitAck(black, 'make_move', { roomId, from: 'h7', to: 'h6' });
+    check(next.ok === true, `${label}: and the game goes on (Black's next move is accepted)`);
+    a.disconnect();
+    b.disconnect();
+  }
+
+  await scenario(
+    'Through-check',
+    [['e2', 'e4'], ['b7', 'b6'], ['g1', 'f3'], ['c8', 'a6'], ['g2', 'g3'], ['g8', 'f6'], ['f1', 'g2'], ['b8', 'c6']],
+    { from: 'e1', to: 'g1', san: 'O-O', rank1: 'RNBQ1RK1', attackerSquare: 'a6', attacks: 'f1' }
+  );
+  await scenario(
+    'Out-of-check',
+    [['d2', 'd4'], ['e7', 'e6'], ['c1', 'f4'], ['f8', 'b4'], ['b1', 'a3'], ['g8', 'f6'], ['d1', 'd3'], ['d7', 'd6']],
+    { from: 'e1', to: 'c1', san: 'O-O-O', rank1: '2KR1BNR', attackerSquare: 'b4', attacks: 'e1' }
+  );
+}
+
 async function testGiveawayMatchmakingAndMandatoryCapture() {
   console.log('\n=== Giveaway: matchmaking, server-side mandatory capture, flag isolation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -1499,6 +1581,7 @@ async function main() {
   await testSetupChessInvalidMergeAsksBothToRedo();
   await testFogOfWarMatchmaking();
   await testFogOfWarRedactionAndWin();
+  await testFogOfWarCastlingInCheck();
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
   await testDuckChessOnline();

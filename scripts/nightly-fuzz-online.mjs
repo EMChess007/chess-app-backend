@@ -8,7 +8,9 @@
  * desync), an unexpected disconnect, or the server throwing mid-game.
  *
  * Variants covered (each section reports separately):
- *  - Fog of War: pseudo-legal moves from each side's own redacted fen.
+ *  - Fog of War: pseudo-legal moves from each side's own redacted fen. STRICT: the only refusal ever accepted is a quiet pawn push into a
+ *    fogged piece (the blind-move mechanic). A refused CASTLE is its own failing kind (server-refused-legal-fow-castle): castling has no check
+ *    conditions in Fog of War, and half the available castles are picked on purpose so they are exercised.
  *  - Duck Chess: a turn is a move AND the duck's new square. Every turn comes from the mobile app's own duck-aware
  *    move generation and legal duck squares and MUST be accepted; a fraction of turns first submit something the
  *    server MUST refuse — a move the duck blocks (landing on it / passing over it), or a legal move with a bad duck
@@ -117,6 +119,11 @@ function randInt(n) {
   return Math.floor(Math.random() * n);
 }
 
+/** Whether `move` is a castle in `engine`'s position: a king moving two files along its home rank (the only way a king moves two squares). */
+function isCastleMove(engine, move) {
+  return engine.getPieceAt(move.from)?.type === 'k' && Math.abs(move.to.charCodeAt(0) - move.from.charCodeAt(0)) === 2;
+}
+
 async function playOneGame(gameIndex) {
   const alice = await connect(`Alice${gameIndex}`);
   const bob = await connect(`Bob${gameIndex}`);
@@ -152,6 +159,8 @@ async function playOneGame(gameIndex) {
   const fenByColor = { w: matchA.color === 'w' ? matchA.fen : matchB.fen, b: matchA.color === 'b' ? matchA.fen : matchB.fen };
   const issues = [];
   let plies = 0;
+  let castlesAttempted = 0;
+  let castlesPlayed = 0;
   let gameOver = false;
   alice.once('game_over', () => {
     gameOver = true;
@@ -167,7 +176,13 @@ async function playOneGame(gameIndex) {
     const engine = new ChessEngine(fenByColor[turn], { skipValidation: true });
     const pseudo = engine.getPseudoLegalMoves(turn);
     if (pseudo.length === 0) break;
-    const pick = pseudo[randInt(pseudo.length)];
+    // Castling is rare in random play, so half the time a castle is available it is the pick: the rule "castle out of, through
+    // and into check" (chess.com; see ChessEngine.generateRaw / test-fogOfWarCastling.mjs) only gets exercised through the real
+    // socket path if castles are actually attempted.
+    const castles = pseudo.filter((m) => isCastleMove(engine, m));
+    const pick = castles.length > 0 && Math.random() < 0.5 ? castles[randInt(castles.length)] : pseudo[randInt(pseudo.length)];
+    const pickIsCastle = isCastleMove(engine, pick);
+    if (pickIsCastle) castlesAttempted++;
 
     const opponentColor = turn === 'w' ? 'b' : 'w';
     const opponent = players[opponentColor];
@@ -189,11 +204,17 @@ async function playOneGame(gameIndex) {
       const record = { game: gameIndex, ply: plies, fen: fenByColor[turn], pick, error: ack.error };
       if (isAmbiguousBlindPush) {
         issues.push({ kind: 'expected-blind-pawn-push-blocked-by-fog', ...record });
+      } else if (pickIsCastle) {
+        // STRICT, and named so it is unmistakable: Fog of War castling has no check conditions (out of, through and into check are
+        // all legal), so a castle the client offered from rights + empty squares must NEVER be refused. A refusal here is the
+        // nightly #18 / game 171 bug (the server applying a check rule to a hidden attacker, which also leaks it). Never whitelist.
+        issues.push({ kind: 'server-refused-legal-fow-castle', ...record });
       } else {
         issues.push({ kind: 'server-rejected-client-pseudo-legal-move', ...record });
       }
       break;
     }
+    if (pickIsCastle) castlesPlayed++;
     fenByColor[turn] = ack.fen;
     const opponentPayload = await opponentMovePromise;
     if (opponentPayload) fenByColor[opponentColor] = opponentPayload.fen;
@@ -205,7 +226,7 @@ async function playOneGame(gameIndex) {
   bob.disconnect();
   await Promise.all([gameOverA, gameOverB]).catch(() => {});
 
-  return { plies, issues };
+  return { plies, issues, castlesAttempted, castlesPlayed };
 }
 
 /** One real Giveaway game through the server — see the file header for what is checked. */
@@ -1176,11 +1197,15 @@ async function main() {
   let totalPlies = 0;
   const allIssues = [];
   let completedGames = 0;
+  let fogCastlesAttempted = 0;
+  let fogCastlesPlayed = 0;
 
   for (let g = 0; g < GAMES; g++) {
     try {
-      const { plies, issues } = await playOneGame(g);
+      const { plies, issues, castlesAttempted, castlesPlayed } = await playOneGame(g);
       totalPlies += plies;
+      fogCastlesAttempted += castlesAttempted;
+      fogCastlesPlayed += castlesPlayed;
       allIssues.push(...issues);
       completedGames++;
       if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${GAMES} games played`);
@@ -1325,6 +1350,7 @@ async function main() {
 
   console.log(`\nCompleted ${completedGames}/${GAMES} games, ${totalPlies} total plies.`);
   console.log(`Expected blind-push-into-fog rejections (not a bug — see script's own doc comment): ${expected.length}`);
+  console.log(`Fog of War castles: ${fogCastlesAttempted} attempted, ${fogCastlesPlayed} accepted by the server (a refused one is an unexpected issue, kind server-refused-legal-fow-castle).`);
   console.log(`Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused, ${giveaway.finished} games ended by the stuck-wins rule.`);
   console.log(`Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king).`);
   console.log(`Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture).`);
@@ -1343,6 +1369,7 @@ async function main() {
     `- Games completed: ${completedGames}/${GAMES}`,
     `- Total plies: ${totalPlies}`,
     `- Expected blind-push-into-fog rejections: ${expected.length} (normal Fog of War Online behavior, not a failure)`,
+    `- Fog of War castles: ${fogCastlesAttempted} attempted, ${fogCastlesPlayed} accepted by the server (any refusal fails the run)`,
     `- Giveaway: ${giveaway.games}/${GIVEAWAY_GAMES} games, ${giveaway.plies} plies, ${giveaway.probes} illegal moves correctly refused by the server, ${giveaway.finished} games ended by the stuck-wins rule`,
     `- Atomic: ${atomic.games}/${ATOMIC_GAMES} games, ${atomic.plies} plies, ${atomic.probes} illegal moves correctly refused by the server, ${atomic.finished} games ended (${atomic.kingExplosions} by an exploded king)`,
     `- Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused by the server, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture)`,

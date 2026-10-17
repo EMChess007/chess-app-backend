@@ -3,7 +3,8 @@ import type { Server } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { generateChess960Position } from './chess960.js';
 import { buildRedactedFen, getFogOfWarWinner, getVisibleSquares, redactMoveHistory } from './fogOfWar.js';
-import { getAtomicKingWinner, isAtomicThreefoldRepetition } from './atomic.js';
+import { getAtomicKingWinner } from './atomic.js';
+import { isThreefoldRepetition, repetitionKey, type RepetitionExtra } from './repetition.js';
 import { hasNoDuckMoves, isLegalDuckPlacement } from './duckChess.js';
 import {
   afterSpellChessMove,
@@ -96,9 +97,10 @@ interface Room {
   crazyhouse: boolean;
   /** Spell Chess only: charges/cooldowns/pending Freeze+Jump effects — see spellChess.ts. */
   spellState: SpellChessState;
-  /** Atomic only: the FEN of the starting position and after every move, for the history-based threefold
-   * repetition draw (chess.js cannot see repetitions here — the Atomic engine is not chess.js). */
-  atomicFens: string[];
+  /** Threefold repetition, EVERY mode (repetition.ts): the position key of the starting position and after every move. The room keeps its
+   * own list because nothing else can see repetitions - chess.js only counts the moves of the engine it lives in (Spell/Duck/Atomic
+   * and Fog of War build or rebuild engines), and a list in the room also survives a player's rejoin. Fog of War keys the TRUE position. */
+  repetitionKeys: string[];
   timeControl: TimeControl;
   /** Display label for `timeControl` (e.g. "10 min"), for the saved game-history row — see
    * JoinQueuePayload.timeControlLabel. */
@@ -262,7 +264,7 @@ export class RoomManager {
       horde: params.horde,
       crazyhouse: params.crazyhouse,
       spellState: initialSpellChessState(),
-      atomicFens: [initialFen],
+      repetitionKeys: [],
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel ?? defaultTimeControlLabel(params.timeControl),
       moves: [],
@@ -281,6 +283,7 @@ export class RoomManager {
       onFinished: params.onFinished,
     };
 
+    room.repetitionKeys.push(repetitionKey(initialFen, repetitionExtraOf(room)));
     this.rooms.set(id, room);
     this.socketToRoom.set(params.white.socketId, { roomId: id, color: 'w' });
     this.socketToRoom.set(params.black.socketId, { roomId: id, color: 'b' });
@@ -452,7 +455,9 @@ export class RoomManager {
     }
     room.lastMoveAt = now;
     room.moves.push(result);
-    if (room.atomic) room.atomicFens.push(room.engine.getFen());
+    // The position this move produced (the duck / spell state / pockets are already updated above). Fog of War: the TRUE position.
+    room.repetitionKeys.push(repetitionKey(room.engine.getFen(), repetitionExtraOf(room)));
+    const repeated = isThreefoldRepetition(room.repetitionKeys);
 
     const newTurn = room.engine.getTurn();
     const opponentSlot = room.players[opponentColor];
@@ -518,6 +523,8 @@ export class RoomManager {
       const winner = getFogOfWarWinner(result, mover);
       if (winner) {
         this.endGame(room, 'fogOfWar', winner);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else {
         this.scheduleTimeout(room);
       }
@@ -528,6 +535,8 @@ export class RoomManager {
       const winner = getGiveawayWinner(room.engine);
       if (winner) {
         this.endGame(room, 'giveaway', winner);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else {
         this.scheduleTimeout(room);
       }
@@ -537,6 +546,8 @@ export class RoomManager {
       // pieces) is a draw.
       if (result.captured === 'k') {
         this.endGame(room, 'duckChess', mover);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else if (hasNoDuckMoves(room.engine)) {
         this.endGame(room, 'draw', null);
       } else {
@@ -545,16 +556,16 @@ export class RoomManager {
     } else if (room.atomic) {
       // Atomic: a blown-up king ends the game on the spot (reason 'atomic'); otherwise the usual
       // checkmate / stalemate / draw — all judged by atomic.ts (adjacent kings are never in check, ...) — plus
-      // the threefold-repetition draw, which only the room's own FEN history can see.
+      // the threefold-repetition draw (checked before them, like every mode, so its reason is 'repetition').
       const kingWinner = getAtomicKingWinner(room.engine.getAtomicPosition());
       if (kingWinner) {
         this.endGame(room, 'atomic', kingWinner);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else if (room.engine.isGameOver()) {
         const status = room.engine.getStatus();
         const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
         this.endGame(room, reason, status === 'checkmate' ? mover : null);
-      } else if (isAtomicThreefoldRepetition(room.atomicFens)) {
-        this.endGame(room, 'draw', null);
       } else {
         this.scheduleTimeout(room);
       }
@@ -567,6 +578,8 @@ export class RoomManager {
       const spellWinner = getSpellChessWinner(result, mover);
       if (spellWinner) {
         this.endGame(room, 'spellChess', spellWinner);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else if (room.engine.isGameOver()) {
         const status = room.engine.getStatus();
         const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
@@ -582,6 +595,8 @@ export class RoomManager {
       const hordeWinner = getHordeWinnerFromFen(room.engine.getFen());
       if (hordeWinner) {
         this.endGame(room, 'horde', hordeWinner);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else if (room.engine.isGameOver()) {
         const status = room.engine.getStatus();
         const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
@@ -603,6 +618,8 @@ export class RoomManager {
         this.endGame(room, 'kingOfTheHill', kingOfTheHillWinner);
       } else if (threeCheckWinner) {
         this.endGame(room, 'threeCheck', threeCheckWinner);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
       } else if (room.engine.isGameOver()) {
         const status = room.engine.getStatus();
         const reason: GameOverReason = status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw';
@@ -992,6 +1009,18 @@ export class RoomManager {
 
     await prisma.$transaction(rows.map((data) => prisma.game.create({ data })));
   }
+}
+
+/** The variant state a position carries besides the board (repetition.ts): Three-Check's counters, Crazyhouse's pockets and promoted
+ * pieces, the duck's square, Spell Chess's whole state. Undefined for the plain modes. Mirrors the app's historyRepetitionKeys. */
+function repetitionExtraOf(room: Room): RepetitionExtra | undefined {
+  if (!room.threeCheck && !room.crazyhouse && !room.duckChess && !room.spellChess) return undefined;
+  return {
+    ...(room.threeCheck ? { checks: room.engine.getCheckCounts() } : {}),
+    ...(room.crazyhouse ? { crazyhouse: room.engine.getCrazyhouseState() } : {}),
+    ...(room.duckChess ? { duck: room.duckSquare } : {}),
+    ...(room.spellChess ? { spell: room.spellState } : {}),
+  };
 }
 
 /** `moves` with each Fog of War move's real notation ('+'/'#') put back - for spectators, who see the whole board, and the finished

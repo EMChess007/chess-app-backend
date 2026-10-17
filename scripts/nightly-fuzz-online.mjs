@@ -39,7 +39,7 @@
  *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
  *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
  *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames]
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode]
  * (the others default to the same count as fogGames; fourPlayerGiveawayGames defaults to fourPlayerGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
@@ -47,7 +47,8 @@ import { writeFileSync } from 'node:fs';
 import { io } from 'socket.io-client';
 import { ChessEngine } from '../../src/logic/ChessEngine.ts';
 import { getGiveawayMoves, getGiveawayWinner } from '../../src/logic/giveaway.ts';
-import { getAtomicMoves, getAtomicWinner, isAtomicThreefoldRepetition } from '../../src/logic/atomic.ts';
+import { getAtomicMoves, getAtomicWinner } from '../../src/logic/atomic.ts';
+import { isThreefoldRepetition, repetitionKey } from '../../src/logic/repetition.ts';
 import { getLegalDuckPlacementSquares, hasNoDuckMoves } from '../../src/logic/duckChess.ts';
 // The MOBILE APP's 4-seat engine (not the server's generated mirror): the 4 Player clients are independent of the server. Imported file by file, like
 // the other variants' logic: under tsx the app's .ts files load as CommonJS, and a namespace import of its index.ts (which is only `export *`) would
@@ -70,6 +71,8 @@ const FOUR_GAMES = Number(process.argv[7] ?? GAMES);
 const FOUR_GIVEAWAY_GAMES = Number(process.argv[8] ?? FOUR_GAMES);
 const HORDE_GAMES = Number(process.argv[9] ?? GAMES);
 const CRAZYHOUSE_GAMES = Number(process.argv[10] ?? GAMES);
+// Threefold repetition over real sockets, per mode (see playRepetitionGame). Small by default: every game is a fixed 8-9 ply shuffle.
+const REPETITION_GAMES = Number(process.argv[11] ?? 3);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -431,7 +434,7 @@ async function playAtomicGame(gameIndex) {
     let expected = null;
     if (kingWinner) expected = { reason: 'atomic', winner: kingWinner };
     else if (after.isGameOver()) expected = { reason: status === 'checkmate' ? 'checkmate' : status === 'stalemate' ? 'stalemate' : 'draw', winner: status === 'checkmate' ? turn : null };
-    else if (isAtomicThreefoldRepetition(fens)) expected = { reason: 'draw', winner: null };
+    else if (isThreefoldRepetition(fens.map((f) => repetitionKey(f)))) expected = { reason: 'repetition', winner: null };
     if (expected) {
       stats.finished = true;
       if (kingWinner) stats.kingExplosions++;
@@ -1210,6 +1213,78 @@ async function playCrazyhouseGame(gameIndex) {
   return { stats, issues };
 }
 
+/**
+ * THREEFOLD REPETITION, every mode that starts from the standard setup (Horde, Setup Chess and Chess960 start elsewhere - their shuffles are
+ * covered in-process by test-repetition.mjs). Two real sockets play Nf3 Nf6 Ng1 Ng8 over and over: the server MUST end the game with reason
+ * 'repetition' (a draw, no winner) at exactly the ply the shared repetition module (the same one the app uses) predicts - ply 8, or ply 9 in
+ * Duck Chess where the duck's square keeps the start position from ever recurring - and not one ply earlier. Both sockets must hear it.
+ */
+const REPETITION_MODES = [
+  ['classic', {}],
+  ['kingOfTheHill', { isKingOfTheHill: true }],
+  ['threeCheck', { isThreeCheck: true }],
+  ['fogOfWar', { isFogOfWar: true }],
+  ['giveaway', { isGiveaway: true }],
+  ['atomic', { isAtomic: true }],
+  ['duckChess', { isDuckChess: true }],
+  ['crazyhouse', { isCrazyhouse: true }],
+  ['spellChess', { isSpellChess: true }],
+];
+async function playRepetitionGame(modeName, flags, gameIndex) {
+  const alice = await connect(`RAlice${modeName}${gameIndex}`);
+  const bob = await connect(`RBob${modeName}${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const [matchA] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit - see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, ...flags });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found');
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, ...flags });
+      return matchFound;
+    })(),
+  ]);
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const overs = [];
+  alice.on('game_over', (p) => overs.push({ who: 'alice', ...p }));
+  bob.on('game_over', (p) => overs.push({ who: 'bob', ...p }));
+  const issues = [];
+  const shuffle = [['g1', 'f3'], ['g8', 'f6'], ['f3', 'g1'], ['f6', 'g8']];
+  const ducks = ['a3', 'a6'];
+  const expectedEnd = flags.isDuckChess ? 9 : 8;
+  let plies = 0;
+  for (let ply = 0; ply < expectedEnd + 2 && overs.length === 0; ply++) {
+    const turn = ply % 2 === 0 ? 'w' : 'b';
+    const opponentMove = waitFor(players[turn === 'w' ? 'b' : 'w'], 'opponent_move', 3000).catch(() => null);
+    const [from, to] = shuffle[ply % 4];
+    const ack = await emitAck(players[turn], 'make_move', { roomId, from, to, ...(flags.isDuckChess ? { duckTo: ducks[ply % 2] } : {}) });
+    if (!ack.ok) {
+      issues.push({ kind: 'repetition-move-refused', mode: modeName, ply: ply + 1, from, to, error: ack.error });
+      break;
+    }
+    plies++;
+    await opponentMove;
+    await new Promise((r) => setTimeout(r, 60)); // let a game_over land
+    if (overs.length > 0 && plies < expectedEnd) {
+      issues.push({ kind: 'repetition-too-early', mode: modeName, ply: plies, got: overs[0] });
+    }
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  const both = overs.filter((o) => o.reason === 'repetition' && o.winner === null);
+  if (plies !== expectedEnd || both.length !== 2) {
+    issues.push({ kind: 'repetition-not-declared', mode: modeName, plies, expectedEnd, overs });
+  }
+  alice.disconnect();
+  bob.disconnect();
+  return { plies, issues };
+}
+
 async function main() {
   console.log(`Nightly online fuzz: ${GAMES} real Fog of War games + ${GIVEAWAY_GAMES} Giveaway + ${ATOMIC_GAMES} Atomic + ${DUCK_GAMES} Duck Chess + ${FOUR_GAMES} 4 Player Chess + ${FOUR_GIVEAWAY_GAMES} 4 Player Giveaway + ${HORDE_GAMES} Horde + ${CRAZYHOUSE_GAMES} Crazyhouse games through ${SERVER_URL}, up to ${MAX_PLIES} plies each.\n`);
   let totalPlies = 0;
@@ -1365,6 +1440,22 @@ async function main() {
   }
   allIssues.push(...czStats.issues.map((i) => ({ ...i, variant: 'crazyhouse' })));
 
+  // --- Threefold repetition, every mode ---
+  const repStats = { games: 0, plies: 0, issues: [] };
+  for (const [modeName, flags] of REPETITION_MODES) {
+    for (let g = 0; g < REPETITION_GAMES; g++) {
+      try {
+        const { plies, issues } = await playRepetitionGame(modeName, flags, g);
+        repStats.games++;
+        repStats.plies += plies;
+        repStats.issues.push(...issues);
+      } catch (err) {
+        repStats.issues.push({ kind: 'exception', mode: modeName, game: g, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+  allIssues.push(...repStats.issues.map((i) => ({ ...i, variant: 'repetition' })));
+
   const expected = allIssues.filter((i) => i.kind === 'expected-blind-pawn-push-blocked-by-fog');
   const unexpected = allIssues.filter((i) => i.kind !== 'expected-blind-pawn-push-blocked-by-fog');
 
@@ -1379,6 +1470,7 @@ async function main() {
   console.log(`4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games, ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal/out-of-turn/quiet-while-capture-mandatory moves correctly refused, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself).`);
   console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
   console.log(`Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused, ${czStats.finished} games ended.`);
+  console.log(`Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes (${REPETITION_GAMES} each), every one a draw by 'repetition' at exactly the predicted ply.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
@@ -1399,6 +1491,7 @@ async function main() {
     `- 4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games (four real sockets each), ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal / out-of-turn / quiet-while-a-capture-is-mandatory moves correctly refused by the server, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, pieces-left scores) checked against the app engine`,
     `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
     `- Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused by the server, ${czStats.finished} games ended`,
+    `- Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes, each ended by 'repetition' at exactly the predicted ply on both sockets (Nf3 Nf6 Ng1 Ng8 shuffle)`,
     `- Unexpected issues: ${unexpected.length}`,
     '',
   ];

@@ -927,6 +927,72 @@ async function testFogOfWarNoCheckNotification() {
   watcher2.disconnect();
 }
 
+/**
+ * Threefold repetition over real sockets (repetition.ts): Nf3 Nf6 Ng1 Ng8 three times is an automatic draw, reason 'repetition', no winner,
+ * announced to BOTH players on the 8th ply - in Classic (with a reconnect between the second and third occurrence: the position list lives in
+ * the room), in Fog of War (the TRUE position is counted; a player's own fog view repeating proves nothing) and in Crazyhouse (pockets are part
+ * of a position, here both empty).
+ */
+async function testThreefoldRepetition() {
+  console.log('\n=== 13d. Threefold repetition: an automatic draw in every mode ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const shuffle = [['g1', 'f3'], ['g8', 'f6'], ['f3', 'g1'], ['f6', 'g8']];
+
+  async function game(label, flags, { reconnectAtPly } = {}) {
+    let a = await connect(`Rep${label}A`);
+    let b = await connect(`Rep${label}B`);
+    const [matchA, matchB] = await Promise.all([
+      (async () => {
+        const matchFound = waitFor(a, 'match_found'); // BEFORE the emit - see waitFor's doc comment
+        matchFound.catch(() => {});
+        await emitAck(a, 'join_queue', { timeControl, ...flags });
+        return matchFound;
+      })(),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 150));
+        const matchFound = waitFor(b, 'match_found');
+        matchFound.catch(() => {});
+        await emitAck(b, 'join_queue', { timeControl, ...flags });
+        return matchFound;
+      })(),
+    ]);
+    const roomId = matchA.roomId;
+    const seat = { w: matchA.color === 'w' ? { socket: a, token: matchA.playerToken } : { socket: b, token: matchB.playerToken }, b: matchA.color === 'b' ? { socket: a, token: matchA.playerToken } : { socket: b, token: matchB.playerToken } };
+    const overs = [];
+    const listen = (socket) => socket.on('game_over', (p) => overs.push(p));
+    listen(seat.w.socket);
+    listen(seat.b.socket);
+
+    for (let ply = 0; ply < 8; ply++) {
+      if (reconnectAtPly === ply) {
+        // both players drop and come back with the tokens they were given: the room still counts the earlier occurrences
+        for (const color of ['w', 'b']) {
+          seat[color].socket.disconnect();
+          const fresh = await connect(`Rep${label}${color}2`);
+          const back = await emitAck(fresh, 'rejoin_game', { roomId, playerToken: seat[color].token });
+          check(back.ok === true, `${label}: ${color === 'w' ? 'White' : 'Black'} rejoins at ply ${ply}`);
+          seat[color].socket = fresh;
+          listen(fresh);
+        }
+      }
+      const turn = ply % 2 === 0 ? 'w' : 'b';
+      const [from, to] = shuffle[ply % 4];
+      const ack = await emitAck(seat[turn].socket, 'make_move', { roomId, from, to });
+      check(ack.ok === true, `${label}: ply ${ply + 1} ${from}${to} accepted`);
+      await new Promise((r) => setTimeout(r, 80));
+      if (ply < 7) check(overs.length === 0, `${label}: no draw after ply ${ply + 1}`);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    check(overs.length === 2 && overs.every((o) => o.reason === 'repetition' && o.winner === null), `${label}: both players are told: draw by 'repetition', no winner`);
+    for (const color of ['w', 'b']) seat[color].socket.disconnect();
+    a = b = null;
+  }
+
+  await game('Classic', {}, { reconnectAtPly: 6 });
+  await game('Fog', { isFogOfWar: true });
+  await game('Crazyhouse', { isCrazyhouse: true });
+}
+
 async function testGiveawayMatchmakingAndMandatoryCapture() {
   console.log('\n=== Giveaway: matchmaking, server-side mandatory capture, flag isolation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -1663,6 +1729,7 @@ async function main() {
   await testFogOfWarRedactionAndWin();
   await testFogOfWarCastlingInCheck();
   await testFogOfWarNoCheckNotification();
+  await testThreefoldRepetition();
   await testGiveawayMatchmakingAndMandatoryCapture();
   await testAtomicOnline();
   await testDuckChessOnline();

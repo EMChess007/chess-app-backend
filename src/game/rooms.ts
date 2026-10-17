@@ -478,7 +478,8 @@ export class RoomManager {
         from: result.from,
         to: result.to,
         promotion: result.promotion,
-        san: result.san,
+        // Spectators see the whole board, so they get the real notation (with '+'/'#'); players never do - see fogOfWarNotation.ts.
+        san: result.trueSan ?? result.san,
         fen: room.engine.getFen(),
         turn: newTurn,
         whiteMs: room.whiteMs,
@@ -852,7 +853,7 @@ export class RoomManager {
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
         whiteMs: room.whiteMs,
         blackMs: room.blackMs,
-        moves: room.moves,
+        moves: withTrueNotation(room.moves),
       },
     };
   }
@@ -965,7 +966,7 @@ export class RoomManager {
     if (userIds.length === 0) return; // both players were guests — nothing to save
 
     const result = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
-    const pgn = buildPgn(room.initialFen, room.moves, result, variantPgnTag(room));
+    const pgn = buildPgn(room.initialFen, withTrueNotation(room.moves), result, variantPgnTag(room));
 
     const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } });
     const usernameById = new Map(users.map((u) => [u.id, u.username]));
@@ -991,6 +992,16 @@ export class RoomManager {
 
     await prisma.$transaction(rows.map((data) => prisma.game.create({ data })));
   }
+}
+
+/** `moves` with each Fog of War move's real notation ('+'/'#') put back - for spectators, who see the whole board, and the finished
+ * game's PGN. A live PLAYER payload must never use this (see fogOfWarNotation.ts). */
+function withTrueNotation(moves: AppliedMove[]): AppliedMove[] {
+  return moves.map((m) => {
+    if (m.trueSan === undefined) return m;
+    const { trueSan, ...rest } = m;
+    return { ...rest, san: trueSan };
+  });
 }
 
 /** Fog of War only — `room.moves` redacted for a rejoining player's own point of view (see

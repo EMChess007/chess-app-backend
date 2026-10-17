@@ -28,6 +28,7 @@ import {
   type CrazyhouseState,
   type ReservePieceType,
 } from './crazyhouse.js';
+import { hideCheckFromPlayers } from './fogOfWarNotation.js';
 
 const FILES = 'abcdefgh';
 
@@ -131,6 +132,9 @@ export interface AppliedMove {
   /** Crazyhouse only -- the reserves and promoted squares AFTER this ply (a copy; see crazyhouse.ts). */
   crazyhouse?: CrazyhouseState;
   san: string;
+  /** Fog of War only - the notation WITH its '+'/'#' (computed on the true board); `san` has them stripped because no player is ever
+   * told about a check (see fogOfWarNotation.ts). Only spectators and the finished game's PGN may read it. */
+  trueSan?: string;
   /** The type of piece captured by this move, if any — only ever populated by movePseudoLegal
    * (Fog of War), which needs it to detect a king capture; the normal move() path has never
    * needed it since every other variant's win conditions don't depend on what was captured. */
@@ -551,7 +555,10 @@ export class RoomChessEngine {
     const applied = toAppliedMove(pretty);
     // Duck Chess has no check either, so no '+'/'#' (and its games end at a king capture, so no rebuild is needed).
     if (this.duckChess) return { ...applied, san: applied.san.replace(/[+#]$/, '') };
-    if (!this.giveaway) return applied;
+    // Fog of War (the plain pseudo-legal path): a player is never told about a check, so '+'/'#' go too - the real notation is
+    // kept in `trueSan` for the server's spectators and saved PGN (see fogOfWarNotation.ts). Spell Chess is the one other user of
+    // this path (its freeze-escape move) and has real check rules, so it keeps chess.js's SAN.
+    if (!this.giveaway) return this.spellChess ? applied : hideCheckFromPlayers(applied);
     // Giveaway only: unlike Fog of War (where a king capture ends the game on the spot), a Giveaway game
     // CARRIES ON after a king is captured, and chess.js's live internal state does not cope — its
     // _kings entry for the captured side keeps pointing at the old square, and its castling rights

@@ -234,6 +234,12 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:fourplayerOnline
 
+      # The app now remembers the online game it is in, so a reload / app kill can rejoin the seat: a REAL new process rejoins with only the saved record
+      # (2 players: Classic + Crazyhouse / Duck / Spell / Fog of War state; 4 Player and 4 Player Giveaway). Needs the same FOUR_GRACE_MS dev server.
+      - name: Run the rejoin-after-restart e2e test (real server, a new process as the restarted app)
+        working-directory: chess-app/backend
+        run: npm run test:rejoinPersist
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

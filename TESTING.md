@@ -1061,3 +1061,5 @@ The app now remembers the online game it is in (frontend TESTING.md §25) and re
 - Secrecy: nothing the opponent, a spectator or another seat heard contains anybody's token.
 
 Mutation (copy-based, e2e): 15 server mutants (forged token accepted, the new socket not registered, the opponent not told / told the token on drop or return, Fog of War rejoin returning the true board, Crazyhouse / Duck / Spell state or the move list dropped from the answer, the finished answer for any token / never, the 4 Player seat for any token) — all killed.
+
+**Together with threefold repetition (§26).** The position list lives in the room, not in a socket, so it survives a restart: `test:rejoinPersist` scenario 3b plays 6 plies of the Nf3 Nf6 Ng1 Ng8 shuffle (the start position has occurred twice), kills White's app, restarts it as a new process that plays ply 7 itself, and Black's ply 8 ends the game by `'repetition'` - in Classic, Fog of War and Crazyhouse; both the opponent and the restarted process are told. Mutation: a rejoin that forgets the earlier positions, and a server that never declares the repetition, are both killed.

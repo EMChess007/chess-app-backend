@@ -95,7 +95,7 @@ function restartApp(record, { make, listen = 2500, during } = {}) {
       events.push(event);
       if (event.event === 'rejoined' && !fired && during) {
         fired = true;
-        void Promise.resolve(during(event)).catch((e) => events.push({ event: 'test-error', error: String(e) }));
+        void Promise.resolve(during(event, events)).catch((e) => events.push({ event: 'test-error', error: String(e) }));
       }
     }
   });
@@ -220,6 +220,35 @@ console.log('\n=== 3. The game ended while the app was away: the restart is told
   const stranger = await restartApp({ ...recordOf(g.black), match: { ...g.black.match, playerToken: 'not-the-token' } }, { listen: 300 });
   check(rejoinedOf(stranger)?.ack?.ok === false && rejoinedOf(stranger).ack.finished !== true, 'a forged token is told nothing about the finished game');
   g.sockets.forEach((s) => s.disconnect());
+}
+
+console.log('\n=== 3b. Threefold repetition survives an app restart: the count lives in the room ===');
+for (const [label, flags] of [['Classic', {}], ['Fog of War', { isFogOfWar: true }], ['Crazyhouse', { isCrazyhouse: true }]]) {
+  // Nf3 Nf6 Ng1 Ng8 twice = 8 plies is the third occurrence of the start position. Play 6 plies (the SECOND occurrence came at ply 4), kill White's app,
+  // restart it as a new process, and let it play ply 7 itself; Black plays ply 8: the game must end by repetition although the process that played
+  // ply 7 has never seen any of the earlier plies.
+  const g = await startTwoPlayer(`Rep${label.replace(' ', '')}`, flags);
+  const shuffle = [['g1', 'f3'], ['g8', 'f6'], ['f3', 'g1'], ['f6', 'g8']];
+  for (let ply = 0; ply < 6; ply++) await play(ply % 2 === 0 ? g.white : g.black, ...shuffle[ply % 4]);
+  const overBeforeKill = []; // nobody may have been told anything yet
+  g.black.socket.on('game_over', (p) => overBeforeKill.push(p));
+  await kill(g.white);
+  const blackSeesOver = waitFor(g.black.socket, 'game_over', 6000);
+  const run = await restartApp(recordOf(g.white), {
+    make: { from: 'f3', to: 'g1' },
+    listen: 1500,
+    during: async (_event, events) => {
+      for (let i = 0; i < 40 && !events.some((e) => e.event === 'made'); i++) await sleep(100);
+      await play(g.black, 'f6', 'g8'); // ply 8: the third occurrence
+    },
+  });
+  const re = rejoinedOf(run);
+  check(re?.ack?.ok === true && re.ack.state.moves.length === 6, `${label}: the restarted app rejoins mid-repetition (6 plies, the position has occurred twice)`);
+  check(run.events.find((e) => e.event === 'made')?.ack?.ok === true, `${label}: and plays ply 7 itself - no draw yet`);
+  const over = await blackSeesOver;
+  check(over.reason === 'repetition' && over.winner === null, `${label}: ply 8 ends the game: draw by 'repetition' - the count survived the restart`);
+  check(run.events.some((e) => e.event === 'game_over' && e.payload.reason === 'repetition'), `${label}: the restarted process is told, too`);
+  g.sockets.forEach((x) => x.disconnect());
 }
 
 console.log('\n=== 4. Variants with extra state come back whole ===');

@@ -17,6 +17,7 @@
     "test:fogOfWarVisibilityGroundTruth": "tsx scripts/test-fogOfWarVisibilityGroundTruth.mjs",
     "test:fogOfWarCastling": "tsx scripts/test-fogOfWarCastling.mjs",
     "test:fogOfWarNotation": "tsx scripts/test-fogOfWarNotation.mjs",
+    "test:repetition": "tsx scripts/test-repetition.mjs",
     "test:rejoinPersist": "tsx scripts/test-rejoin-persist.mjs",
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",

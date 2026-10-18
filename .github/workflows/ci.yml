@@ -160,6 +160,10 @@ jobs:
           npm run test:fogOfWarCastling
           npm run test:fogOfWarNotation
 
+      - name: Run threefold repetition suite (every mode through the room manager, rejoin, parity with the mobile app)
+        working-directory: chess-app/backend
+        run: npm run test:repetition
+
       - name: Run Giveaway regression suite (server rules, authority, parity with the mobile app)
         working-directory: chess-app/backend
         run: npm run test:giveaway

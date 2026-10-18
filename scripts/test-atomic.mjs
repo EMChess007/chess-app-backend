@@ -154,7 +154,7 @@ function atomicRoom(initialFen, overrides = {}) {
   check(ok && gameOvers().length === 0, 'seven plies of shuffling do not end the game');
   check(move(...shuffle[3]).ok === true, 'the eighth ply is accepted');
   const over = gameOvers();
-  check(over.length === 2 && over.every((e) => e.payload.reason === 'draw' && e.payload.winner === null), 'the third occurrence of the starting position is a threefold-repetition draw (from the room\'s FEN history)');
+  check(over.length === 2 && over.every((e) => e.payload.reason === 'repetition' && e.payload.winner === null), 'the third occurrence of the starting position is a threefold-repetition draw (from the room\'s FEN history)');
 }
 {
   const { move } = atomicRoom('8/4P3/8/8/8/8/8/k6K w - - 0 1');

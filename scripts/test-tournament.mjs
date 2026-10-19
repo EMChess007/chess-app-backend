@@ -13,9 +13,18 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { io } from 'socket.io-client';
+import { createUserTracker, resolveDatabaseUrl } from './lib/test-user-cleanup.mjs';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 let passedChecks = 0;
+
+// Every account this run registers is recorded and deleted in main()'s `finally` (see scripts/lib/test-user-cleanup.mjs): only those ids, only on a local database.
+const databaseUrl = resolveDatabaseUrl();
+const users = createUserTracker({
+  databaseUrl,
+  // The URL that passed the "is it local?" check is the one used, so the guard and the connection can never disagree.
+  getPrisma: async () => new (await import('@prisma/client')).PrismaClient({ datasources: { db: { url: databaseUrl } } }),
+});
 
 function check(condition, message) {
   assert.ok(condition, message);
@@ -31,7 +40,7 @@ async function registerUser(username) {
   });
   if (!res.ok) throw new Error(`register ${username} failed: ${res.status} ${await res.text()}`);
   const data = await res.json();
-  return { userId: data.user.id, username: data.user.username, token: data.token };
+  return users.track({ userId: data.user.id, username: data.user.username, token: data.token });
 }
 
 function connect(name, token) {
@@ -294,20 +303,33 @@ async function testThreeCheckFlagThreadsThrough() {
   ivoSocket.disconnect();
 }
 
-async function main() {
+async function run() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testGuestsAreRejected();
   await testMinimumPlayersToStart();
   await testFullRoundRobinProgression();
   await testKingOfTheHillFlagThreadsThrough();
   await testThreeCheckFlagThreadsThrough();
+}
 
+async function main() {
+  let failure = null;
+  try {
+    await run();
+  } catch (err) {
+    failure = err;
+  } finally {
+    // On success AND on failure: the accounts this run registered must not outlive it.
+    const cleaned = await users.cleanup();
+    if (!failure && !cleaned.skipped && cleaned.remaining > 0) failure = new Error(`cleanup left ${cleaned.remaining} test account(s) behind`);
+  }
+  if (failure) {
+    console.error('\nTEST FAILED:', failure.message);
+    console.error(failure.stack);
+    process.exit(1);
+  }
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error('\nTEST FAILED:', err.message);
-  console.error(err.stack);
-  process.exit(1);
-});
+main();

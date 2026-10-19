@@ -111,6 +111,16 @@ jobs:
         run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40
         continue-on-error: true
 
+      - name: Browser end-to-end (Chaturaji - the REAL app in Chrome against a private copy of this server)
+        id: browser_e2e
+        working-directory: chess-app/backend
+        # Chaturaji W4 (backend/scripts/e2e-browser). It starts its OWN backend on port 3191 (the dev server above keeps 3000) and its own static copy of the frontend's web build,
+        # exported from the frontend checked out above with EXPO_PUBLIC_API_URL pointing at that backend, and drives them with Playwright over the Chrome that ubuntu-latest ships
+        # (no browser download). Nightly, not per push: it exports the web app (~1 minute), then plays eight scenarios with real clocks (a one-minute game to a flag, bot games to their end),
+        # which is several times the per-push budget. Test accounts it registers are deleted again; the database is this job's own Postgres service.
+        run: npm run test:e2eBrowser
+        continue-on-error: true
+
       - name: Upload fuzz reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,8 +131,8 @@ jobs:
             chess-app/backend/nightly-fuzz-online-report.md
           retention-days: 90
 
-      - name: Fail the job if either fuzz run failed
-        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure'
+      - name: Fail the job if either fuzz run or the browser end-to-end failed
+        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.browser_e2e.outcome == 'failure'
         run: exit 1
 
       - name: Open/update a tracking issue on failure

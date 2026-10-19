@@ -272,6 +272,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:userCleanup
 
+      - name: Run the auth rate-limit override test (20 per window; the test-only override is ignored in production)
+        working-directory: chess-app/backend
+        run: npm run test:authRateLimit
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

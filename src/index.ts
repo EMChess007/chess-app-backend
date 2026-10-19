@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import { Server as SocketIOServer } from 'socket.io';
 import { registerFourPlayerHandlers } from './game/fourPlayerHandlers.js';
 import { registerSocketHandlers } from './game/socketHandlers.js';
+import { createAuthLimiter } from './lib/authRateLimit.js';
 import authRouter from './routes/auth.js';
 import gamesRouter from './routes/games.js';
 import puzzlesRouter from './routes/puzzles.js';
@@ -40,13 +41,8 @@ app.use(globalLimiter);
 // Tighter limit specifically for login/register — these are the endpoints an attacker would
 // actually want to hammer (password brute-forcing, mass fake-account creation), and are cheap for
 // a legitimate user to stay well under (nobody logs in or registers 20+ times in 15 minutes).
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many attempts. Please try again later.' },
-});
+// 20 per 15 minutes (src/lib/authRateLimit.ts, which also holds the test-only, never-in-production override).
+const authLimiter = createAuthLimiter();
 
 // Without this, a successful request produces zero terminal output — indistinguishable from
 // a request that never arrived at all, which makes "is my client even reaching the backend?"

@@ -101,13 +101,14 @@ jobs:
           cat chess-app/backend/server.log || true
           exit 1
 
-      - name: Online fuzz (Fog of War, Giveaway, Atomic, Duck Chess and 4 Player Chess through the live server/socket protocol)
+      - name: Online fuzz (Fog of War, Giveaway, Atomic, Duck Chess, 4 Player Chess, 4 Player Giveaway and Chaturaji through the live server/socket protocol)
         id: online_fuzz
         working-directory: chess-app/backend
         # Arguments: fogGames maxPlies giveawayGames atomicGames duckGames fourPlayerGames fourPlayerGiveawayGames. The first five are what an omitted argument used to
         # default to (200 each); 4 Player Chess and 4 Player Giveaway are 40 each because each game has FOUR sockets and is paced under the server's move rate limit (about 5-6 s a
         # game, so about 4 minutes per variant). tsx for the same reason as the logic fuzz above.
-        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40
+        # Chaturaji is the LAST argument (40 games, like the other two 4-seat variants): hordeGames and crazyhouseGames are passed at the 200 an omitted argument gives them, and repetition at its default 3.
+        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40
         continue-on-error: true
 
       - name: Upload fuzz reports

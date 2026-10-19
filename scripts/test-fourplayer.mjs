@@ -146,7 +146,8 @@ const ELOS_DEEP = [1800, 3000];
 /** The bots, given identically seeded RNGs, must pick the same move (and the evaluator must score identically). */
 function compareBots(ls, seedBase, elos, deep = false) {
   const giveaway = ls.fe.rules.mode === 'giveaway'; // a Giveaway position is played by the Giveaway bot (and has no Chess evaluator to compare)
-  const choose = giveaway ? 'chooseGiveawayFourBotMove' : 'chooseBotMove';
+  const chaturaji = FE.variantOfRules(ls.fe.rules) === 'chaturaji'; // a Chaturaji position by the Chaturaji bot (the evaluator is the shared one, compared as for Chess)
+  const choose = giveaway ? 'chooseGiveawayFourBotMove' : chaturaji ? 'chooseChaturajiBotMove' : 'chooseBotMove';
   for (const elo of elos) {
     const seed = (seedBase * 7919 + elo) >>> 0;
     ls.same(`bot move at ELO ${elo}`, FE[choose](ls.fe, elo, mulberry32(seed)), BE[choose](ls.be, elo, mulberry32(seed)));

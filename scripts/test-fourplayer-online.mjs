@@ -26,7 +26,7 @@
  */
 import assert from 'node:assert/strict';
 import { io } from 'socket.io-client';
-import { PLAYABLE_SQUARES, BISHOP, CHATURAJI_RULES, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, SQUARE8, deserialize, initialState, legalMoves, piecesLeft, promotionOf, pseudoMoves, serialize, squareName } from '../src/game/fourPlayer/index.ts';
+import { PLAYABLE_SQUARES, BISHOP, CHATURAJI_RULES, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, SQUARE8, deserialize, geometryOf, initialState, legalMoves, listPieces, piecesLeft, promotionOf, pseudoMoves, serialize, squareName } from '../src/game/fourPlayer/index.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const SEED = Number(process.env.FOUR_E2E_SEED ?? 20260101);
@@ -169,7 +169,8 @@ function pickMove(text, seat, rules) {
   assert.ok(moves.length > 0, 'pickMove: the seat on move has a legal move');
   const move = moves[Math.floor(rng() * moves.length)];
   const promotion = PROMOTION_LETTER[promotionOf(move)];
-  return { from: squareName(move.from), to: squareName(move.to), ...(promotion ? { promotion } : {}) };
+  const name = geometryOf(state.rules).squareName; // the squares are named on THIS room's board (the 8 x 8 Chaturaji board is not the cross board)
+  return { from: name(move.from), to: name(move.to), ...(promotion ? { promotion } : {}) };
 }
 
 /** Whose turn it is according to the position the server last sent (every player holds the same one - scenario 2 proves it). */
@@ -909,6 +910,171 @@ async function testChaturajiOverTheWire() {
   disconnectAll(room.sockets);
 }
 
+/** The Chaturaji rule a four_game_over claims, checked against the final position independently of the engine's own result object. */
+function checkChaturajiResult(over, final) {
+  check(JSON.stringify(over.scores) === JSON.stringify([...final.score]), 'four_game_over.scores are the POINTS in the final position');
+  const best = Math.max(...over.scores);
+  check(JSON.stringify([...over.winners].sort((a, b) => a - b)) === JSON.stringify([0, 1, 2, 3].filter((seat) => over.scores[seat] === best)), `the winner(s) ${over.winners.join(',')} are exactly the seat(s) with the highest score (${best}) - a tie is shared`);
+  if (over.reason === 'elimination') check([0, 1, 2, 3].filter((seat) => final.status[seat] !== 'active').length === 3, 'elimination: three seats are out, one is left');
+  else if (over.reason === 'cap') check(final.ply >= 1000, `cap: the game reached the ply cap (ply ${final.ply})`);
+  else check(false, `a Chaturaji game ended with an unexpected reason "${over.reason}"`);
+}
+
+async function testChaturajiWholeGame() {
+  console.log('\n=== 18. Chaturaji: a whole natural game over four sockets and a spectator - identical snapshots, a consistent result in points ===');
+  const room = await startRoom('CG', 'chaturaji');
+  const { players, roomId } = room;
+  const spectator = await connect('CG-spectator');
+  const specInbox = record(spectator);
+  const specAck = await emitAck(spectator, 'four_spectate_game', { roomId });
+  check(specAck.ok === true && specAck.state.variant === 'chaturaji' && specAck.state.state.split(' ')[0].split('/').length === 8, 'a spectator joined the Chaturaji room and got the 8-row board');
+  const { state: end } = await playUntil(room, () => false, 4000); // random legal moves from whoever is on move, until the engine ends the game
+  check(end.result !== null, 'the game ended by itself (no resignation involved)');
+  await until('four_game_over reached all four seats and the spectator', () => players.every((p) => p.inbox.gameOvers.length === 1) && specInbox.gameOvers.length === 1, 8000);
+  const over = specInbox.gameOvers[0];
+  check(players.every((p) => JSON.stringify(p.inbox.gameOvers[0]) === JSON.stringify(over)), 'every seat received the same four_game_over as the spectator');
+  const final = deserialize(over.state, CHATURAJI_RULES);
+  check(final.result !== null && final.result.reason === over.reason && JSON.stringify([...final.result.winners]) === JSON.stringify([...over.winners].sort((a, b) => a - b)), `reason "${over.reason}", winner(s) ${over.winners.join(',')} - equal to the result inside its final snapshot`);
+  checkChaturajiResult(over, final);
+  check(specInbox.states.at(-1).state === over.state, 'the last four_state and four_game_over carry the same snapshot');
+  check(specInbox.states.every((st, i) => st.seq === i + 1) && players.every((p) => p.inbox.states.every((st, i) => st.seq === i + 1) && p.inbox.states.length === specInbox.states.length), `seqs 1..${specInbox.states.length} arrived with no gap for the spectator and all four players`);
+  let mismatches = 0;
+  for (const st of specInbox.states) for (const p of players) if (p.inbox.states[st.seq - 1].state !== st.state) mismatches++;
+  check(mismatches === 0, `all four players held the byte-identical snapshot at every one of the ${specInbox.states.length} seqs`);
+  const kingsTaken = specInbox.states.flatMap((st) => st.events).filter((e) => e.kind === 'eliminated' && e.reason === 'kingCaptured');
+  check(kingsTaken.every((e) => typeof e.credit === 'number' && e.credit !== e.seat), `${kingsTaken.length} king capture(s) in the game, each eliminated event naming the capturer`);
+  const late = await connect('CG-late');
+  const lateAck = await emitAck(late, 'four_rejoin', { roomId, playerToken: players[1].match.playerToken });
+  check(lateAck.ok === true && lateAck.finished === true && JSON.stringify(lateAck.gameOver) === JSON.stringify(over), 'a late rejoin of the finished game answers the same result');
+  disconnectAll(room.sockets, spectator, late);
+}
+
+async function testChaturajiResignations() {
+  console.log('\n=== 19. Chaturaji: a resignation leaves a walking dead king; the last seat standing wins with +3 per king on the board ===');
+  const room = await startRoom('CR', 'chaturaji');
+  const { players, roomId } = room;
+  const r1 = await emitAck(players[1].socket, 'four_resign', { roomId });
+  check(r1.ok === true, 'seat 1 resigned off its turn');
+  await until('the resignation reached everyone', () => players.every((p) => p.inbox.states.length >= 1));
+  const st = players[0].inbox.states[0];
+  const after = deserialize(st.state, CHATURAJI_RULES);
+  check(st.actor === 'resign' && st.move === null && st.events.some((e) => e.kind === 'eliminated' && e.seat === 1 && e.reason === 'resign' && e.credit === null), 'a four_state (actor resign) with the eliminated event and no credit');
+  check(after.status.join() === 'active,dead-king,active,active' && after.turn === 0 && after.result === null, 'seat 1 is a DEAD KING (not frozen: its king still walks), the turn is still Red\'s and the game goes on');
+  const out = await emitAck(players[1].socket, 'four_make_move', { roomId, from: 'a8', to: 'a7' });
+  check(out.ok === false, 'the resigned seat can no longer move');
+  // let the others play a round: the dead king takes a step of its own
+  for (let i = 0; i < 3; i++) {
+    const res = await playOne(room);
+    check(res.ack.ok === true, `ply ${i + 1}: seat ${res.seat} plays a legal Chaturaji move`);
+    await sleep(15);
+  }
+  await until('the dead king stepped', () => players[0].inbox.states.some((s) => s.events.some((e) => e.kind === 'deadKingMove' && e.seat === 1)));
+  const steps = players[0].inbox.states.flatMap((s) => s.events).filter((e) => e.kind === 'deadKingMove' && e.seat === 1);
+  check(steps.length >= 1, `Blue's dead king walked ${steps.length} time(s) on its own`);
+  check(new Set(players.map((p) => latestOf(p).text)).size === 1, '...and all four players hold the same snapshot');
+  await until('every player is at the same seq', () => new Set(players.map((p) => latestOf(p).seq)).size === 1);
+  const before = deserialize(latestOf(players[0]).text, CHATURAJI_RULES);
+  const rivalKings = listPieces(before).filter((p) => /^[byg]K@/.test(p)).length;
+  for (const seat of [2, 3]) await emitAck(players[seat].socket, 'four_resign', { roomId });
+  await until('four_game_over reached all four seats', () => players.every((p) => p.inbox.gameOvers.length === 1));
+  const over = players[0].inbox.gameOvers[0];
+  const final = deserialize(over.state, CHATURAJI_RULES);
+  check(over.reason === 'elimination' && over.winners.join() === '0', 'the third resignation ends the game: elimination, the one seat left (Red) wins');
+  check(rivalKings === 3 && over.scores[0] === before.score[0] + 3 * rivalKings && over.scores.slice(1).join() === before.score.slice(1).join(), `Red's score is what it had (${before.score[0]}) plus 3 for each of the ${rivalKings} dead kings still on the board = ${over.scores[0]}; the resigned seats gain nothing`);
+  checkChaturajiResult(over, final);
+  disconnectAll(room.sockets);
+}
+
+async function testChaturajiTakeoverAndRejoin() {
+  console.log('\n=== 20. Chaturaji: the seat on move drops off; after the grace a bot plays a legal move on the 8 x 8 board; the human retakes the seat ===');
+  const room = await startRoom('CT', 'chaturaji');
+  const { players, roomId } = room;
+  const { state } = await playUntil(room, (st) => st.ply >= 6);
+  const victim = state.turn;
+  const others = [0, 1, 2, 3].filter((seat) => seat !== victim).map((seat) => players[seat]);
+  const victimName = players[victim].match.seats[victim].name;
+  const seatUpdatesBefore = others.map((p) => p.inbox.seatUpdates.length);
+  players[victim].socket.disconnect();
+  await until('the other three were told the seat is away', () => others.every((p, i) => p.inbox.seatUpdates.length > seatUpdatesBefore[i]));
+  const away = others[0].inbox.seatUpdates.at(-1).seats[victim];
+  if (away.graceMsLeft > 15_000) throw new Error(`the server's takeover grace is ${away.graceMsLeft} ms: start the dev server with FOUR_GRACE_MS=1500`);
+  const seqBefore = latestOf(others[0]).seq;
+  await until('the takeover is announced', () => others.every((p) => p.inbox.seatUpdates.some((u) => u.seats[victim].kind === 'bot')), away.graceMsLeft + 5000);
+  const taken = others[0].inbox.seatUpdates.find((u) => u.seats[victim].kind === 'bot').seats[victim];
+  check(taken.botReason === 'takeover' && taken.name === victimName, 'the seat became a bot (reason takeover) that keeps the player\'s name');
+  await until('the takeover bot has moved', () => others.every((p) => p.inbox.states.some((s) => s.actor === 'bot' && s.seq > seqBefore)), 8000);
+  const botState = others[0].inbox.states.find((s) => s.actor === 'bot' && s.seq > seqBefore);
+  check(botState.move.seat === victim && botState.seq === seqBefore + 1, 'the bot moved for the absent seat, as the very next state');
+  const geo = SQUARE8;
+  const legalLabels = legalMoves(state, victim).map((m) => geo.squareName(m.from) + geo.squareName(m.to));
+  check(legalLabels.includes(botState.move.from + botState.move.to), `...with one of the moves the engine lists as legal for that position (${botState.move.label} on the 8 x 8 board)`);
+  const back = await connect('CT-back');
+  const rejoin = await emitAck(back, 'four_rejoin', { roomId, playerToken: players[victim].match.playerToken });
+  check(rejoin.ok === true && !rejoin.finished && rejoin.state.seat === victim && rejoin.state.variant === 'chaturaji', 'the player rejoins with the original token and the answer names the variant');
+  check(rejoin.state.seats[victim].kind === 'human' && rejoin.state.seats[victim].connected === true, '...the seat is the human\'s again');
+  check(deserialize(rejoin.state.state, CHATURAJI_RULES).ply >= 7, '...and the snapshot is the live Chaturaji position');
+  disconnectAll(room.sockets, back);
+}
+
+async function testChaturajiBotsFillTheTable() {
+  console.log('\n=== 21. Chaturaji: two players queue, the fill timer runs out, bots take the other two seats and play ===');
+  const sockets = [await connect('CF0'), await connect('CF1')];
+  const inboxes = sockets.map(record);
+  const found = sockets.map((s) => waitFor(s, 'four_match_found', 60_000));
+  found.forEach((p) => p.catch(() => {}));
+  for (const s of sockets) check((await emitAck(s, 'four_join_queue', { timeControl: { initialSeconds: 600, incrementSeconds: 0 }, timeControlLabel: '10 min', variant: 'chaturaji' })).ok === true, 'a player queues for Chaturaji at a time control of its own');
+  await until('both were told two are waiting, with a countdown', () => inboxes.every((b) => b.queueUpdates.some((u) => u.queued === 2 && Number.isFinite(u.fillInMs))));
+  const countdown = inboxes[0].queueUpdates.find((u) => u.queued === 2).fillInMs;
+  console.log(`      fill countdown ${countdown} ms - waiting for it`);
+  const matches = await Promise.all(found);
+  check(matches.every((m) => m.variant === 'chaturaji') && matches[0].roomId === matches[1].roomId && matches[0].seat !== matches[1].seat, 'both are matched into one Chaturaji room, at distinct seats');
+  const seats = matches[0].seats;
+  check(seats.filter((s) => s.kind === 'human').length === 2 && seats.filter((s) => s.kind === 'bot' && s.botReason === 'fill').length === 2, '...two humans and two FILL bots');
+  const players = [];
+  matches.forEach((m, i) => (players[m.seat] = { socket: sockets[i], inbox: inboxes[i], match: m, name: `CF${i}` }));
+  const roomId = matches[0].roomId;
+  const humanSeats = [matches[0].seat, matches[1].seat];
+  const mine = (seat) => players[seat];
+  const geo = SQUARE8;
+
+  // play until the bots have moved a few times; the humans move when it is their turn
+  let botMoves = 0;
+  const seen = new Set();
+  for (let i = 0; i < 400 && botMoves < 6; i++) {
+    const lead = mine(humanSeats[0]);
+    const turn = deserialize(latestOf(lead).text, CHATURAJI_RULES).turn;
+    if (humanSeats.includes(turn)) {
+      const player = mine(turn);
+      await until(`seat ${turn} has caught up`, () => latestOf(player).seq >= latestOf(lead).seq);
+      const move = pickMove(latestOf(player).text, turn, CHATURAJI_RULES);
+      const ack = await emitAck(player.socket, 'four_make_move', { roomId, ...move });
+      check(ack.ok === true, `human seat ${turn} plays ${move.from}-${move.to}`);
+      await until(`seat ${humanSeats[0]} has four_state seq ${ack.seq}`, () => latestOf(lead).seq >= ack.seq);
+    } else {
+      const before = latestOf(lead).seq;
+      await until(`the bot on seat ${turn} moves`, () => latestOf(lead).seq > before, 8000);
+      const st = latestOf(lead).payload;
+      const prior = deserialize(lead.inbox.states.length > 1 ? lead.inbox.states.at(-2).state : lead.match.state, CHATURAJI_RULES);
+      const legalLabels = legalMoves(prior, turn).map((m) => geo.squareName(m.from) + geo.squareName(m.to));
+      if (!seen.has(st.seq)) {
+        seen.add(st.seq);
+        botMoves++;
+        check(st.actor === 'bot' && st.move.seat === turn && legalLabels.includes(st.move.from + st.move.to), `the fill bot on seat ${turn} plays ${st.move.label}: a legal Chaturaji move`);
+      }
+    }
+  }
+  check(botMoves >= 6, `the bots played ${botMoves} moves between the humans' moves`);
+  check(new Set(humanSeats.map((s) => latestOf(mine(s)).text)).size === 1, 'both humans hold the identical snapshot');
+
+  // both humans resign: the bots finish the game on their own, fast-forwarded, and the humans are told how it ended
+  for (const seat of humanSeats) await emitAck(mine(seat).socket, 'four_resign', { roomId });
+  await until('four_game_over reached both humans', () => humanSeats.every((s) => mine(s).inbox.gameOvers.length === 1), 40_000);
+  const over = mine(humanSeats[0]).inbox.gameOvers[0];
+  check(JSON.stringify(over) === JSON.stringify(mine(humanSeats[1]).inbox.gameOvers[0]), 'both humans received the same four_game_over');
+  checkChaturajiResult(over, deserialize(over.state, CHATURAJI_RULES));
+  disconnectAll(sockets);
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} (move seed ${SEED}) ...`);
   await testQueueAndMatchFound();
@@ -928,6 +1094,10 @@ async function main() {
   await testGiveawayListingNextToChess();
   await testLobbiesNeverMix();
   await testChaturajiOverTheWire();
+  await testChaturajiWholeGame();
+  await testChaturajiResignations();
+  await testChaturajiTakeoverAndRejoin();
+  await testChaturajiBotsFillTheTable();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

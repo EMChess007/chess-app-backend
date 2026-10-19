@@ -12,7 +12,7 @@
  *     a tampered token is refused; a game that ended while the app was away is reported with its result (kept 5 minutes).
  *   - 2 players with extra state: Crazyhouse (the pockets), Duck Chess (the duck), Spell Chess (charges + the pending freeze), Fog of War (the REDACTED
  *     view: nothing the player is not allowed to see comes back).
- *   - 4 Player Chess and 4 Player Giveaway: four_rejoin from a new process returns the seat with the room's current snapshot, and no bot ever took it.
+ *   - 4 Player Chess, 4 Player Giveaway and Chaturaji: four_rejoin from a new process returns the seat with the room's current snapshot, and no bot ever took it.
  *   - SECRECY: across all of that, no event the opponent, a spectator or another seat received contains anybody's token.
  *
  * Needs a running backend (BACKEND_URL, default http://localhost:3000), started with FOUR_GRACE_MS=1500 like test-fourplayer-online.mjs.
@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { io } from 'socket.io-client';
 import { serializeActiveGame } from '../../src/logic/activeGame.ts';
-import { GIVEAWAY_RULES, deserialize, legalMoves, promotionOf, squareName, BISHOP, KNIGHT, QUEEN, ROOK } from '../src/game/fourPlayer/index.ts';
+import { CHATURAJI_RULES, GIVEAWAY_RULES, deserialize, geometryOf, legalMoves, promotionOf, BISHOP, KNIGHT, QUEEN, ROOK } from '../src/game/fourPlayer/index.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 let passed = 0;
@@ -342,26 +342,27 @@ async function startFour(label, variant = 'ffa') {
   const found = sockets.map((s) => waitFor(s, 'four_match_found'));
   found.forEach((p) => p.catch(() => {}));
   for (const s of sockets) {
-    const res = await ack(s, 'four_join_queue', { timeControl: TIME, timeControlLabel: '5 min', ...(variant === 'giveaway' ? { variant } : {}) });
+    const res = await ack(s, 'four_join_queue', { timeControl: TIME, timeControlLabel: '5 min', ...(variant !== 'ffa' ? { variant } : {}) });
     assert.ok(res.ok, 'four_join_queue');
   }
   const matches = await Promise.all(found);
   const players = [];
   matches.forEach((match, i) => (players[match.seat] = { socket: sockets[i], match }));
-  return { players, sockets, roomId: matches[0].roomId, rules: variant === 'giveaway' ? GIVEAWAY_RULES : undefined };
+  return { players, sockets, roomId: matches[0].roomId, rules: variant === 'giveaway' ? GIVEAWAY_RULES : variant === 'chaturaji' ? CHATURAJI_RULES : undefined };
 }
 async function fourMove(room, seat, snapshot) {
   const state = deserialize(snapshot, room.rules);
   const moves = legalMoves(state, seat);
   const move = moves[0];
   const promotion = PROMOTION_LETTER[promotionOf(move)];
-  const res = await ack(room.players[seat].socket, 'four_make_move', { roomId: room.roomId, from: squareName(move.from), to: squareName(move.to), ...(promotion ? { promotion } : {}) });
+  const name = geometryOf(state.rules).squareName; // squares are named on the room's own board (Chaturaji's is 8 x 8)
+  const res = await ack(room.players[seat].socket, 'four_make_move', { roomId: room.roomId, from: name(move.from), to: name(move.to), ...(promotion ? { promotion } : {}) });
   assert.ok(res.ok, `four_make_move refused: ${res.error}`);
   return res;
 }
-for (const [label, variant] of [['4 Player Chess', 'ffa'], ['4 Player Giveaway', 'giveaway']]) {
+for (const [label, variant, prefix] of [['4 Player Chess', 'ffa', 'F'], ['4 Player Giveaway', 'giveaway', 'G'], ['Chaturaji', 'chaturaji', 'C']]) {
   console.log(`\n=== 5. ${label}: restart as a new process, within the grace ===`);
-  const room = await startFour(variant === 'ffa' ? 'F' : 'G', variant);
+  const room = await startFour(prefix, variant);
   const states = [];
   room.players.forEach((p) => p.socket.on('four_state', (s) => states.push(s)));
   const first = room.players.find((p) => deserialize(p.match.state, room.rules).turn === p.match.seat);

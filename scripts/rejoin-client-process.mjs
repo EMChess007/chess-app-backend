@@ -28,6 +28,17 @@ const url = arg('url') ?? 'http://localhost:3000';
 const listenMs = Number(arg('listen') ?? 2500);
 const make = arg('make') ? JSON.parse(arg('make')) : null;
 
+// --hold: everything that takes time (starting node + tsx, compiling the app's record module, reading the record) is done; say so and wait for "go" on
+// stdin before touching the network. The caller (test-rejoin-persist.mjs) uses it so that the restart it measures against a server's disconnect grace is
+// the handshake itself, not this process's start-up - which on a slow machine outlasts a 1.5 s grace and made the test depend on how fast the machine boots node.
+if (process.argv.includes('--hold')) {
+  out({ event: 'ready' });
+  await new Promise((resolve) => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.once('data', resolve);
+  });
+}
+
 const socket = io(url, { transports: ['websocket'], reconnection: false });
 const ack = (event, payload) =>
   new Promise((resolve, reject) => socket.timeout(5000).emit(event, payload, (err, res) => (err ? reject(new Error(`${event}: no answer`)) : resolve(res))));

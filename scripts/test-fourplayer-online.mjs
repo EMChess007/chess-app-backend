@@ -38,9 +38,9 @@ function check(condition, message) {
   console.log(`  ✓ ${message}`);
 }
 
-function connect(name) {
+function connect(name, url = SERVER_URL) {
   return new Promise((resolve, reject) => {
-    const socket = io(SERVER_URL, { transports: ['websocket'], reconnection: false });
+    const socket = io(url, { transports: ['websocket'], reconnection: false });
     const timer = setTimeout(() => reject(new Error(`${name}: connect timed out`)), 5000);
     socket.on('connect', () => {
       clearTimeout(timer);
@@ -1075,8 +1075,38 @@ async function testChaturajiBotsFillTheTable() {
   disconnectAll(sockets);
 }
 
+/**
+ * The REAL fill wait, as a regression guard (Chaturaji W3, step 0C). The main server of this run is started with a short FOUR_FILL_MS (CI: 8 s) so that scenario 21 does not
+ * spend 30 s of wall clock; this guard keeps the production default honest. It talks to a SECOND server started without the override (FOUR_E2E_REAL_FILL_URL) and runs
+ * CONCURRENTLY with every other scenario, so it adds no time of its own: two players queue for Chaturaji, the countdown they are told is the production 30 s, and the bots
+ * really do arrive after about that long. Without the URL (a local run against one server) it is skipped and says so.
+ */
+async function testRealFillWait(url) {
+  const sockets = [await connect('RF0', url), await connect('RF1', url)];
+  const inboxes = sockets.map(record);
+  const found = sockets.map((s) => waitFor(s, 'four_match_found', 50_000));
+  found.forEach((p) => p.catch(() => {}));
+  for (const s of sockets) {
+    const ack = await emitAck(s, 'four_join_queue', { timeControl: { initialSeconds: 420, incrementSeconds: 0 }, timeControlLabel: '7 min', variant: 'chaturaji' });
+    check(ack.ok === true, 'real fill wait: a player queues for Chaturaji on the server with the production settings');
+  }
+  await until('real fill wait: both were told the countdown', () => inboxes.every((b) => b.queueUpdates.some((u) => u.queued === 2 && Number.isFinite(u.fillInMs))));
+  const told = inboxes[0].queueUpdates.find((u) => u.queued === 2).fillInMs;
+  const t0 = Date.now();
+  check(told >= 28_000 && told <= 30_000, `real fill wait: the countdown told to the players is the production 30 s (${told} ms)`);
+  const matches = await Promise.all(found);
+  const waited = Date.now() - t0;
+  check(waited >= told - 2_000 && waited <= told + 6_000, `real fill wait: the bots arrived after the countdown, not before (${waited} ms for a countdown of ${told} ms)`);
+  check(matches[0].roomId === matches[1].roomId && matches[0].seats.filter((s) => s.kind === 'bot' && s.botReason === 'fill').length === 2, 'real fill wait: two fill bots took the other seats');
+  disconnectAll(sockets);
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} (move seed ${SEED}) ...`);
+  const realFillUrl = process.env.FOUR_E2E_REAL_FILL_URL;
+  const realFill = realFillUrl ? testRealFillWait(realFillUrl) : null;
+  if (realFill) realFill.catch(() => {}); // surfaced by the await at the end; no unhandled rejection meanwhile
+  else console.log('(FOUR_E2E_REAL_FILL_URL is not set: the real 30 s fill wait guard is skipped. CI starts a second server for it.)');
   await testQueueAndMatchFound();
   await testMoveSyncIsIdentical();
   await testIllegalAndOutOfTurnMovesRefused();
@@ -1098,6 +1128,10 @@ async function main() {
   await testChaturajiResignations();
   await testChaturajiTakeoverAndRejoin();
   await testChaturajiBotsFillTheTable();
+  if (realFill) {
+    console.log('\n=== 22. The production fill wait (run concurrently with everything above) ===');
+    await realFill;
+  }
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

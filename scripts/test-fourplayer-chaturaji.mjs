@@ -343,6 +343,26 @@ console.log('\n=== 6. The handlers: variant "chaturaji" on four_join_queue ===')
   check(bad.every((r) => r.ok === false && r.error === 'Unknown game mode.') && !matchmaker.isQueued('E'), 'a mis-spelt variant is refused by the validator and the socket is not queued');
   const again = (await a.call('four_join_queue', { timeControl: TC, variant: 'chaturaji' }))[0];
   check(again.ok === false && /already in a game/.test(again.error), 'a socket already seated in a Chaturaji game cannot queue again');
+  // all three games queued at one time control, interleaved: twelve players make exactly three rooms, one per variant, and nobody is placed in another game's room
+  {
+    const TC3 = { initialSeconds: 300, incrementSeconds: 0 };
+    const roomsBefore = rooms.listActiveGames().length;
+    const order = ['ffa', 'giveaway', 'chaturaji'];
+    const sockets = [];
+    for (let i = 0; i < 12; i++) sockets.push({ id: `V${i}`, variant: order[i % 3], s: socket(`V${i}`) });
+    for (const p of sockets) {
+      const reply = await p.s.call('four_join_queue', { timeControl: TC3, ...(p.variant === 'ffa' ? {} : { variant: p.variant }) });
+      assert.ok(reply[0].ok, `${p.id} joined`);
+    }
+    const found = (id) => events.filter((x) => x.id === id && x.event === 'four_match_found').map((x) => x.payload);
+    check(sockets.every((p) => found(p.id).length === 1), 'twelve players, one match_found each, with no fill timer needed (every lobby filled with four of its own game)');
+    check(sockets.every((p) => found(p.id)[0].variant === p.variant), '...each room names the game its players asked for');
+    const roomOf = new Map(sockets.map((p) => [p.id, found(p.id)[0].roomId]));
+    check(new Set(roomOf.values()).size === 3 && rooms.listActiveGames().length === roomsBefore + 3, '...in exactly three different rooms');
+    check(['ffa', 'giveaway', 'chaturaji'].every((v) => new Set(sockets.filter((p) => p.variant === v).map((p) => roomOf.get(p.id))).size === 1), '...four players per room, all of one game');
+    check(found('V2')[0].state.split(' ')[0].split('/').length === 8 && found('V0')[0].state.split(' ')[0].split('/').length === 14, 'the Chaturaji room started on the 8 x 8 board and the Chess room on the cross board');
+  }
+
   // the bots of that room move on their own, on the 8 x 8 board
   const roomId = foundOf('A')[0].roomId;
   const room = rooms.rooms.get(roomId);

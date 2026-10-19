@@ -127,22 +127,39 @@ jobs:
         # FOUR_GRACE_MS shortens the 4 Player bot-takeover grace (45 s) so the real-socket 4 Player test below can watch a disconnect -> takeover ->
         # retake in seconds. The override is a test convenience: the server ignores it when NODE_ENV=production, and nothing else in this job
         # depends on the grace. (Set on the step, not the job: the server inherits it from this shell.)
+        # FOUR_FILL_MS (Chaturaji W3) shortens the 4 Player fill wait (30 s) to 8 s for the same reason: the e2e scenario where bots fill the table waits for it. The one
+        # scenario that must see the REAL 30 s runs against the second server below, concurrently with the rest, so the production default stays guarded for free.
         env:
           FOUR_GRACE_MS: '1500'
+          FOUR_FILL_MS: '8000'
         run: nohup npm run dev > server.log 2>&1 &
+
+      - name: Start a second server with the production fill wait (port 3002)
+        working-directory: chess-app/backend
+        env:
+          PORT: '3002'
+          FOUR_GRACE_MS: '1500'
+        run: nohup npm run dev > server2.log 2>&1 &
 
       - name: Wait for server to become healthy
         run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000/health > /dev/null; then
-              echo "Server is up."
-              exit 0
+          for port in 3000 3002; do
+            ok=0
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:$port/health > /dev/null; then
+                echo "Server on $port is up."
+                ok=1
+                break
+              fi
+              sleep 1
+            done
+            if [ $ok = 0 ]; then
+              echo "Server on $port never became healthy — dumping log:"
+              cat chess-app/backend/server.log || true
+              cat chess-app/backend/server2.log || true
+              exit 1
             fi
-            sleep 1
           done
-          echo "Server never became healthy — dumping log:"
-          cat chess-app/backend/server.log || true
-          exit 1
 
       - name: Run E2E test suite (multiplayer + tournaments)
         working-directory: chess-app/backend
@@ -235,10 +252,12 @@ jobs:
       # is mandatory, a whole natural game with a consistent result, resignations, a takeover bot facing a forced capture, the listing next to a Chess room,
       # and lobbies that never mix variants.)
       # (Chaturaji W2: scenarios 17-21 hold the Chaturaji room over real sockets - a whole natural game with a spectator, resignations that leave a walking dead king,
-      # a takeover bot on the 8 x 8 board and the human's retake, and two players whose queue is filled by bots after the fill timer. The last one waits out the
-      # server's default 30 s fill wait, so the step takes about half a minute longer than before.)
+      # a takeover bot on the 8 x 8 board and the human's retake, and two players whose queue is filled by bots after the fill timer. That scenario waits for the
+      # SHORT fill wait of the main server (8 s); scenario 22 keeps the production 30 s honest on the second server (port 3002), concurrently with everything else.)
       - name: Run 4 Player Online e2e test (real server, socket.io-client; Chess, Giveaway and Chaturaji)
         working-directory: chess-app/backend
+        env:
+          FOUR_E2E_REAL_FILL_URL: http://localhost:3002
         run: npm run test:fourplayerOnline
 
       # The app now remembers the online game it is in, so a reload / app kill can rejoin the seat: a REAL new process rejoins with only the saved record

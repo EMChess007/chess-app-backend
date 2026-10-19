@@ -48,3 +48,12 @@ was called "done" — don't repeat that on anything else.
 - Explicit mutual-exclusivity declaration with every other variant.
 - Fits the existing pattern: VariantSelector entry, screen prop threading (fogOfWar/chess960/
   setupChess-style), gameResult.ts priority slot.
+
+## 7. Test-only switches (a knob that exists for tests must not exist in production)
+- A test-only environment variable is read in ONE small module, has an opt-in name that says what it does, is
+  ignored when `NODE_ENV=production` (one warning at startup that does not print the value), only accepts a
+  finite value inside a bound (it can raise a limit, never switch it off), is set only by the test stack's own
+  child process (never in a workflow `env`, `.env.example`, `render.yaml` or any deployment config), and has
+  tests for: the default unchanged, ignored in production, honoured outside it, no secret read or logged.
+- **Auth rate-limit override absent/ignored in production**: `AUTH_RATE_LIMIT_TEST_OVERRIDE`
+  (`src/lib/authRateLimit.ts`); `npm run test:authRateLimit` pins all of the above (CI runs it).

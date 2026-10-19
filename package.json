@@ -19,6 +19,7 @@
     "test:fogOfWarNotation": "tsx scripts/test-fogOfWarNotation.mjs",
     "test:repetition": "tsx scripts/test-repetition.mjs",
     "test:rejoinPersist": "tsx scripts/test-rejoin-persist.mjs",
+    "test:userCleanup": "node scripts/test-user-cleanup.mjs",
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",
     "test:duck": "tsx scripts/test-duck.mjs",

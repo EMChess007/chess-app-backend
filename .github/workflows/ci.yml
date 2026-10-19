@@ -240,6 +240,12 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:rejoinPersist
 
+      # The e2e scripts that register real accounts delete them again (success or failure); this unit test pins that cleanup. test-tournament.mjs above already
+      # fails when an account it registered survives its own cleanup.
+      - name: Run the test-account cleanup unit test (no server needed)
+        working-directory: chess-app/backend
+        run: npm run test:userCleanup
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

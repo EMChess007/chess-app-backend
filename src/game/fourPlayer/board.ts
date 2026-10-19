@@ -25,8 +25,8 @@
  * A seat is NOT a chess colour. Nothing here (or anywhere in `fourPlayer/`) assumes two sides: "enemy" always means "any other seat".
  */
 
-/** Which board a game is played on (see `Geometry`). Only the 4 Player cross exists so far. */
-export type BoardId = 'cross14';
+/** Which board a game is played on (see `Geometry`): the 4 Player cross, and Chaturaji's plain 8 x 8 square. */
+export type BoardId = 'cross14' | 'square8';
 
 export type Seat = 0 | 1 | 2 | 3;
 export const SEATS: readonly Seat[] = [0, 1, 2, 3];
@@ -271,8 +271,11 @@ export const CROSS14: Geometry = buildGeometry({
   },
 });
 
+/** Chaturaji's board: a plain 8 x 8 square, all 64 squares playable (files a-h, ranks 1-8). */
+export const SQUARE8: Geometry = buildGeometry({ id: 'square8', size: 8, isPlayable: () => true });
+
 /** Every board a game can be played on, by id. The rules name theirs (state.ts `optionsOf`); the engine looks it up once per call. */
-export const GEOMETRIES: Record<BoardId, Geometry> = { cross14: CROSS14 };
+export const GEOMETRIES: Record<BoardId, Geometry> = { cross14: CROSS14, square8: SQUARE8 };
 
 // --- The cross board's members, as the module-level names every existing caller uses ---------------------------------------
 

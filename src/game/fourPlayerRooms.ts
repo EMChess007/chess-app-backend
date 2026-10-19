@@ -87,17 +87,19 @@ import {
   createClock,
   findLegalMove,
   initialState,
+  CROSS14,
+  geometryOf,
   legalMoves,
-  moveLabel,
-  parseSquare,
+  moveLabelOn,
+  optionsOf,
   piecesLeft,
   playMove,
   promotionOf,
   resign,
   rulesFor,
   serialize,
-  squareName,
   type FourPlayerClock,
+  type FourPlayerRules,
   type FourPlayerState,
   type GameEvent,
   type Move,
@@ -471,8 +473,8 @@ export class FourRoomManager {
       state: applied.state,
       clock: addIncrement(tick.clock, seat, applied.state),
       events: applied.events,
-      move: describeMove(seat, move),
-      log: { seat, text: moveLabel(move) },
+      move: describeMove(seat, move, room.state.rules),
+      log: { seat, text: moveLabelOn(move, geometryOf(room.state.rules)) },
     });
   }
 
@@ -514,7 +516,11 @@ export class FourRoomManager {
   /** `four_make_move`. The seat is the socket's own; an illegal / out-of-turn / late move leaves the room untouched (a LATE one also
    * publishes the flag fall that made it late). */
   makeMove(socketId: string, payload: unknown): FourAck<{ seq: number }> {
-    const parsed = validateFourMovePayload(payload);
+    // The squares are checked against the board of the room the payload names (an unknown room id falls back to the cross board; `locate` then refuses it).
+    const parsed = validateFourMovePayload(payload, (roomId) => {
+      const named = this.rooms.get(roomId);
+      return named ? geometryOf(named.state.rules) : CROSS14;
+    });
     if (!parsed.ok) return parsed;
     const located = this.locate(socketId, parsed.value.roomId);
     if (!located) return { ok: false, error: NO_GAME };
@@ -523,8 +529,12 @@ export class FourRoomManager {
     if (room.state.status[seat] !== 'active') return { ok: false, error: 'You are out of this game.' };
     if (room.state.turn !== seat) return { ok: false, error: 'Not your turn.' };
 
-    const promotionType = parsed.value.promotion ? PROMOTION_TYPE[parsed.value.promotion] : QUEEN;
-    const move = findLegalMove(room.state, seat, parseSquare(parsed.value.from), parseSquare(parsed.value.to), promotionType);
+    // The squares are named on THIS game's board (the 8 x 8 Chaturaji board is not the cross board). A promotion with no piece named is a queen where a queen is
+    // allowed (4 Player Chess, Giveaway) and otherwise the one piece the rules allow (Chaturaji's boat).
+    const geo = geometryOf(room.state.rules);
+    const allowed = optionsOf(room.state.rules).promotionTypes;
+    const promotionType = parsed.value.promotion ? PROMOTION_TYPE[parsed.value.promotion] : allowed.includes(QUEEN) ? QUEEN : allowed[0];
+    const move = findLegalMove(room.state, seat, geo.parseSquare(parsed.value.from), geo.parseSquare(parsed.value.to), promotionType);
     if (!move) return { ok: false, error: 'Illegal move.' };
 
     const tick = this.charge(room, false);
@@ -539,8 +549,8 @@ export class FourRoomManager {
       state: applied.state,
       clock: addIncrement(tick.clock, seat, applied.state),
       events: applied.events,
-      move: describeMove(seat, move),
-      log: { seat, text: moveLabel(move) },
+      move: describeMove(seat, move, room.state.rules),
+      log: { seat, text: moveLabelOn(move, geo) },
     });
     return { ok: true, seq: room.seq };
   }
@@ -838,9 +848,10 @@ export class FourRoomManager {
 }
 
 /** A played move as the wire carries it (squares as names, the promotion piece as a letter, the coordinate label). */
-function describeMove(seat: Seat, move: Move): FourMoveInfo {
+function describeMove(seat: Seat, move: Move, rules: FourPlayerRules): FourMoveInfo {
   const promotion = promotionOf(move);
-  return { seat, from: squareName(move.from), to: squareName(move.to), ...(promotion ? { promotion: PROMOTION_LETTER[promotion] } : {}), label: moveLabel(move) };
+  const geo = geometryOf(rules); // squares are named on the board the game is played on
+  return { seat, from: geo.squareName(move.from), to: geo.squareName(move.to), ...(promotion ? { promotion: PROMOTION_LETTER[promotion] } : {}), label: moveLabelOn(move, geo) };
 }
 
 function defaultLabel(tc: FourTimeControl): string {

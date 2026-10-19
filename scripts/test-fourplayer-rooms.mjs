@@ -859,6 +859,49 @@ console.log('\n=== 9. The starting snapshot is ONE snapshot (found by the first 
   check(live.ok === true && live.state.clocksMs.length === 4, '(a rejoin answer, unlike a broadcast, is a fresh reading taken when it is asked for - that is intended)');
 }
 
+console.log('\n=== 10. Chaturaji in a room: the 8 x 8 board on the wire, squares named on THAT board (Chaturaji W1) ===');
+{
+  const CJ = E.CHATURAJI_RULES;
+  const g = newGame({ variant: 'chaturaji', names: ['Ann', 'Ben', 'Cy', 'Di'] });
+  const found = eventsOf(g.io, 'four_match_found').map((e) => e.payload);
+  check(found.length === 4 && found.every((p) => p.variant === 'chaturaji'), 'every four_match_found names the game: variant "chaturaji" (the echo a client checks)');
+  check(new Set(found.map((p) => p.state)).size === 1 && found[0].state === E.serialize(E.initialState(CJ)) && found[0].state.split(' ')[0].split('/').length === 8, '...with the 8-row Chaturaji start snapshot');
+  check(E.deserialize(found[0].state, CJ).turn === 0, 'Red is to move');
+
+  const ok = g.mv(0, 'a2', 'a3');
+  check(ok.ok === true && ok.seq === 1, `Red plays a2-a3 (squares are the 8 x 8 board's): accepted (${JSON.stringify(ok)})`);
+  const p = eventsOf(g.io, 'four_state').at(-1).payload;
+  check(p.move.from === 'a2' && p.move.to === 'a3' && p.move.label === 'a2-a3' && p.log?.text !== 'x', '...and the move is described on that board: from a2, to a3, label "a2-a3"');
+  check(E.deserialize(p.state, CJ).turn === 1 && E.listPieces(E.deserialize(p.state, CJ)).includes('rP@a3'), '...Blue is to move and the pawn stands on a3 in the snapshot');
+  check(g.mv(1, 'b5', 'd5').error === 'Illegal move.', 'a pawn double step is refused (there is none in Chaturaji)');
+  check(g.mv(1, 'a9', 'a8').error === 'Invalid move.' && g.mv(1, 'i1', 'a1').error === 'Invalid move.', '...and squares off the 8 x 8 board (rank 9, file i) are refused by the payload check, against THIS room\'s board - not misread as cross-board squares');
+  check(g.mv(1, 'a1', 'a2').error === 'Illegal move.', '...while a1 / a2 (cut corners on the cross board, playable here) are valid squares: refused only because they are not Blue\'s');
+  check(g.mv(1, 'b5', 'c5').ok === true, '...while a legal Blue step is accepted');
+
+  // a promotion with no piece named is the boat; asking for a queen is illegal here
+  const h = newGame({ variant: 'chaturaji' });
+  h.setPosition(['rK@a1', 'bK@a8', 'yK@h8', 'gK@h1', 'rP@c7'], { rules: CJ, turn: 0 });
+  check(h.mv(0, 'c7', 'c8', 'q').error === 'Illegal move.', 'a promotion to a queen is refused');
+  const promo = h.mv(0, 'c7', 'c8');
+  const pp = eventsOf(h.io, 'four_state').at(-1).payload;
+  check(promo.ok === true && pp.move.promotion === 'r' && pp.move.label === 'c7-c8=R' && E.listPieces(E.deserialize(pp.state, CJ)).includes('rT@c8'), 'a promotion with no piece named is accepted as the boat (a promoted rook), reported as "=R"');
+
+  // a king capture is eliminated, announced and scored through the room; the end of the game carries the score
+  const k = newGame({ variant: 'chaturaji' });
+  k.setPosition(['rK@a1', 'rR@d4', 'bK@d8', 'yK@h8', 'gK@h1'], { rules: CJ, turn: 0 });
+  check(k.mv(0, 'd4', 'd8').ok === true, 'Red captures Blue\'s king');
+  const kp = eventsOf(k.io, 'four_state').at(-1).payload;
+  check(kp.events.some((e) => e.kind === 'eliminated' && e.seat === 1 && e.reason === 'kingCaptured' && e.credit === 0), '...the eliminated event reaches everyone (reason kingCaptured, credit Red)');
+  const after = E.deserialize(kp.state, CJ);
+  check(after.score[0] === 3 && after.status[1] === 'frozen' && after.turn === 2, '...Red has 3, Blue is out and the turn passed to Yellow');
+
+  const e = newGame({ variant: 'chaturaji' });
+  e.setPosition(['rK@a1', 'rR@d4', 'gK@d8'], { rules: CJ, turn: 0, status: ['active', 'frozen', 'frozen', 'active'], score: [0, 0, 20, 0] });
+  check(e.mv(0, 'd4', 'd8').ok === true, 'the last king falls');
+  const over = eventsOf(e.io, 'four_game_over').at(-1)?.payload;
+  check(!!over && over.reason === 'elimination' && JSON.stringify(over.winners) === '[2]' && JSON.stringify(over.scores) === '[3,0,20,0]', '...the game ends: the highest score (Yellow, 20) wins, not the survivor (Red, 3); the scores are points');
+}
+
 mock.timers.reset();
 console.log(`\nAll ${passed} checks passed.`);
 process.exit(0);

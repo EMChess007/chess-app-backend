@@ -108,6 +108,19 @@ export interface RuleOptions {
   castling: boolean;
   /** The piece types a pawn may promote to, in the order the moves are generated (queen first). Must be a subset of `PROMOTABLE_TYPES`. */
   promotionTypes: readonly number[];
+  /**
+   * Capture the King (chess.com's rule option): a check never has to be answered, so every pseudo-legal move is legal and there is no king safety, kings
+   * are capturable pieces, and a seat is eliminated only when its king is actually captured. Off = 4 Player Chess (check, checkmate, kings never captured).
+   */
+  captureTheKing: boolean;
+  /** With `captureTheKing`: the points for capturing a king (a live seat's or a resigned seat's walking one) - one award, not king + mate. */
+  kingPoints: number;
+  /** Points for a move whose piece attacks two / three live enemy kings from its new square (the mover's); `null` = check forks do not score (4 Player Chess here). */
+  forkPoints: { double: number; triple: number } | null;
+  /** Whether the game ends when every active seat is down to a bare king (no mate is possible). Meaningless under `captureTheKing`: kings can capture kings. */
+  deadPositionEnds: boolean;
+  /** Points per OTHER seat's king still on the board (a resigned seat's walking king) for the one seat left when the game ends by elimination; 0 = none. */
+  lastStandingKingBonus: number;
 }
 
 /** 4 Player Chess (free for all): checkmate, points, kings never captured. */
@@ -151,11 +164,52 @@ export const GIVEAWAY_RULES: GiveawayRules = {
   maxPlies: 1000,
 };
 
-/** 4 Player Chess's options: the cross board, double steps and castling, promotion to any of queen / rook / bishop / knight. */
-export const FFA_OPTIONS: RuleOptions = { board: 'cross14', pawnDoubleStep: true, castling: true, promotionTypes: PROMOTABLE_TYPES };
+/** 4 Player Chess's options: the cross board, double steps and castling, promotion to any of queen / rook / bishop / knight, check and checkmate, no fork points. */
+export const FFA_OPTIONS: RuleOptions = {
+  board: 'cross14',
+  pawnDoubleStep: true,
+  castling: true,
+  promotionTypes: PROMOTABLE_TYPES,
+  captureTheKing: false,
+  kingPoints: 0,
+  forkPoints: null,
+  deadPositionEnds: true,
+  lastStandingKingBonus: 0,
+};
 
-/** Giveaway's options: the same board and pawns, but no castling (the rights start, and stay, empty). */
-export const GIVEAWAY_OPTIONS: RuleOptions = { board: 'cross14', pawnDoubleStep: true, castling: false, promotionTypes: PROMOTABLE_TYPES };
+/** Giveaway's options: the same board and pawns, but no castling (the rights start, and stay, empty). It has its own king and end rules (giveaway.ts); the rest is inert. */
+export const GIVEAWAY_OPTIONS: RuleOptions = { ...FFA_OPTIONS, castling: false };
+
+/**
+ * Chaturaji's options (CHATURAJI_SPEC.md section 4): the 8 x 8 board, one-step pawns (so no en passant), no castling, promotion to a boat (= a rook) only,
+ * Capture the King with a king worth 3, check forks worth +1 (two kings) / +5 (three), no bare-kings ending, +3 per surviving enemy king for the last seat.
+ */
+export const CHATURAJI_OPTIONS: RuleOptions = {
+  board: 'square8',
+  pawnDoubleStep: false,
+  castling: false,
+  promotionTypes: [ROOK],
+  captureTheKing: true,
+  kingPoints: 3,
+  forkPoints: { double: 1, triple: 5 },
+  deadPositionEnds: false,
+  lastStandingKingBonus: 3,
+};
+
+/**
+ * The Chaturaji rules: 4 Player Chess FFA machinery (points, dead pieces, walking dead kings, elimination, highest score wins, shared on a tie) with the
+ * options above. A seat that has no move is eliminated WITHOUT points (the 4 Player Chess stalemate points are at its own scale and Capture the King has
+ * no checkmate points), the promotion line is the far edge (forward coordinate 7 is the 8th rank on this board too), and the ply cap is the 4-seat one.
+ */
+export const CHATURAJI_RULES: FfaRules = {
+  mode: 'ffa',
+  promotionCoord: FFA_PROMOTION_COORD,
+  checkmatePoints: 0,
+  stalematedPoints: 0,
+  stalemateOthersPoints: 0,
+  maxPlies: 1000,
+  options: CHATURAJI_OPTIONS,
+};
 
 /** The options a rules object plays by: its own, or the defaults of its mode. */
 export const optionsOf = (rules: FourPlayerRules): RuleOptions => rules.options ?? (rules.mode === 'giveaway' ? GIVEAWAY_OPTIONS : FFA_OPTIONS);
@@ -167,7 +221,7 @@ export const geometryOf = (rules: FourPlayerRules): Geometry => GEOMETRIES[optio
  * The rules objects an untrusted source (a wire message, a saved game) may name. `validateRules` accepts a value only when it is, field for field,
  * one of these presets - never an arbitrary mix of options - so an option can never leak into a game it was not tested with.
  */
-export const KNOWN_RULES: readonly FourPlayerRules[] = [FFA_RULES, GIVEAWAY_RULES];
+export const KNOWN_RULES: readonly FourPlayerRules[] = [FFA_RULES, GIVEAWAY_RULES, CHATURAJI_RULES];
 
 const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
@@ -180,12 +234,16 @@ export function validateRules(value: unknown): { ok: true; rules: FourPlayerRule
 
 /**
  * Which four-player game a room / queue / screen is about. `'ffa'` is 4 Player Chess (what the protocol did before Giveaway existed, so an OMITTED variant
- * always means `'ffa'`); `'giveaway'` is 4 Player Giveaway. Defined here, next to the rules it selects, so local screens can use it without touching the wire.
+ * always means `'ffa'`); `'giveaway'` is 4 Player Giveaway; `'chaturaji'` is Chaturaji. Defined here, next to the rules it selects, so local screens can use
+ * it without touching the wire.
  */
-export type FourVariant = 'ffa' | 'giveaway';
+export type FourVariant = 'ffa' | 'giveaway' | 'chaturaji';
 
-/** The rules object of a variant: `'ffa'` = 4 Player Chess, `'giveaway'` = 4 Player Giveaway. */
-export const rulesFor = (variant: FourVariant): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : FFA_RULES);
+/** The rules object of a variant: `'ffa'` = 4 Player Chess, `'giveaway'` = 4 Player Giveaway, `'chaturaji'` = Chaturaji. */
+export const rulesFor = (variant: FourVariant): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : variant === 'chaturaji' ? CHATURAJI_RULES : FFA_RULES);
+
+/** The variant a rules object belongs to (the inverse of `rulesFor` for the shipped presets): Giveaway by its mode, Chaturaji by its board, else 4 Player Chess. */
+export const variantOfRules = (rules: FourPlayerRules): FourVariant => (rules.mode === 'giveaway' ? 'giveaway' : optionsOf(rules).board === 'square8' ? 'chaturaji' : 'ffa');
 
 /** En passant opportunity created by a double step: the square that was skipped, the pawn's landing square, and who stepped. */
 export interface EnPassant {
@@ -316,9 +374,22 @@ function inferredCastling(cells: Int8Array): number {
   return bits;
 }
 
-/** The standard FFA start position, Red to move. */
+/**
+ * Chaturaji's start position on the 8 x 8 board (CHATURAJI_SPEC.md section 4.1, from the live chess.com game): each seat in one corner, rotationally
+ * symmetric (a quarter turn clockwise per seat), back rank boat (a rook) - knight - bishop - king along its edge with four pawns in front of it.
+ * Red moves up the ranks, Blue to higher files, Yellow down the ranks, Green to lower files.
+ */
+export const SQUARE8_START: readonly string[] = [
+  'rR@a1', 'rN@b1', 'rB@c1', 'rK@d1', 'rP@a2', 'rP@b2', 'rP@c2', 'rP@d2',
+  'bR@a8', 'bN@a7', 'bB@a6', 'bK@a5', 'bP@b8', 'bP@b7', 'bP@b6', 'bP@b5',
+  'yR@h8', 'yN@g8', 'yB@f8', 'yK@e8', 'yP@h7', 'yP@g7', 'yP@f7', 'yP@e7',
+  'gR@h1', 'gN@h2', 'gB@h3', 'gK@h4', 'gP@g1', 'gP@g2', 'gP@g3', 'gP@g4',
+];
+
+/** The standard FFA start position, Red to move (or the start of the rules' own board: Chaturaji's). */
 export function initialState(rules: FourPlayerRules = FFA_RULES): FourPlayerState {
   const geo = geometryOf(rules);
+  if (geo.id === 'square8') return stateFromPieces(SQUARE8_START, { rules }); // Chaturaji: Red to move, no castling rights (the option is off)
   if (geo.id !== 'cross14') throw new Error(`no start position for board ${geo.id}`); // the layout below is the cross board's; a new board brings its own
   const cells = blankCells(geo);
   for (let seat = 0; seat < 4; seat++) {

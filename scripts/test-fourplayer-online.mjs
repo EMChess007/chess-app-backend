@@ -26,7 +26,7 @@
  */
 import assert from 'node:assert/strict';
 import { io } from 'socket.io-client';
-import { PLAYABLE_SQUARES, BISHOP, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, deserialize, initialState, legalMoves, piecesLeft, promotionOf, pseudoMoves, serialize, squareName } from '../src/game/fourPlayer/index.ts';
+import { PLAYABLE_SQUARES, BISHOP, CHATURAJI_RULES, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, SQUARE8, deserialize, initialState, legalMoves, piecesLeft, promotionOf, pseudoMoves, serialize, squareName } from '../src/game/fourPlayer/index.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const SEED = Number(process.env.FOUR_E2E_SEED ?? 20260101);
@@ -136,7 +136,7 @@ const PROMOTION_LETTER = { [QUEEN]: 'q', [ROOK]: 'r', [BISHOP]: 'b', [KNIGHT]: '
  * `players[seat]` = { socket, inbox, match, name } indexed by the SEAT the server assigned (seats are shuffled), `roomId`.
  */
 async function startRoom(label, variant = 'ffa') {
-  const rules = variant === 'giveaway' ? GIVEAWAY_RULES : undefined; // a snapshot has no rules in it: the reader brings them
+  const rules = variant === 'giveaway' ? GIVEAWAY_RULES : variant === 'chaturaji' ? CHATURAJI_RULES : undefined; // a snapshot has no rules in it: the reader brings them
   const names = [0, 1, 2, 3].map((i) => `${label}${i}`);
   const sockets = [];
   for (const name of names) sockets.push(await connect(name));
@@ -144,7 +144,7 @@ async function startRoom(label, variant = 'ffa') {
   const found = sockets.map((s) => waitFor(s, 'four_match_found')); // BEFORE the emits - see waitFor's doc comment
   found.forEach((p) => p.catch(() => {})); // no unhandled rejection if a join fails first; the caller still sees it
   for (let i = 0; i < 4; i++) {
-    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl: TIME_CONTROL, timeControlLabel: TIME_CONTROL_LABEL, ...(variant === 'giveaway' ? { variant } : {}) });
+    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl: TIME_CONTROL, timeControlLabel: TIME_CONTROL_LABEL, ...(variant !== 'ffa' ? { variant } : {}) });
     check(ack.ok === true, `${names[i]} four_join_queue ack is ok`);
   }
   const matches = await Promise.all(found);
@@ -173,7 +173,7 @@ function pickMove(text, seat, rules) {
 }
 
 /** Whose turn it is according to the position the server last sent (every player holds the same one - scenario 2 proves it). */
-const turnOf = (room) => deserialize(latestOf(room.players[0]).text).turn;
+const turnOf = (room) => deserialize(latestOf(room.players[0]).text, room.rules).turn;
 
 /**
  * Keeps one seat under the server's move rate limit (10 four_make_move calls per second per seat, refused ones included - FOUR_MOVE_RATE_LIMIT) by waiting until it
@@ -863,6 +863,52 @@ async function testLobbiesNeverMix() {
   void fourthInbox;
 }
 
+async function testChaturajiOverTheWire() {
+  console.log('\n=== 17. Chaturaji: four sockets queue for the variant and play on the 8 x 8 board ===');
+  const room = await startRoom('CJ', 'chaturaji');
+  const { players, roomId } = room;
+  const matches = players.map((p) => p.match);
+  check(matches.every((m) => m.variant === 'chaturaji'), 'every four_match_found names the game: variant "chaturaji" (the echo the client checks)');
+  check(new Set(matches.map((m) => m.roomId)).size === 1 && new Set(matches.map((m) => m.seat)).size === 4, 'one room, four distinct seats');
+  check(new Set(matches.map((m) => m.state)).size === 1 && matches[0].state === serialize(initialState(CHATURAJI_RULES)) && matches[0].state.split(' ')[0].split('/').length === 8, 'the four starting snapshots are byte-identical and are the 8-row Chaturaji start position');
+  check(deserialize(matches[0].state, CHATURAJI_RULES).turn === 0, 'Red is to move');
+  const geo = SQUARE8;
+
+  // squares are named on the board of THIS room
+  const first = await emitAck(players[0].socket, 'four_make_move', { roomId, from: 'a2', to: 'a3' });
+  check(first.ok === true && first.seq === 1, 'Red plays a2-a3 (a cut corner of the cross board, a pawn square here): accepted');
+  await waitForSeq(players, 1);
+  const states = players.map((p) => p.inbox.states.find((s) => s.seq === 1));
+  check(new Set(states.map((s) => s.state)).size === 1 && states[0].move.from === 'a2' && states[0].move.to === 'a3' && states[0].move.label === 'a2-a3', 'all four hold the identical snapshot, and the move is described on the 8 x 8 board');
+  const refused = await emitAck(players[1].socket, 'four_make_move', { roomId, from: 'b5', to: 'd5' });
+  check(refused.ok === false && refused.error === 'Illegal move.', 'a pawn double step is refused: there is none in Chaturaji');
+  const off = await emitAck(players[1].socket, 'four_make_move', { roomId, from: 'a9', to: 'a8' });
+  check(off.ok === false && off.error === 'Invalid move.', 'a square off the 8 x 8 board is refused by the payload check');
+
+  // a whole stretch of natural play: every snapshot identical on all four sockets, every move legal on the 8 x 8 board
+  let moves = 1;
+  for (let i = 0; i < 60; i++) {
+    const seat = turnOf(room);
+    const player = players[seat];
+    await until(`seat ${seat} has caught up with seat 0`, () => latestOf(player).seq >= latestOf(players[0]).seq);
+    const state = deserialize(latestOf(player).text, CHATURAJI_RULES);
+    if (state.result) break;
+    const legal = legalMoves(state, seat);
+    const move = legal[Math.floor(rng() * legal.length)];
+    await paceSeat(room, seat);
+    const ack = await emitAck(player.socket, 'four_make_move', { roomId, from: geo.squareName(move.from), to: geo.squareName(move.to), ...(promotionOf(move) ? { promotion: 'r' } : {}) });
+    check(ack.ok === true || ack.error === 'Not your turn.' || ack.error === 'You are out of this game.', `ply ${moves + 1}: the server accepts a legal Chaturaji move (${geo.squareName(move.from)}-${geo.squareName(move.to)})`);
+    if (!ack.ok) break;
+    moves++;
+    await until(`seat 0 has four_state seq ${ack.seq}`, () => latestOf(players[0]).seq >= ack.seq);
+  }
+  await sleep(150);
+  const latest = players.map((p) => latestOf(p).seq);
+  check(new Set(latest).size === 1 && moves >= 20, `after ${moves} plies every player is at the same seq`);
+  check(new Set(players.map((p) => latestOf(p).text)).size === 1, '...holding the identical snapshot');
+  disconnectAll(room.sockets);
+}
+
 async function main() {
   console.log(`Connecting to ${SERVER_URL} (move seed ${SEED}) ...`);
   await testQueueAndMatchFound();
@@ -881,6 +927,7 @@ async function main() {
   await testGiveawayTakeoverForcedCapture();
   await testGiveawayListingNextToChess();
   await testLobbiesNeverMix();
+  await testChaturajiOverTheWire();
 
   console.log(`\nAll good — ${passedChecks} checks passed.`);
   process.exit(0);

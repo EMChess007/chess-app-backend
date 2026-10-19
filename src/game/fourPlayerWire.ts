@@ -23,7 +23,7 @@
  * the rejoin answer carry a `playerToken`, and only to the seat's own human).
  */
 
-import { parseSquare, squareName, type Seat } from './fourPlayer/board.js';
+import { CROSS14, type Geometry, type Seat } from './fourPlayer/board.js';
 import type { GameEvent } from './fourPlayer/elimination.js';
 import type { FourPlayerResult, FourVariant } from './fourPlayer/state.js';
 
@@ -301,13 +301,13 @@ export function validateFourTimeControl(value: unknown): FourValidation<FourTime
 }
 
 /**
- * The game a client asks for. `undefined` (a client that predates Giveaway) is 4 Player Chess; `'ffa'` and `'giveaway'` are accepted; EVERYTHING
- * else - another string, `null`, a number, an object - is refused with an error rather than quietly played as Chess: queueing for a game the
+ * The game a client asks for. `undefined` (a client that predates Giveaway) is 4 Player Chess; `'ffa'`, `'giveaway'` and `'chaturaji'` are accepted;
+ * EVERYTHING else - another string, `null`, a number, an object - is refused with an error rather than quietly played as Chess: queueing for a game the
  * server does not understand must fail loudly, never start the wrong one.
  */
 export function validateFourVariant(value: unknown): FourValidation<FourVariant> {
   if (value === undefined) return { ok: true, value: 'ffa' };
-  if (value === 'ffa' || value === 'giveaway') return { ok: true, value };
+  if (value === 'ffa' || value === 'giveaway' || value === 'chaturaji') return { ok: true, value };
   return fail('Unknown game mode.');
 }
 
@@ -330,21 +330,24 @@ const PROMOTIONS: readonly string[] = ['q', 'r', 'b', 'n'];
 
 /** A square in its ONE canonical spelling ("e2", never "e02"): it must be a playable square AND survive `squareName(parseSquare(x))`
  * unchanged. `parseSquare` alone is deliberately lenient about leading zeros ("e02" parses as e2); this is client input at the server
- * boundary, so anything but the canonical form is refused instead of being quietly normalised. */
-export function isCanonicalSquareName(value: unknown): value is string {
+ * boundary, so anything but the canonical form is refused instead of being quietly normalised. `geo` is the board the game is played on (the cross board
+ * unless a room says otherwise: Chaturaji's 8 x 8 square has no cut corners and no files past h). */
+export function isCanonicalSquareName(value: unknown, geo: Geometry = CROSS14): value is string {
   if (typeof value !== 'string') return false;
-  const square = parseSquare(value);
-  return square >= 0 && squareName(square) === value;
+  const square = geo.parseSquare(value);
+  return square >= 0 && geo.squareName(square) === value;
 }
 
-/** Shape only: both squares are canonical names of playable squares of the cross-shaped board and the promotion piece (if any) is one
- * of q/r/b/n. Whether the move is LEGAL for the sender's seat is the engine's job (`findLegalMove`), never the client's word. */
-export function validateFourMovePayload(value: unknown): FourValidation<FourMakeMovePayload> {
+/** Shape only: both squares are canonical names of playable squares of the board the room is played on (the cross-shaped board unless `geometryOfRoom` says
+ * otherwise for that room id) and the promotion piece (if any) is one of q/r/b/n. Whether the move is LEGAL for the sender's seat is the engine's job
+ * (`findLegalMove`), never the client's word. */
+export function validateFourMovePayload(value: unknown, geometryOfRoom: (roomId: string) => Geometry = () => CROSS14): FourValidation<FourMakeMovePayload> {
   if (!isRecord(value)) return fail('Invalid move.');
   const roomId = validateFourId(value.roomId, 'room');
   if (!roomId.ok) return roomId;
   const { from, to, promotion } = value;
-  if (!isCanonicalSquareName(from) || !isCanonicalSquareName(to)) return fail('Invalid move.');
+  const geo = geometryOfRoom(roomId.value);
+  if (!isCanonicalSquareName(from, geo) || !isCanonicalSquareName(to, geo)) return fail('Invalid move.');
   if (promotion !== undefined && (typeof promotion !== 'string' || !PROMOTIONS.includes(promotion))) return fail('Invalid promotion piece.');
   return { ok: true, value: { roomId: roomId.value, from, to, ...(promotion === undefined ? {} : { promotion: promotion as FourPromotion }) } };
 }

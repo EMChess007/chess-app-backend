@@ -224,18 +224,25 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:fourplayerGiveaway
 
+      - name: "Run Chaturaji server tests (the Chaturaji bot over whole games, takeover and hand-back, every ending with points, the dead-king walk, a queue that never mixes with the other variants)"
+        working-directory: chess-app/backend
+        run: npm run test:fourplayerChaturaji
+
       # The first test that holds FOUR real connections to one room (everything above runs the 4 Player server logic in-process on stub sockets): it
       # reuses the dev server started earlier - which is why that step sets FOUR_GRACE_MS - and proves all four players and a spectator hold the
       # byte-identical snapshot at every seq, plus the disconnect/takeover/retake, resign, chat, spectate and listing flows.
       # (W4 of 4 Player Giveaway: the same script now also holds the Giveaway scenarios - the variant over real sockets, a quiet move refused while a capture
       # is mandatory, a whole natural game with a consistent result, resignations, a takeover bot facing a forced capture, the listing next to a Chess room,
       # and lobbies that never mix variants.)
-      - name: Run 4 Player Online e2e test (real server, socket.io-client; Chess and Giveaway)
+      # (Chaturaji W2: scenarios 17-21 hold the Chaturaji room over real sockets - a whole natural game with a spectator, resignations that leave a walking dead king,
+      # a takeover bot on the 8 x 8 board and the human's retake, and two players whose queue is filled by bots after the fill timer. The last one waits out the
+      # server's default 30 s fill wait, so the step takes about half a minute longer than before.)
+      - name: Run 4 Player Online e2e test (real server, socket.io-client; Chess, Giveaway and Chaturaji)
         working-directory: chess-app/backend
         run: npm run test:fourplayerOnline
 
       # The app now remembers the online game it is in, so a reload / app kill can rejoin the seat: a REAL new process rejoins with only the saved record
-      # (2 players: Classic + Crazyhouse / Duck / Spell / Fog of War state; 4 Player and 4 Player Giveaway). Needs the same FOUR_GRACE_MS dev server.
+      # (2 players: Classic + Crazyhouse / Duck / Spell / Fog of War state; 4 Player, 4 Player Giveaway and Chaturaji). Needs the same FOUR_GRACE_MS dev server.
       - name: Run the rejoin-after-restart e2e test (real server, a new process as the restarted app)
         working-directory: chess-app/backend
         run: npm run test:rejoinPersist

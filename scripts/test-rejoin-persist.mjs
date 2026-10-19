@@ -72,17 +72,29 @@ const everHeard = (socket, event) => socket.heard.filter((h) => h.event === even
 // --- the restarted app: a new process that has only the saved record ------------------------------------------------------------------
 const TSX_CLI = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url));
 const CHILD = fileURLToPath(new URL('./rejoin-client-process.mjs', import.meta.url));
-/** Runs the restarted app on `record` (an ActiveOnlineGame); resolves with its stdout events. `during` runs once the seat is back. */
-function restartApp(record, { make, listen = 2500, during } = {}) {
+/**
+ * Starts the restarted app on `record` (an ActiveOnlineGame). `hold: true` makes the new process finish ALL its start-up first (node, tsx, the app's
+ * record module, reading the record) and wait: `ready` resolves when it has, and nothing touches the network until `go()`. Without `hold` the process
+ * connects at once and `ready` is already resolved. `go()` resolves with its stdout events when it exits. `during` runs once the seat is back.
+ *
+ * Why `hold` exists: a 4 Player seat is held for a disconnect grace (FOUR_GRACE_MS, 1500 ms in CI), after which a bot takes it. The point of the
+ * scenarios below is that a restart WITHIN the grace gets the seat back - so what must be fast is the handshake. Starting node + tsx inside the grace
+ * made the verdict depend on how quickly the machine boots a process (it takes 1.5-3 s on a busy Windows desktop and the test failed about one run in
+ * three on a clean main). Warming the process first removes that race without weakening any check: the restarted app still has only the record file.
+ */
+function startApp(record, { make, listen = 2500, during, hold = false } = {}) {
   const file = join(tmp, `record-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(file, serializeActiveGame(record));
   const args = [TSX_CLI, CHILD, '--record', file, '--url', SERVER_URL, '--listen', String(listen)];
   if (make) args.push('--make', JSON.stringify(make));
-  const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (hold) args.push('--hold');
+  const child = spawn(process.execPath, args, { stdio: [hold ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   const events = [];
   let buffer = '';
   let stderr = '';
   let fired = false;
+  let markReady = () => {};
+  const ready = hold ? new Promise((resolve) => (markReady = resolve)) : Promise.resolve();
   child.stderr.on('data', (d) => (stderr += d));
   child.stdout.on('data', (d) => {
     buffer += d;
@@ -92,6 +104,10 @@ function restartApp(record, { make, listen = 2500, during } = {}) {
       buffer = buffer.slice(i + 1);
       if (!line.startsWith('{')) continue;
       const event = JSON.parse(line);
+      if (event.event === 'ready') {
+        markReady();
+        continue;
+      }
       events.push(event);
       if (event.event === 'rejoined' && !fired && during) {
         fired = true;
@@ -99,7 +115,20 @@ function restartApp(record, { make, listen = 2500, during } = {}) {
       }
     }
   });
-  return new Promise((resolve) => child.on('exit', (code) => resolve({ code, events, stderr })));
+  const exited = new Promise((resolve) => child.on('exit', (code) => resolve({ code, events, stderr })));
+  // A process that dies before it is ready (a bad record, a crash) must not leave `ready` pending forever.
+  if (hold) void exited.then(() => markReady());
+  return {
+    ready,
+    go() {
+      if (hold) child.stdin.write('go\n');
+      return exited;
+    },
+  };
+}
+/** Runs the restarted app on `record` at once; resolves with its stdout events. */
+function restartApp(record, options) {
+  return startApp(record, options).go();
 }
 const rejoinedOf = (run) => run.events.find((e) => e.event === 'rejoined');
 
@@ -340,14 +369,19 @@ for (const [label, variant] of [['4 Player Chess', 'ffa'], ['4 Player Giveaway',
   const victim = room.players[(first.match.seat + 2) % 4]; // not on move
   const tokens = room.players.map((p) => p.match.playerToken);
   const others = room.players.filter((p) => p !== victim);
+  const recordFor = (match) => ({ kind: 'fourPlayer', userId: 'e2e-user', match, timeControl: { id: 'x', label: '5 min', initialSeconds: 300, incrementSeconds: 0, category: 'blitz' } });
+  // Both restarted apps (the real record and one with a forged token) are started and fully warmed BEFORE the kill: only their handshakes happen inside the grace.
+  const restarted = startApp(recordFor(victim.match), { listen: 800, hold: true });
+  const forgedApp = startApp(recordFor({ ...victim.match, playerToken: 'not-the-token' }), { listen: 300, hold: true });
+  await Promise.all([restarted.ready, forgedApp.ready]);
   victim.socket.disconnect(); // the app is killed
   await sleep(300);
-  const run = await restartApp({ kind: 'fourPlayer', userId: 'e2e-user', match: victim.match, timeControl: { id: 'x', label: '5 min', initialSeconds: 300, incrementSeconds: 0, category: 'blitz' } }, { listen: 800 });
+  const run = await restarted.go();
   const re = rejoinedOf(run);
   check(re?.ack?.ok === true && !re.ack.finished && re.ack.state.seat === victim.match.seat, 'the new process rejoins its seat with only the saved record');
   check(re.ack.state.seq >= m1.seq && re.ack.state.state === states.filter((s) => s.seq === re.ack.state.seq)[0]?.state, "...with the room's current snapshot");
   check(re.ack.state.seats[victim.match.seat].kind === 'human' && re.ack.state.seats[victim.match.seat].connected === true, '...and the seat is the human\'s (no bot took it)');
-  const forged = await restartApp({ kind: 'fourPlayer', userId: 'e2e-user', match: { ...victim.match, playerToken: 'not-the-token' }, timeControl: { id: 'x', label: '5 min', initialSeconds: 300, incrementSeconds: 0, category: 'blitz' } }, { listen: 300 });
+  const forged = await forgedApp.go(); // the first restarted app has exited, so the seat is unattended again and a fresh grace is running: this handshake is immediate
   check(rejoinedOf(forged)?.ack?.ok === false, 'a record with a forged token is refused');
   await sleep(300);
   const sawBot = others.some((p) => JSON.stringify(everHeardFour(p.socket)).includes('"kind":"bot"'));

@@ -248,6 +248,41 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
   return ls;
 }
 
+/**
+ * A `Geometry` (board.ts) is an object of tables AND closures. Two copies of the same source have equal tables but never identical function
+ * objects, so deepEqual cannot compare them: the tables are compared deep-equal, and each closure is compared by what it RETURNS over the whole
+ * board (every square, every seat, every display view) - which is exactly what the two copies must agree on.
+ */
+const isGeometry = (v) => v !== null && typeof v === 'object' && typeof v.size === 'number' && Array.isArray(v.rays) && typeof v.forwardCoord === 'function';
+function sameGeometry(be, fe, name) {
+  assert.ok(isGeometry(fe), `${name} is a geometry on both sides`);
+  const data = (g) => Object.fromEntries(Object.entries(g).filter(([, v]) => typeof v !== 'function'));
+  assert.deepEqual(data(be), data(fe), `geometry ${name}: tables / constants differ`);
+  assert.deepEqual(Object.keys(be).sort(), Object.keys(fe).sort(), `geometry ${name}: members differ`);
+  const size = be.size;
+  for (let sq = 0; sq < be.cells; sq++) {
+    assert.equal(be.fileOf(sq), fe.fileOf(sq), `${name}.fileOf(${sq})`);
+    assert.equal(be.rankOf(sq), fe.rankOf(sq), `${name}.rankOf(${sq})`);
+    if (!be.valid[sq]) continue;
+    assert.equal(be.squareName(sq), fe.squareName(sq), `${name}.squareName(${sq})`);
+    assert.equal(be.parseSquare(be.squareName(sq)), fe.parseSquare(fe.squareName(sq)), `${name}.parseSquare(${sq})`);
+    for (const seat of [0, 1, 2, 3]) {
+      assert.equal(be.forwardCoord(seat, sq), fe.forwardCoord(seat, sq), `${name}.forwardCoord(${seat}, ${sq})`);
+      for (const steps of [1, 2]) assert.equal(be.stepForward(seat, sq, steps), fe.stepForward(seat, sq, steps), `${name}.stepForward(${seat}, ${sq}, ${steps})`);
+      assert.deepEqual(be.pawnCaptureSquares(seat, sq), fe.pawnCaptureSquares(seat, sq), `${name}.pawnCaptureSquares(${seat}, ${sq})`);
+    }
+  }
+  for (let file = -2; file < size + 2; file++) for (let rank = -2; rank < size + 2; rank++) assert.equal(be.isPlayable(file, rank), fe.isPlayable(file, rank), `${name}.isPlayable(${file}, ${rank})`);
+  for (const view of [0, 1, 2, 3]) {
+    for (let x = 0; x < size; x++) {
+      for (let y = 0; y < size; y++) {
+        assert.deepEqual(be.toDisplay(x, y, view), fe.toDisplay(x, y, view), `${name}.toDisplay(${x}, ${y}, ${view})`);
+        assert.deepEqual(be.fromDisplay(x, y, view), fe.fromDisplay(x, y, view), `${name}.fromDisplay(${x}, ${y}, ${view})`);
+      }
+    }
+  }
+}
+
 console.log('\n=== 1. The public surface is the same ===');
 {
   const beKeys = Object.keys(BE);
@@ -265,6 +300,13 @@ console.log('\n=== 1. The public surface is the same ===');
     if (typeof BE[key] === 'function') {
       assert.equal(typeof FE[key], 'function', `${key} is a function on both sides`);
       functionsChecked++;
+    } else if (isGeometry(BE[key])) {
+      sameGeometry(BE[key], FE[key], key);
+      valuesChecked++;
+    } else if (key === 'GEOMETRIES') {
+      assert.deepEqual(Object.keys(BE[key]).sort(), Object.keys(FE[key]).sort(), 'the same boards are registered');
+      for (const id of Object.keys(BE[key])) sameGeometry(BE[key][id], FE[key][id], `GEOMETRIES.${id}`);
+      valuesChecked++;
     } else {
       assert.deepEqual(BE[key], FE[key], `constant/table ${key} differs`);
       valuesChecked++;

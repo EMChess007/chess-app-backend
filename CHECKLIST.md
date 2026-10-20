@@ -45,7 +45,9 @@ was called "done" — don't repeat that on anything else.
   traps from zero.
 
 ### Extra, specifically when the change is a new game variant/mode
-- Explicit mutual-exclusivity declaration with every other variant.
+- Explicit mutual-exclusivity declaration with every other variant. Every variant-wide statement or list
+  names ALL of them, the 4-seat games included (4 Player Chess, 4 Player Giveaway, Chaturaji): menu card,
+  setup, queue (the queue key is `timeControl|variant`), Spectate list section, rejoin, resume link, result.
 - Fits the existing pattern: VariantSelector entry, screen prop threading (fogOfWar/chess960/
   setupChess-style), gameResult.ts priority slot.
 

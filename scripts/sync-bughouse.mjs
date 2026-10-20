@@ -36,6 +36,8 @@ export const OWNED_DIR = 'bughouse';
 export const INDEX_PATH = `${OWNED_DIR}/index.ts`;
 /** Modules a mirrored file may import although they are not generated here: mirrored verbatim by hand, guarded elsewhere. They must exist in the output root. */
 export const EXTERNAL_MIRRORED = ['crazyhouse.ts'];
+/** The one package a mirrored file may import (the board engine is chess.js, exactly as RoomChessEngine's is); both repos depend on it. Any other package is refused. */
+export const ALLOWED_PACKAGES = ['chess.js'];
 
 const FOURPLAYER_MANIFEST = 'fourPlayer/MIRRORED_TO_BACKEND.json';
 
@@ -92,7 +94,7 @@ export function generate({ sourceRoot = DEFAULT_SOURCE_ROOT } = {}) {
     }
     try {
       // rewriteModule's messages name the 4 Player manifest; this generator's is another file
-      out.set(relPath, bannerFor(relPath) + rewriteModule(relPath, toLf(fs.readFileSync(file, 'utf8')), mirrored));
+      out.set(relPath, bannerFor(relPath) + rewriteModule(relPath, toLf(fs.readFileSync(file, 'utf8')), mirrored, { allowedPackages: ALLOWED_PACKAGES }));
     } catch (err) {
       if (!(err instanceof SyncError)) throw err;
       problems.push(err.message.split(FOURPLAYER_MANIFEST).join(MANIFEST_PATH));

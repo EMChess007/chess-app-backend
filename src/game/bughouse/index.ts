@@ -4,3 +4,11 @@
 
 /** Bughouse engine (server copy) - public surface. Only the modules listed in MIRRORED_TO_BACKEND.json. */
 export * from './types.js';
+export * from './rules.js';
+export * from './board.js';
+export * from './clock.js';
+export * from './match.js';
+export * from './settle.js';
+export * from './invariants.js';
+export * from './snapshot.js';
+export * from './premove.js';

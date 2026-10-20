@@ -276,7 +276,7 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:authRateLimit
 
-      - name: Run the 4-seat test-switch tests (bot seed and start-position endpoint: opt-in, never in production; boots the real server in production mode)
+      - name: Run the 4-seat test-switch tests (bot seed and start-position endpoint - opt-in, never in production, boots the real server in production mode)
         working-directory: chess-app/backend
         run: npm run test:fourTestSwitches
 

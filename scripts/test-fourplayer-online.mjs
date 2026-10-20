@@ -31,11 +31,23 @@ import { PLAYABLE_SQUARES, BISHOP, CHATURAJI_RULES, GIVEAWAY_RULES, KNIGHT, QUEE
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 const SEED = Number(process.env.FOUR_E2E_SEED ?? 20260101);
 let passedChecks = 0;
+let conditionalChecks = 0;
 
 function check(condition, message) {
   assert.ok(condition, message);
   passedChecks++;
   console.log(`  ✓ ${message}`);
+}
+
+/**
+ * A check whose NUMBER depends on what the unseeded server did (scenario 21 plays until the bots have moved six times, and how many moves the two humans make in between
+ * depends on which seats they were dealt). It is asserted like any other, but counted apart and printed as "conditional", so the fixed total below is the same on every run
+ * (W5 step 1A: the total used to wander between 430 and 434 for exactly this reason).
+ */
+function checkConditional(condition, message) {
+  assert.ok(condition, message);
+  conditionalChecks++;
+  console.log(`  ~ ${message}`);
 }
 
 function connect(name, url = SERVER_URL) {
@@ -1039,6 +1051,7 @@ async function testChaturajiBotsFillTheTable() {
 
   // play until the bots have moved a few times; the humans move when it is their turn
   let botMoves = 0;
+  let humanMoves = 0;
   const seen = new Set();
   for (let i = 0; i < 400 && botMoves < 6; i++) {
     const lead = mine(humanSeats[0]);
@@ -1048,7 +1061,8 @@ async function testChaturajiBotsFillTheTable() {
       await until(`seat ${turn} has caught up`, () => latestOf(player).seq >= latestOf(lead).seq);
       const move = pickMove(latestOf(player).text, turn, CHATURAJI_RULES);
       const ack = await emitAck(player.socket, 'four_make_move', { roomId, ...move });
-      check(ack.ok === true, `human seat ${turn} plays ${move.from}-${move.to}`);
+      checkConditional(ack.ok === true, `human seat ${turn} plays ${move.from}-${move.to}`);
+      humanMoves++;
       await until(`seat ${humanSeats[0]} has four_state seq ${ack.seq}`, () => latestOf(lead).seq >= ack.seq);
     } else {
       const before = latestOf(lead).seq;
@@ -1063,7 +1077,9 @@ async function testChaturajiBotsFillTheTable() {
       }
     }
   }
-  check(botMoves >= 6, `the bots played ${botMoves} moves between the humans' moves`);
+  check(botMoves >= 6, 'the bots played at least 6 moves between the humans\' moves');
+  check(humanMoves >= 1, 'the humans moved when it was their turn (every one of those moves was accepted: see the conditional checks above)');
+  console.log(`      (${humanMoves} human moves, ${botMoves} bot moves in this run)`);
   check(new Set(humanSeats.map((s) => latestOf(mine(s)).text)).size === 1, 'both humans hold the identical snapshot');
 
   // both humans resign: the bots finish the game on their own, fast-forwarded, and the humans are told how it ended
@@ -1133,7 +1149,7 @@ async function main() {
     await realFill;
   }
 
-  console.log(`\nAll good — ${passedChecks} checks passed.`);
+  console.log(`\nAll good — ${passedChecks} checks passed (conditional: ${conditionalChecks}, counted apart: their number depends on the unseeded bots).`);
   process.exit(0);
 }
 

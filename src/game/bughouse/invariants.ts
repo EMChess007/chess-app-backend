@@ -10,7 +10,7 @@
  *   - each COLOUR owns exactly 16 pawns, 4 knights, 4 bishops, 4 rooks, 2 queens and 2 kings (two armies of 16) wherever they are - on either board or in the pockets of that colour's
  *     two seats (a White piece captured by Black on one board is dropped by the White player of the other board, so colour is conserved across boards);
  *   - hence 64 pieces in all;
- *   - no pocket count is negative or fractional, every promoted mark sits on a piece that is neither a pawn nor a king, no pawn stands on rank 1 or 8, and each board has one king per colour.
+ *   - no pocket count is negative or fractional, every promoted mark sits on a piece that is neither a pawn nor a king, and each board is a position chess.js accepts (which already means one king per colour and no pawn on rank 1 or 8).
  * `conservationProblems` returns what is wrong, as text; an empty list means the match is sound.
  */
 import { RESERVE_PIECE_TYPES } from '../crazyhouse.js';
@@ -33,7 +33,6 @@ export function conservationProblems(match: BughouseMatch): string[] {
       problems.push(`board ${board}: the position is not a valid FEN`);
       continue;
     }
-    const kings: Record<BughouseColor, number> = { w: 0, b: 0 };
     const marked = new Set(state.promoted);
     const seen = new Set<string>();
     for (const row of chess.board()) {
@@ -42,14 +41,11 @@ export function conservationProblems(match: BughouseMatch): string[] {
         const promoted = marked.has(cell.square);
         if (promoted) seen.add(cell.square);
         if (promoted && (cell.type === 'p' || cell.type === 'k')) problems.push(`board ${board}: ${cell.square} is marked promoted but holds a ${cell.type}`);
-        if (cell.type === 'p' && (cell.square[1] === '1' || cell.square[1] === '8')) problems.push(`board ${board}: a pawn stands on ${cell.square}`);
-        if (cell.type === 'k') kings[cell.color]++;
         counts[cell.color][promoted ? 'p' : cell.type]++;
       }
     }
     for (const square of marked) if (!seen.has(square)) problems.push(`board ${board}: ${square} is marked promoted but is empty`);
     if (marked.size !== state.promoted.length) problems.push(`board ${board}: a promoted square is listed twice`);
-    if (kings.w !== 1 || kings.b !== 1) problems.push(`board ${board}: expected one king per colour, found ${kings.w} White and ${kings.b} Black`);
   }
 
   for (const seat of BUGHOUSE_SEATS) {

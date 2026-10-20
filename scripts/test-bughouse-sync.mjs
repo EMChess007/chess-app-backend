@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { BACKEND_DIR, DEFAULT_OUT_ROOT, DEFAULT_SOURCE_ROOT, EXTERNAL_MIRRORED, INDEX_PATH, MANIFEST_PATH, OWNED_DIR, SyncError, bannerFor, check, generate, generateIndex, readManifest, run, toLf, write } from './sync-bughouse.mjs';
+import { ALLOWED_PACKAGES, BACKEND_DIR, DEFAULT_OUT_ROOT, DEFAULT_SOURCE_ROOT, EXTERNAL_MIRRORED, INDEX_PATH, MANIFEST_PATH, OWNED_DIR, SyncError, bannerFor, check, generate, generateIndex, readManifest, run, toLf, write } from './sync-bughouse.mjs';
 import { check as checkFourPlayer } from './sync-fourplayer.mjs';
 
 let passed = 0;
@@ -105,7 +105,12 @@ try {
     const withCz = makeSource({ 'bughouse/a.ts': "import type { CrazyhouseState } from '../crazyhouse';\nexport type S = CrazyhouseState;\n" });
     ok(generate({ sourceRoot: withCz }).get('bughouse/a.ts').includes("from '../crazyhouse.js'"), "'../crazyhouse' is allowed and becomes '../crazyhouse.js'");
     throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import fs from 'node:fs';\n" }) }), /imports "node:fs" - only relative imports/, 'a node: import is refused');
-    throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import chess from 'chess.js';\n" }) }), /imports "chess.js"/, 'a package import is refused');
+    throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import lodash from 'lodash';\n" }) }), /imports "lodash"/, 'a package import is refused');
+    throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import { Chess } from 'chess.js/dist/esm/chess.js';\n" }) }), /imports "chess.js\/dist\/esm\/chess.js"/, 'a deep import into chess.js is refused: only the package name itself is allowed');
+    throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import { Chess } from 'chess.js ';\n" }) }), /imports "chess.js "/, '...and so is a near miss of the name');
+    ok(JSON.stringify(ALLOWED_PACKAGES) === JSON.stringify(['chess.js']), 'the one allowed package is chess.js (a literal)');
+    const withChess = generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import { Chess, type Square } from 'chess.js';\nimport { b } from './b';\nexport const a = [Chess, b];\nexport type S = Square;\n", 'bughouse/b.ts': 'export const b = 1;\n' }) });
+    ok(withChess.get('bughouse/a.ts').includes("from 'chess.js';") && !withChess.get('bughouse/a.ts').includes("chess.js.js") && withChess.get('bughouse/a.ts').includes("from './b.js'"), "chess.js is left exactly as written ('chess.js', never 'chess.js.js'); the relative import beside it still gains '.js'");
     throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import { x } from '../ChessEngine';\n" }) }), /not in bughouse\/MIRRORED_TO_BACKEND\.json/, 'a client module outside the list is refused - and the message names THIS manifest');
     throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import { x } from '../fourPlayer/board';\n" }) }), /not in bughouse\/MIRRORED_TO_BACKEND\.json/, 'the 4 Player modules are not importable either');
     throwsSync(() => generate({ sourceRoot: makeSource({ 'bughouse/a.ts': "import { x } from './b.js';\n", 'bughouse/b.ts': 'export const x = 1;\n' }) }), /already has an extension/, 'a specifier that already has an extension is refused');

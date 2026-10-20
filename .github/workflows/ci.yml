@@ -226,6 +226,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:bughouseSync
 
+      - name: Run the Bughouse engine lockstep (the generated server copy against the app's engine, 300 seeded matches, byte-identical match text after every input)
+        working-directory: chess-app/backend
+        run: npm run test:bughouse
+
       - name: Run 4 Player engine parity (app engine vs the generated server copy, seeded full games in lockstep)
         working-directory: chess-app/backend
         run: npm run test:fourplayer

@@ -43,8 +43,11 @@ export function boardCrazyhouse(promoted: readonly string[], white: Reserve, bla
   return { reserve: { w: { ...white }, b: { ...black } }, promoted: [...promoted] };
 }
 
+/** A lookup of the pieces on the board AS IT IS NOW: the board is read once (chess.board()), so asking about every square costs an array index each, not a chess.js lookup. It is a
+ * snapshot - take a new one after the position changes. */
 export function pieceAtOf(chess: Chess): CrazyhousePieceAt {
-  return (square) => chess.get(square as Square);
+  const grid = chess.board();
+  return (square) => grid[8 - Number(square[1])]?.[square.charCodeAt(0) - 97] ?? undefined;
 }
 
 const other = (color: BughouseColor): BughouseColor => (color === 'w' ? 'b' : 'w');
@@ -65,7 +68,9 @@ function hasLegalDrop(chess: Chess, cz: CrazyhouseState, color: BughouseColor): 
 export function judgeBoard(chess: Chess, cz: CrazyhouseState): BoardVerdict {
   const turn = chess.turn();
   const inCheck = chess.isCheck();
-  const canAct = chess.moves().length > 0 || hasLegalDrop(chess, cz, turn);
+  // "has a legal move": chess.js's own isCheckmate() / isStalemate() are `no legal move` on its raw generator, without the SAN (and the check / mate probe of every move) that `moves()` pays for
+  const noMove = inCheck ? chess.isCheckmate() : chess.isStalemate();
+  const canAct = !noMove || hasLegalDrop(chess, cz, turn);
   if (canAct) return { status: inCheck ? 'check' : 'playing', turn, inCheck, stuck: null };
   if (!inCheck) return { status: 'stuck', turn, inCheck: false, stuck: 'noAction' };
   const king = kingSquareOf(chess, turn);

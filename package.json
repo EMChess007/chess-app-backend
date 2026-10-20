@@ -38,6 +38,7 @@
     "sync:fourplayer": "node scripts/sync-fourplayer.mjs",
     "sync:bughouse": "node scripts/sync-bughouse.mjs",
     "test:bughouseSync": "node scripts/test-bughouse-sync.mjs",
+    "test:bughouse": "tsx scripts/test-bughouse-engine.mjs",
     "test:fourplayerSync": "node scripts/test-fourplayer-sync.mjs",
     "test:fourplayer": "tsx scripts/test-fourplayer.mjs",
     "test:fourplayerRooms": "tsx scripts/test-fourplayer-rooms.mjs",

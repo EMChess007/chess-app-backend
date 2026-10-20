@@ -18,9 +18,19 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ChessEngine as ClientEngine } from '../../src/logic/ChessEngine.ts';
-import { getCrazyhouseMoves } from '../../src/logic/crazyhouse.ts';
+import * as mobileCz from '../../src/logic/crazyhouse.ts';
 import { RoomChessEngine } from '../src/game/RoomChessEngine.ts';
-import { RESERVE_PIECE_TYPES, applyCrazyhouseDrop, applyCrazyhouseMove, cloneCrazyhouseState, initialCrazyhouseState } from '../src/game/crazyhouse.ts';
+import {
+  RESERVE_PIECE_TYPES,
+  applyCrazyhouseDrop,
+  applyCrazyhouseMove,
+  applyCrazyhouseMoveForPartner,
+  cloneCrazyhouseState,
+  crazyhouseBankedPiece,
+  crazyhouseDropCouldAnswerCheck,
+  creditCrazyhouseReserve,
+  initialCrazyhouseState,
+} from '../src/game/crazyhouse.ts';
 import { buildPgn } from '../src/game/pgn.ts';
 import { RoomManager, variantPgnTag } from '../src/game/rooms.ts';
 
@@ -313,7 +323,7 @@ console.log('\n=== 3. The server and mobile engines agree ===');
     let state = initialCrazyhouseState();
     for (let ply = 0; ply < 120 && problems.length === 0; ply++) {
       const client = new ClientEngine(fen, { crazyhouse: true, crazyhouseState: state });
-      const moves = getCrazyhouseMoves(client);
+      const moves = mobileCz.getCrazyhouseMoves(client);
       const drops = client.getLegalDrops();
       const mover = client.getTurn();
 
@@ -398,6 +408,55 @@ console.log('\n=== 3. The server and mobile engines agree ===');
   check(problems.length === 0, `server and mobile agree on every candidate of ${seen.plies} plies / 12 games${problems.length ? ` — ${problems.slice(0, 3).join(' | ')}` : ''}`);
   check(seen.refusals > 1500, `...and on ${seen.refusals} sampled turns that must be refused`);
   check(seen.drops > 100 && seen.captures > 100, `the random games really exercised drops (${seen.drops}) and captures (${seen.captures}); promotions ${seen.promotions}, promoted pieces captured ${seen.promotedCaptures}`);
+}
+
+// --- 4. The Bughouse additions ---------------------------------------------------------------------------
+console.log('\n=== 4. The Bughouse additions (BUGHOUSE_SPEC.md W0) behave the same on the server copy ===');
+{
+  const random = seeded(4242);
+  const squares = ['a1', 'b3', 'c4', 'd5', 'e6', 'f7', 'g8', 'h2'];
+  const kinds = [undefined, 'p', 'n', 'b', 'r', 'q', 'k', 'x'];
+  let compared = 0;
+  const differences = [];
+  for (let i = 0; i < 500; i++) {
+    const state = initialCrazyhouseState();
+    for (const side of ['w', 'b']) for (const t of RESERVE_PIECE_TYPES) state.reserve[side][t] = Math.floor(random() * 3);
+    state.promoted = squares.filter(() => random() < 0.4).sort();
+    const to = squares[Math.floor(random() * squares.length)];
+    const captured = kinds[Math.floor(random() * kinds.length)];
+    const enPassant = captured === 'p' && random() < 0.3;
+    const move = { from: enPassant ? 'e5' : 'e1', to: enPassant ? 'd6' : to, captured, enPassant, ...(random() < 0.2 ? { promotion: 'q' } : {}), ...(random() < 0.1 ? { castleRook: { from: 'h1', to: 'f1' } } : {}) };
+    const mover = random() < 0.5 ? 'w' : 'b';
+    const piece = RESERVE_PIECE_TYPES[Math.floor(random() * 5)];
+    const pairs = [
+      ['crazyhouseBankedPiece', mobileCz.crazyhouseBankedPiece(state, move), crazyhouseBankedPiece(state, move)],
+      ['creditCrazyhouseReserve', mobileCz.creditCrazyhouseReserve(state, mover, piece), creditCrazyhouseReserve(state, mover, piece)],
+      ['applyCrazyhouseMoveForPartner', mobileCz.applyCrazyhouseMoveForPartner(state, mover, move), applyCrazyhouseMoveForPartner(state, mover, move)],
+    ];
+    for (const [name, a, b] of pairs) {
+      compared++;
+      if (JSON.stringify(a) !== JSON.stringify(b)) differences.push(`${name} ${JSON.stringify(move)}`);
+    }
+  }
+  check(differences.length === 0, `the three state functions agree with the mobile copy on ${compared} random inputs${differences.length ? ` - ${differences.slice(0, 2).join(' | ')}` : ''}`);
+
+  const answer = (fen, color, king) => {
+    const engine = new ClientEngine(fen);
+    const pieceAt = (sq) => engine.getPieceAt(sq);
+    const server = crazyhouseDropCouldAnswerCheck(king, color, pieceAt);
+    const mobile = mobileCz.crazyhouseDropCouldAnswerCheck(king, color, pieceAt);
+    return server === mobile ? server : `DIFFERENT server=${server} mobile=${mobile}`;
+  };
+  check(answer('4k3/8/8/8/8/8/8/r3K3 w - - 0 1', 'w', 'e1') === true && answer('4k3/8/8/8/8/2b5/8/4K3 w - - 0 1', 'w', 'e1') === true, 'a single sliding check with squares between: a drop could answer it (rook, bishop), on both copies');
+  check(answer('4k3/8/8/8/8/3n4/8/4K3 w - - 0 1', 'w', 'e1') === false && answer('4k3/8/8/8/8/8/4r3/4K3 w - - 0 1', 'w', 'e1') === false && answer('k3r3/8/8/8/8/3n4/8/4K3 w - - 0 1', 'w', 'e1') === false, 'a knight check, an adjacent slider and a double check can never be answered, on both copies');
+  check(answer('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', 'w', 'e1') === false, 'not being in check is false, on both copies');
+
+  // literals on the server copy: a plain capture banks the type, a promoted piece banks a pawn, the partner variant leaves the mover's reserve alone
+  const base = initialCrazyhouseState();
+  check(crazyhouseBankedPiece(base, { from: 'e4', to: 'd5', captured: 'q' }) === 'q' && crazyhouseBankedPiece({ ...base, promoted: ['d5'] }, { from: 'e4', to: 'd5', captured: 'q' }) === 'p' && crazyhouseBankedPiece(base, { from: 'e4', to: 'd5', captured: 'k' }) === null && crazyhouseBankedPiece(base, { from: 'e4', to: 'e5' }) === null, 'banked piece: a queen is a queen, a promoted queen is a pawn, a king and a quiet move bank nothing');
+  const partner = applyCrazyhouseMoveForPartner(base, 'w', { from: 'e4', to: 'd5', captured: 'r' });
+  check(partner.banked === 'r' && partner.state.reserve.w.r === 0 && partner.state.reserve.b.r === 0, 'a capture on this board is not banked in the mover\'s own reserve; the piece is reported for the partner');
+  check(creditCrazyhouseReserve(base, 'b', 'n').reserve.b.n === 1 && base.reserve.b.n === 0, 'a credit adds one piece to the named reserve and leaves its input alone');
 }
 
 console.log(`\nAll good — ${passed} checks passed.`);

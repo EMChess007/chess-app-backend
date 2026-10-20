@@ -210,4 +210,44 @@ export function crazyhouseDropSan(piece: ReservePieceType, square: string, suffi
   return `${piece.toUpperCase()}@${square}${suffix}`;
 }
 
+// Bughouse additions (BUGHOUSE_SPEC.md W0). Pure additions: nothing above changes behaviour, and 2-player Crazyhouse never calls them. In Bughouse a capture is banked by the
+// capturer's PARTNER on the OTHER board, and a "mate" is only a mate when no dropped piece could ever answer it.
+
+/** The piece type a capture would put in a reserve - a captured PROMOTED piece banks a PAWN, a king or an unknown type banks nothing, a move that captures nothing is null. It is
+ * the rule applyCrazyhouseMove applies to the capturer's own reserve, asked on its own so that a caller can bank the piece somewhere else. */
+export function crazyhouseBankedPiece(state: CrazyhouseState, move: CrazyhouseMoveInfo): ReservePieceType | null {
+  if (!move.captured) return null;
+  const capturedSquare = move.enPassant ? `${move.to[0]}${move.from[1]}` : move.to;
+  const type = (state.promoted.includes(capturedSquare) ? 'p' : move.captured) as ReservePieceType;
+  return RESERVE_PIECE_TYPES.includes(type) ? type : null;
+}
+
+/** `state` plus one `piece` in `color`'s reserve (a new object; the promoted marks are copied). A type the reserve has no slot for changes nothing. */
+export function creditCrazyhouseReserve(state: CrazyhouseState, color: PieceColor, piece: ReservePieceType): CrazyhouseState {
+  const next = cloneCrazyhouseState(state);
+  if (RESERVE_PIECE_TYPES.includes(piece)) next.reserve[color][piece]++;
+  return next;
+}
+
+/** What one ordinary move did on a Bughouse board: this board's state after it (the promoted marks move exactly as in applyCrazyhouseMove, but the MOVER's reserve is left as
+ * it was - the capturer's partner banks it) and the piece the partner's reserve on the other board gains (null when nothing was captured). */
+export interface CrazyhousePartnerMove {
+  state: CrazyhouseState;
+  banked: ReservePieceType | null;
+}
+
+export function applyCrazyhouseMoveForPartner(state: CrazyhouseState, mover: PieceColor, move: CrazyhouseMoveInfo): CrazyhousePartnerMove {
+  const banked = crazyhouseBankedPiece(state, move);
+  const next = applyCrazyhouseMove(state, mover, move);
+  next.reserve[mover] = { ...state.reserve[mover] };
+  return { state: next, banked };
+}
+
+/** Could SOME dropped piece ever answer the check on `color`'s king, whatever the reserve holds now? True exactly when ONE sliding piece gives the check and at least one empty
+ * square lies between it and the king (a knight or pawn check, a double check and an adjacent slider can never be blocked; not being in check is false). Of the pieces a drop
+ * can use, only a pawn is limited (never rank 1 or 8); any other piece blocks on any of the squares. This is the question behind Bughouse's "stuck" (BUGHOUSE_SPEC.md rule 18). */
+export function crazyhouseDropCouldAnswerCheck(kingSquare: string, color: PieceColor, pieceAt: CrazyhousePieceAt): boolean {
+  return crazyhouseCheckInfo(kingSquare, color, pieceAt).blockSquares.length > 0;
+}
+
 // --- End of the shared rules block --------------------------------------------------------------------------------

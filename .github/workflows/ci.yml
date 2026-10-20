@@ -122,6 +122,11 @@ jobs:
         working-directory: chess-app/backend
         run: npm run sync:fourplayer -- --check
 
+      # The Bughouse engine (BUGHOUSE_SPEC.md W0) is generated the same way, by its own script and into its own directory (src/game/bughouse/).
+      - name: Check the Bughouse engine mirror is in sync with the app source
+        working-directory: chess-app/backend
+        run: npm run sync:bughouse -- --check
+
       - name: Start dev server
         working-directory: chess-app/backend
         # FOUR_GRACE_MS shortens the 4 Player bot-takeover grace (45 s) so the real-socket 4 Player test below can watch a disconnect -> takeover ->
@@ -216,6 +221,10 @@ jobs:
       - name: Run 4 Player mirror generator tests (closure rule, drift detection, CRLF tolerance)
         working-directory: chess-app/backend
         run: npm run test:fourplayerSync
+
+      - name: Run Bughouse mirror generator tests (closure rule, drift detection, CRLF tolerance, the two generators never disturb each other)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseSync
 
       - name: Run 4 Player engine parity (app engine vs the generated server copy, seeded full games in lockstep)
         working-directory: chess-app/backend

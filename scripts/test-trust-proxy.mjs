@@ -100,6 +100,10 @@ ok(limiterKeyOf('2001:db8:aaaa:bb00::1') !== limiterKeyOf('2001:db8:aaaa:bc00::1
   ok(JSON.stringify(d.chain) === JSON.stringify(['public', 'private']), 'diagnostic: the chain names the KIND of each entry, left to right (public, private)');
   ok(JSON.stringify(describeClientIp(req('10.0.0.5', 'unknown, 203.0.113.9, fe80::1, 2001:db8::1, 10.1.1.1:8080'), 1).chain) === JSON.stringify(['invalid', 'public', 'private', 'public', 'invalid']), 'diagnostic: a name or an address with a port is "invalid", an IPv6 link-local is "private", a documentation IPv6 is "public"');
   ok(describeClientIp(req('10.0.0.5', Array.from({ length: 30 }, (_, i) => `198.51.100.${i + 1}`).join(', ')), 1).chain.length === 8, 'diagnostic: at most the last 8 entries are classified (a hostile 30-entry header cannot grow the answer)');
+  // 22 public entries then 8 private ones: only the LAST eight (the platform's side) are shown, never the first eight (the client's side)
+  const hostile = [...Array.from({ length: 22 }, (_, i) => `198.51.100.${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `10.0.0.${i + 1}`)].join(', ');
+  ok(describeClientIp(req('10.0.0.5', hostile), 1).chain.join() === 'private,private,private,private,private,private,private,private', 'diagnostic: the cap keeps the LAST entries - the platform\'s side of the chain - not the first');
+  ok(describeClientIp(req('10.0.0.5', ' , 203.0.113.9,, 10.1.1.1 ,'), 1).chain.join() === 'public,private', 'diagnostic: empty entries between commas are skipped, not reported as invalid');
   ok(describeClientIp(req('10.0.0.5', ['203.0.113.9', '10.1.1.1, 10.2.2.2']), 1).chain.join() === 'public,private,private', 'diagnostic: a header delivered as an array is classified as one list');
   ok(describeClientIp(req('198.51.100.20'), 1).peerIsPrivate === false && describeClientIp(req('198.51.100.20'), 1).xffEntries === 0, 'diagnostic: a public peer is reported as not private; no header counts 0 entries');
   ok(describeClientIp(req('10.0.0.5', ' , ,'), 1).xffEntries === 0 && describeClientIp(req('10.0.0.5', 'a, ,b'), 1).xffEntries === 2, 'diagnostic: empty entries are not counted');

@@ -92,6 +92,8 @@ const coverage = {
 
 /** 4 Player Giveaway has its OWN tally (section 4c), so adding it cannot shift the Chess coverage thresholds or shorten the Chess hunt. */
 const giveawayCoverage = { ...JSON.parse(JSON.stringify(coverage)), kingCaptures: 0, endings: { cap: 0, outOfPieces: 0, stuck: 0, lastStanding: 0 } };
+/** Chaturaji too (section 5c). */
+const chaturajiCoverage = { ...JSON.parse(JSON.stringify(coverage)), kingCaptures: 0, kingCapturedEliminations: 0, forks: 0, endings: { elimination: 0, cap: 0 } };
 let tally = coverage;
 
 function countEvents(events) {
@@ -107,7 +109,9 @@ function countEvents(events) {
       if (f & FE.FLAG_PROMOTION) tally.promotions['qrbn'[FE.PROMOTABLE_TYPES.indexOf(FE.promotionOf(e.move))]]++;
     } else if (e.kind === 'deadKingMove') tally.deadKingMoves++;
     else if (e.kind === 'frozen') tally.frozen++;
+    else if (e.kind === 'fork') tally.forks = (tally.forks ?? 0) + 1;
     else if (e.kind === 'eliminated') {
+      if (e.reason === 'kingCaptured') tally.kingCapturedEliminations = (tally.kingCapturedEliminations ?? 0) + 1;
       if (e.reason === 'checkmate') tally.checkmates++;
       else if (e.reason === 'stalemate') tally.stalemates++;
       else if (e.reason === 'resign') tally.resigns++;
@@ -142,7 +146,8 @@ const ELOS_DEEP = [1800, 3000];
 /** The bots, given identically seeded RNGs, must pick the same move (and the evaluator must score identically). */
 function compareBots(ls, seedBase, elos, deep = false) {
   const giveaway = ls.fe.rules.mode === 'giveaway'; // a Giveaway position is played by the Giveaway bot (and has no Chess evaluator to compare)
-  const choose = giveaway ? 'chooseGiveawayFourBotMove' : 'chooseBotMove';
+  const chaturaji = FE.variantOfRules(ls.fe.rules) === 'chaturaji'; // a Chaturaji position by the Chaturaji bot (the evaluator is the shared one, compared as for Chess)
+  const choose = giveaway ? 'chooseGiveawayFourBotMove' : chaturaji ? 'chooseChaturajiBotMove' : 'chooseBotMove';
   for (const elo of elos) {
     const seed = (seedBase * 7919 + elo) >>> 0;
     ls.same(`bot move at ELO ${elo}`, FE[choose](ls.fe, elo, mulberry32(seed)), BE[choose](ls.be, elo, mulberry32(seed)));
@@ -219,7 +224,8 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
           beMove = BE.chooseBotMoveFor(tb.state, 1200, mulberry32(rngSeed));
         } else {
           const pick = feMoves[Math.floor(script() * feMoves.length)];
-          const promotionType = FE.PROMOTABLE_TYPES[Math.floor(script() * 4)];
+          const promotionTypes = FE.optionsOf(ls.fe.rules).promotionTypes; // all four for Chess / Giveaway (one draw, as before), the boat only for Chaturaji
+          const promotionType = promotionTypes[Math.floor(script() * promotionTypes.length)];
           feMove = FE.findLegalMove(ta.state, seat, pick.from, pick.to, promotionType);
           beMove = BE.findLegalMove(tb.state, seat, pick.from, pick.to, promotionType);
         }
@@ -240,12 +246,48 @@ function playGame(seed, { style, maxPlies, initialSeconds = 120, incrementSecond
     // the serialization round trip is the wire format: both engines must rebuild the very same position from it, from either side's text
     const text = FE.serialize(ls.fe);
     ls.same('serialize', text, BE.serialize(ls.be));
-    ls.same('deserialize round trip', fingerprint(FE, FE.deserialize(text)), fingerprint(BE, BE.deserialize(text)));
-    ls.same('cross-engine deserialize', fingerprint(FE, FE.deserialize(text)), fingerprint(FE, BE.deserialize(text)));
+    // (each engine reads the text with the rules of the position it came from: a Chaturaji snapshot has 8 rows, the others 14)
+    ls.same('deserialize round trip', fingerprint(FE, FE.deserialize(text, ls.fe.rules)), fingerprint(BE, BE.deserialize(text, ls.be.rules)));
+    ls.same('cross-engine deserialize', fingerprint(FE, FE.deserialize(text, ls.fe.rules)), fingerprint(FE, BE.deserialize(text, ls.fe.rules)));
   }
   tally.games++;
   tally.plies += ls.fe.ply;
   return ls;
+}
+
+/**
+ * A `Geometry` (board.ts) is an object of tables AND closures. Two copies of the same source have equal tables but never identical function
+ * objects, so deepEqual cannot compare them: the tables are compared deep-equal, and each closure is compared by what it RETURNS over the whole
+ * board (every square, every seat, every display view) - which is exactly what the two copies must agree on.
+ */
+const isGeometry = (v) => v !== null && typeof v === 'object' && typeof v.size === 'number' && Array.isArray(v.rays) && typeof v.forwardCoord === 'function';
+function sameGeometry(be, fe, name) {
+  assert.ok(isGeometry(fe), `${name} is a geometry on both sides`);
+  const data = (g) => Object.fromEntries(Object.entries(g).filter(([, v]) => typeof v !== 'function'));
+  assert.deepEqual(data(be), data(fe), `geometry ${name}: tables / constants differ`);
+  assert.deepEqual(Object.keys(be).sort(), Object.keys(fe).sort(), `geometry ${name}: members differ`);
+  const size = be.size;
+  for (let sq = 0; sq < be.cells; sq++) {
+    assert.equal(be.fileOf(sq), fe.fileOf(sq), `${name}.fileOf(${sq})`);
+    assert.equal(be.rankOf(sq), fe.rankOf(sq), `${name}.rankOf(${sq})`);
+    if (!be.valid[sq]) continue;
+    assert.equal(be.squareName(sq), fe.squareName(sq), `${name}.squareName(${sq})`);
+    assert.equal(be.parseSquare(be.squareName(sq)), fe.parseSquare(fe.squareName(sq)), `${name}.parseSquare(${sq})`);
+    for (const seat of [0, 1, 2, 3]) {
+      assert.equal(be.forwardCoord(seat, sq), fe.forwardCoord(seat, sq), `${name}.forwardCoord(${seat}, ${sq})`);
+      for (const steps of [1, 2]) assert.equal(be.stepForward(seat, sq, steps), fe.stepForward(seat, sq, steps), `${name}.stepForward(${seat}, ${sq}, ${steps})`);
+      assert.deepEqual(be.pawnCaptureSquares(seat, sq), fe.pawnCaptureSquares(seat, sq), `${name}.pawnCaptureSquares(${seat}, ${sq})`);
+    }
+  }
+  for (let file = -2; file < size + 2; file++) for (let rank = -2; rank < size + 2; rank++) assert.equal(be.isPlayable(file, rank), fe.isPlayable(file, rank), `${name}.isPlayable(${file}, ${rank})`);
+  for (const view of [0, 1, 2, 3]) {
+    for (let x = 0; x < size; x++) {
+      for (let y = 0; y < size; y++) {
+        assert.deepEqual(be.toDisplay(x, y, view), fe.toDisplay(x, y, view), `${name}.toDisplay(${x}, ${y}, ${view})`);
+        assert.deepEqual(be.fromDisplay(x, y, view), fe.fromDisplay(x, y, view), `${name}.fromDisplay(${x}, ${y}, ${view})`);
+      }
+    }
+  }
 }
 
 console.log('\n=== 1. The public surface is the same ===');
@@ -265,6 +307,13 @@ console.log('\n=== 1. The public surface is the same ===');
     if (typeof BE[key] === 'function') {
       assert.equal(typeof FE[key], 'function', `${key} is a function on both sides`);
       functionsChecked++;
+    } else if (isGeometry(BE[key])) {
+      sameGeometry(BE[key], FE[key], key);
+      valuesChecked++;
+    } else if (key === 'GEOMETRIES') {
+      assert.deepEqual(Object.keys(BE[key]).sort(), Object.keys(FE[key]).sort(), 'the same boards are registered');
+      for (const id of Object.keys(BE[key])) sameGeometry(BE[key][id], FE[key][id], `GEOMETRIES.${id}`);
+      valuesChecked++;
     } else {
       assert.deepEqual(BE[key], FE[key], `constant/table ${key} differs`);
       valuesChecked++;
@@ -742,6 +791,172 @@ console.log('\n=== 5b. 4 Player Giveaway: the same engine under the Giveaway rul
   };
   for (const [name, hit] of Object.entries(reachedG)) ok(hit, `giveaway exercised: ${name}`);
   console.log(`      ${g.games} Giveaway games, ${g.plies} plies, ${g.moves} moves; coverage ${JSON.stringify(g)}`);
+  tally = coverage;
+}
+
+console.log('\n=== 5c. Chaturaji: the same engine on the 8 x 8 board with Capture the King, app vs mirror, in lockstep ===');
+{
+  tally = chaturajiCoverage;
+  const CR = (E) => E.CHATURAJI_RULES;
+  const cBuild = (pieces, options = {}) => (E) => E.stateFromPieces(pieces, { rules: CR(E), ...options });
+  const csq = (E, name) => E.SQUARE8.parseSquare(name);
+  const KC = ['rK@a1', 'bK@a8', 'yK@h8', 'gK@h1'];
+  /** One scripted move on BOTH engines (squares are named on the 8 x 8 board; a promotion is always the boat). */
+  function cScripted(ls, seat, from, to) {
+    const fm = FE.findLegalMove(ls.fe, seat, csq(FE, from), csq(FE, to), FE.ROOK);
+    const bm = BE.findLegalMove(ls.be, seat, csq(BE, from), csq(BE, to), BE.ROOK);
+    ls.same(`legal move ${from}-${to}`, fm, bm);
+    assert.ok(fm, `[${ls.label}] ${from}-${to} must be legal for seat ${seat} (it is not - the scenario's geometry is wrong)`);
+    const a = FE.playMove(ls.fe, fm, mulberry32(7));
+    const b = BE.playMove(ls.be, bm, mulberry32(7));
+    ls.same('events', a.events, b.events);
+    countEvents(a.events);
+    ls.fe = a.state;
+    ls.be = b.state;
+    ls.lastEvents = a.events;
+    ls.states();
+  }
+  function cResign(ls, who, reason = 'resign') {
+    const a = FE.resign(ls.fe, who, mulberry32(11), reason);
+    const b = BE.resign(ls.be, who, mulberry32(11), reason);
+    ls.same('events', a.events, b.events);
+    countEvents(a.events);
+    ls.fe = a.state;
+    ls.be = b.state;
+    ls.lastEvents = a.events;
+    ls.states();
+  }
+
+  // 1. Random full games from the start position: human-style moves, resignations and flag falls, every 25th ply the (Chess) bots compared on the 8 x 8 position too.
+  const started = Date.now();
+  for (let seed = 3501; seed <= 3540; seed++) {
+    playGame(seed, { style: seed % 4 === 0 ? 'bot' : 'human', maxPlies: 400, botEvery: 25, chaos: 0.02, initialSeconds: 300, label: 'chaturaji random', build: (E) => E.initialState({ ...CR(E), maxPlies: 400 }) });
+  }
+  ok(chaturajiCoverage.games === 40, `40 random Chaturaji games, ${chaturajiCoverage.plies} plies, identical at every ply (positions, legal moves, events, clocks, snapshot round trips) - ${Date.now() - started} ms`);
+
+  // 2. Scenes: every rule scripted on both engines, asserted exactly, then a random continuation.
+  playGame(3601, {
+    style: 'human', maxPlies: 40, chaos: 0, botEvery: 0, label: 'chaturaji king capture',
+    build: cBuild(['rK@a1', 'rR@d4', 'bK@d8', 'bN@b6', 'bP@c5', 'yK@h8', 'gK@h1']),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'd4', 'd8');
+      assert.deepEqual(ls.fe.score, [3, 0, 0, 0], 'a captured king is worth 3, once');
+      assert.deepEqual(ls.fe.status, ['active', 'frozen', 'active', 'active'], 'its seat is out at once, its army inactive');
+      assert.deepEqual(ls.lastEvents.map((e) => e.kind), ['move', 'eliminated']);
+    },
+  });
+  playGame(3602, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'chaturaji fork of three',
+    build: cBuild(['rK@a1', 'rN@c5', 'bK@d6', 'yK@f6', 'gK@g3']),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'c5', 'e4');
+      assert.equal(ls.fe.score[0], 5, 'a knight attacking three kings scores +5');
+    },
+  });
+  playGame(3603, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'chaturaji fork then king capture',
+    build: cBuild(['rK@a1', 'rN@e5', 'bK@d7', 'yK@f6', 'gK@b6']),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'e5', 'd7');
+      assert.equal(ls.fe.score[0], 4, 'the fork (+1) and the king (+3)');
+      assert.deepEqual(ls.lastEvents.map((e) => e.kind), ['move', 'fork', 'eliminated']);
+    },
+  });
+  playGame(3604, {
+    style: 'human', maxPlies: 30, chaos: 0, botEvery: 0, label: 'chaturaji promotion to a boat by capture',
+    build: cBuild([...KC, 'rP@c7', 'bN@b8', 'yP@d8']),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'c7', 'b8');
+      assert.ok(FE.listPieces(ls.fe).includes('rT@b8'), 'a promoted rook (a boat) stands on b8');
+      assert.equal(ls.fe.score[0], 3);
+    },
+  });
+  playGame(3605, {
+    style: 'human', maxPlies: 40, chaos: 0, botEvery: 0, label: 'chaturaji no legal move: eliminated, no points',
+    build: cBuild(['bK@a8', ...'abcdefgh'.split('').map((f) => `bP@${f}7`), ...'bcdefgh'.split('').map((f) => `bP@${f}8`), 'rK@a1', 'yK@e4', 'gK@h1']),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'a1', 'b1');
+      assert.deepEqual(ls.lastEvents.map((e) => e.kind), ['move', 'eliminated']);
+      assert.deepEqual(ls.fe.score, [0, 0, 0, 0], 'stalemate scores nothing here');
+      assert.equal(ls.lastEvents[1].reason, 'stalemate');
+    },
+  });
+  playGame(3606, {
+    style: 'human', maxPlies: 40, chaos: 0, botEvery: 0, label: 'chaturaji resigned seat: the king walks and can be captured for 3',
+    build: cBuild(['rK@a1', 'rR@d1', 'bK@a8', 'yK@h8', 'gK@d4'], { turn: 0 }),
+    prelude: (ls) => {
+      cResign(ls, 3);
+      assert.equal(ls.fe.status[3], 'dead-king');
+      cScripted(ls, 0, 'd1', 'd2'); // a quiet Red move; Blue, Yellow move on their own below via the continuation
+      assert.equal(ls.fe.turn, 1);
+    },
+  });
+  playGame(3607, {
+    style: 'human', maxPlies: 20, chaos: 0, botEvery: 0, label: 'chaturaji capture of a walking king',
+    build: cBuild(['rK@a1', 'rR@d1', 'bK@a8', 'yK@h8', 'gK@d4'], { status: ['active', 'active', 'active', 'dead-king'], turn: 0 }),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'd1', 'd4');
+      assert.equal(ls.fe.score[0], 3);
+      assert.equal(ls.fe.status[3], 'frozen');
+      assert.deepEqual(ls.lastEvents.map((e) => e.kind), ['move', 'frozen']);
+    },
+  });
+  playGame(3608, {
+    style: 'human', maxPlies: 20, chaos: 0, botEvery: 0, label: 'chaturaji the end: +3 per surviving king, not the survivor but the highest score',
+    build: cBuild(['rK@a1', 'rR@d4', 'gK@d8', 'bK@a8', 'yK@h8'], { status: ['active', 'dead-king', 'dead-king', 'active'] }),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'd4', 'd8');
+      assert.equal(ls.fe.score[0], 3 + 6, 'the king (3) and two walking kings left on the board (2 x 3)');
+      assert.deepEqual(ls.fe.result, { winners: [0], reason: 'elimination' });
+    },
+  });
+  playGame(3609, {
+    style: 'human', maxPlies: 20, chaos: 0, botEvery: 0, label: 'chaturaji the end: a tie is shared',
+    build: cBuild(['rK@a1', 'rR@d4', 'gK@d8'], { status: ['active', 'frozen', 'frozen', 'active'], score: [0, 0, 3, 0] }),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'd4', 'd8');
+      assert.deepEqual(ls.fe.result, { winners: [0, 2], reason: 'elimination' });
+    },
+  });
+  playGame(3610, {
+    style: 'human', maxPlies: 20, chaos: 0, botEvery: 0, label: 'chaturaji the ply cap',
+    build: cBuild([...KC, 'rP@c3'], { ply: 4, rules: { ...FE.CHATURAJI_RULES, maxPlies: 5 }, score: [2, 7, 1, 7] }),
+    prelude: (ls) => {
+      cScripted(ls, 0, 'c3', 'c4');
+      assert.deepEqual(ls.fe.result, { winners: [1, 3], reason: 'cap' });
+    },
+  });
+  playGame(3611, { style: 'human', maxPlies: 60, chaos: 0, botEvery: 0, label: 'chaturaji bare kings play on (no dead-position ending)', build: cBuild(KC) });
+  ok(chaturajiCoverage.games === 51, `11 scripted Chaturaji scenes asserted exactly on both engines (king capture, forks, promotion by capture, no-move elimination, walking king, the three end rules, the cap, bare kings)`);
+
+  // 3. The things that are not a game: the preset, the board and the validator are the same objects' worth of data on both sides.
+  assert.equal(BE.rulesFor('chaturaji'), BE.CHATURAJI_RULES, 'rulesFor(chaturaji) on the mirror');
+  assert.equal(BE.variantOfRules(BE.CHATURAJI_RULES), 'chaturaji');
+  assert.deepEqual(BE.validateRules(JSON.parse(JSON.stringify(FE.CHATURAJI_RULES))), { ok: true, rules: BE.CHATURAJI_RULES });
+  assert.equal(BE.validateRules({ ...FE.CHATURAJI_RULES, maxPlies: 999 }).ok, false);
+  assert.equal(BE.KNOWN_RULES.length, 3);
+  assert.equal(FE.serialize(FE.initialState(FE.CHATURAJI_RULES)), BE.serialize(BE.initialState(BE.CHATURAJI_RULES)));
+  ok(true, 'the Chaturaji preset, its validator and its start snapshot are the same on both sides');
+
+  const c = chaturajiCoverage;
+  const reachedC = {
+    'king captured': c.kingCaptures >= 20,
+    'a seat eliminated by a king capture': c.kingCapturedEliminations >= 10,
+    'check forks scored': c.forks >= 3,
+    'promotion to a boat': c.promotions.r >= 2 && c.promotions.q + c.promotions.b + c.promotions.n === 0,
+    'capture taken': c.captures >= 100,
+    'no-move elimination': c.stalemates >= 1,
+    resignation: c.resigns >= 1,
+    'flag fall (timeout)': c.timeouts >= 1,
+    'dead-king walks': c.deadKingMoves >= 3,
+    'a walking king frozen': c.frozen >= 1,
+    'ends by elimination': c.endings.elimination >= 3,
+    'ends by cap': c.endings.cap >= 1,
+    'Chess bots compared on the 8 x 8 board': c.botComparisons >= 30,
+    'no double step, castling, en passant or checkmate ever happened': c.doubleSteps === 0 && c.castles === 0 && c.enPassant === 0 && c.checkmates === 0,
+  };
+  for (const [name, hit] of Object.entries(reachedC)) ok(hit, `chaturaji exercised: ${name}`);
+  console.log(`      ${c.games} Chaturaji games, ${c.plies} plies, ${c.moves} moves; coverage ${JSON.stringify(c)}`);
   tally = coverage;
 }
 

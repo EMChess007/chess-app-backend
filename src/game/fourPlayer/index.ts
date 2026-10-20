@@ -9,5 +9,6 @@ export * from './moves.js';
 export * from './elimination.js';
 export * from './giveaway.js';
 export * from './bot.js';
+export * from './chaturajiBot.js';
 export * from './giveawayBot.js';
 export * from './clock.js';

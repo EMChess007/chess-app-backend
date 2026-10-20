@@ -20,6 +20,10 @@
     "test:repetition": "tsx scripts/test-repetition.mjs",
     "test:rejoinPersist": "tsx scripts/test-rejoin-persist.mjs",
     "test:userCleanup": "node scripts/test-user-cleanup.mjs",
+    "test:e2eBrowser": "tsx scripts/e2e-browser/run.mjs",
+    "test:authRateLimit": "tsx scripts/test-auth-rate-limit.mjs",
+    "test:fourTestSwitches": "tsx scripts/test-four-test-switches.mjs",
+    "check:productionInstall": "node scripts/check-production-install.mjs",
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",
     "test:duck": "tsx scripts/test-duck.mjs",
@@ -37,6 +41,7 @@
     "test:fourplayerHandlers": "tsx scripts/test-fourplayer-handlers.mjs",
     "test:fourplayerOnline": "tsx scripts/test-fourplayer-online.mjs",
     "test:fourplayerGiveaway": "tsx scripts/test-fourplayer-giveaway.mjs",
+    "test:fourplayerChaturaji": "tsx scripts/test-fourplayer-chaturaji.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs",
     "spell-opponent": "tsx scripts/spell-opponent.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
@@ -44,6 +49,10 @@
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.5",
     "bcryptjs": "^3.0.3",
     "chess.js": "^1.4.0",
     "cors": "^2.8.5",
@@ -52,17 +61,14 @@
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
-    "socket.io": "^4.8.3"
+    "prisma": "^6.3.1",
+    "socket.io": "^4.8.3",
+    "typescript": "^5.7.3"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.17",
-    "@types/express": "^5.0.0",
-    "@types/jsonwebtoken": "^9.0.7",
-    "@types/node": "^22.10.5",
-    "prisma": "^6.3.1",
+    "playwright-core": "^1.64.1",
     "socket.io-client": "^4.8.3",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3",
     "yaml": "^2.9.1"
   },
   "allowScripts": {

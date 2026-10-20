@@ -24,7 +24,7 @@
  * inert WALLS (not capturable, never forcing, never removed; they block squares and slide-rays for good). See giveaway.ts.
  */
 
-import { CELLS, FFA_PROMOTION_COORD, SIZE, VALID, index, parseSquare, squareName, type Seat } from './board.js';
+import { CROSS14, FFA_PROMOTION_COORD, GEOMETRIES, SIZE, index, type BoardId, type Geometry, type Seat } from './board.js';
 
 export type SeatStatus = 'active' | 'dead-king' | 'frozen';
 
@@ -87,6 +87,40 @@ interface RulesCommon {
   promotionCoord: number;
   /** The game is scored and ended when this many plies have been played (guards against endless bot games). */
   maxPlies: number;
+  /**
+   * The rule OPTIONS (below). OMITTED on the two shipped presets - their options are the defaults of their mode (`FFA_OPTIONS`, `GIVEAWAY_OPTIONS`),
+   * which keeps `FFA_RULES` / `GIVEAWAY_RULES` value-for-value what they have always been. Read them only through `optionsOf`.
+   */
+  options?: RuleOptions;
+}
+
+/**
+ * The rule OPTIONS: what a game's rules say about the board and about the pieces' behaviour that the engine used to hard-code. Chess.com builds its
+ * 4-player variants the same way (a base mode plus options on a start position), and Chaturaji (CHATURAJI_SPEC.md) will be one more option set;
+ * the engine reads every one of these at ONE defined place, so a new option set is data, not a rewrite.
+ */
+export interface RuleOptions {
+  /** Which board: the key of `GEOMETRIES` (board.ts). */
+  board: BoardId;
+  /** Whether a pawn may advance two squares from its starting line (which is also what creates en passant). */
+  pawnDoubleStep: boolean;
+  /** Whether castling exists (rights, the move, the rights bookkeeping). */
+  castling: boolean;
+  /** The piece types a pawn may promote to, in the order the moves are generated (queen first). Must be a subset of `PROMOTABLE_TYPES`. */
+  promotionTypes: readonly number[];
+  /**
+   * Capture the King (chess.com's rule option): a check never has to be answered, so every pseudo-legal move is legal and there is no king safety, kings
+   * are capturable pieces, and a seat is eliminated only when its king is actually captured. Off = 4 Player Chess (check, checkmate, kings never captured).
+   */
+  captureTheKing: boolean;
+  /** With `captureTheKing`: the points for capturing a king (a live seat's or a resigned seat's walking one) - one award, not king + mate. */
+  kingPoints: number;
+  /** Points for a move whose piece attacks two / three live enemy kings from its new square (the mover's); `null` = check forks do not score (4 Player Chess here). */
+  forkPoints: { double: number; triple: number } | null;
+  /** Whether the game ends when every active seat is down to a bare king (no mate is possible). Meaningless under `captureTheKing`: kings can capture kings. */
+  deadPositionEnds: boolean;
+  /** Points per OTHER seat's king still on the board (a resigned seat's walking king) for the one seat left when the game ends by elimination; 0 = none. */
+  lastStandingKingBonus: number;
 }
 
 /** 4 Player Chess (free for all): checkmate, points, kings never captured. */
@@ -130,14 +164,86 @@ export const GIVEAWAY_RULES: GiveawayRules = {
   maxPlies: 1000,
 };
 
+/** 4 Player Chess's options: the cross board, double steps and castling, promotion to any of queen / rook / bishop / knight, check and checkmate, no fork points. */
+export const FFA_OPTIONS: RuleOptions = {
+  board: 'cross14',
+  pawnDoubleStep: true,
+  castling: true,
+  promotionTypes: PROMOTABLE_TYPES,
+  captureTheKing: false,
+  kingPoints: 0,
+  forkPoints: null,
+  deadPositionEnds: true,
+  lastStandingKingBonus: 0,
+};
+
+/** Giveaway's options: the same board and pawns, but no castling (the rights start, and stay, empty). It has its own king and end rules (giveaway.ts); the rest is inert. */
+export const GIVEAWAY_OPTIONS: RuleOptions = { ...FFA_OPTIONS, castling: false };
+
+/**
+ * Chaturaji's options (CHATURAJI_SPEC.md section 4): the 8 x 8 board, one-step pawns (so no en passant), no castling, promotion to a boat (= a rook) only,
+ * Capture the King with a king worth 3, check forks worth +1 (two kings) / +5 (three), no bare-kings ending, +3 per surviving enemy king for the last seat.
+ */
+export const CHATURAJI_OPTIONS: RuleOptions = {
+  board: 'square8',
+  pawnDoubleStep: false,
+  castling: false,
+  promotionTypes: [ROOK],
+  captureTheKing: true,
+  kingPoints: 3,
+  forkPoints: { double: 1, triple: 5 },
+  deadPositionEnds: false,
+  lastStandingKingBonus: 3,
+};
+
+/**
+ * The Chaturaji rules: 4 Player Chess FFA machinery (points, dead pieces, walking dead kings, elimination, highest score wins, shared on a tie) with the
+ * options above. A seat that has no move is eliminated WITHOUT points (the 4 Player Chess stalemate points are at its own scale and Capture the King has
+ * no checkmate points), the promotion line is the far edge (forward coordinate 7 is the 8th rank on this board too), and the ply cap is the 4-seat one.
+ */
+export const CHATURAJI_RULES: FfaRules = {
+  mode: 'ffa',
+  promotionCoord: FFA_PROMOTION_COORD,
+  checkmatePoints: 0,
+  stalematedPoints: 0,
+  stalemateOthersPoints: 0,
+  maxPlies: 1000,
+  options: CHATURAJI_OPTIONS,
+};
+
+/** The options a rules object plays by: its own, or the defaults of its mode. */
+export const optionsOf = (rules: FourPlayerRules): RuleOptions => rules.options ?? (rules.mode === 'giveaway' ? GIVEAWAY_OPTIONS : FFA_OPTIONS);
+
+/** The board a rules object plays on. The engine calls this once per function and reads the tables from the result. */
+export const geometryOf = (rules: FourPlayerRules): Geometry => GEOMETRIES[optionsOf(rules).board];
+
+/**
+ * The rules objects an untrusted source (a wire message, a saved game) may name. `validateRules` accepts a value only when it is, field for field,
+ * one of these presets - never an arbitrary mix of options - so an option can never leak into a game it was not tested with.
+ */
+export const KNOWN_RULES: readonly FourPlayerRules[] = [FFA_RULES, GIVEAWAY_RULES, CHATURAJI_RULES];
+
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
+
+export function validateRules(value: unknown): { ok: true; rules: FourPlayerRules } | { ok: false; error: string } {
+  const text = canonical(value);
+  const preset = KNOWN_RULES.find((known) => canonical(known) === text);
+  return preset ? { ok: true, rules: preset } : { ok: false, error: 'unknown rules: only the shipped presets are accepted' };
+}
+
 /**
  * Which four-player game a room / queue / screen is about. `'ffa'` is 4 Player Chess (what the protocol did before Giveaway existed, so an OMITTED variant
- * always means `'ffa'`); `'giveaway'` is 4 Player Giveaway. Defined here, next to the rules it selects, so local screens can use it without touching the wire.
+ * always means `'ffa'`); `'giveaway'` is 4 Player Giveaway; `'chaturaji'` is Chaturaji. Defined here, next to the rules it selects, so local screens can use
+ * it without touching the wire.
  */
-export type FourVariant = 'ffa' | 'giveaway';
+export type FourVariant = 'ffa' | 'giveaway' | 'chaturaji';
 
-/** The rules object of a variant: `'ffa'` = 4 Player Chess, `'giveaway'` = 4 Player Giveaway. */
-export const rulesFor = (variant: FourVariant): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : FFA_RULES);
+/** The rules object of a variant: `'ffa'` = 4 Player Chess, `'giveaway'` = 4 Player Giveaway, `'chaturaji'` = Chaturaji. */
+export const rulesFor = (variant: FourVariant): FourPlayerRules => (variant === 'giveaway' ? GIVEAWAY_RULES : variant === 'chaturaji' ? CHATURAJI_RULES : FFA_RULES);
+
+/** The variant a rules object belongs to (the inverse of `rulesFor` for the shipped presets): Giveaway by its mode, Chaturaji by its board, else 4 Player Chess. */
+export const variantOfRules = (rules: FourPlayerRules): FourVariant => (rules.mode === 'giveaway' ? 'giveaway' : optionsOf(rules).board === 'square8' ? 'chaturaji' : 'ffa');
 
 /** En passant opportunity created by a double step: the square that was skipped, the pawn's landing square, and who stepped. */
 export interface EnPassant {
@@ -243,15 +349,15 @@ const BACK_RANK: readonly (readonly number[])[] = [
   [...BACK_RANK_RKN, KING, QUEEN, BISHOP, KNIGHT, ROOK], // Green: n4 R … n7 K, n8 Q … n11 R
 ];
 
-function blankCells(): Int8Array {
-  const cells = new Int8Array(CELLS);
-  for (let i = 0; i < CELLS; i++) cells[i] = VALID[i] ? EMPTY : OFF_BOARD;
+function blankCells(geo: Geometry): Int8Array {
+  const cells = new Int8Array(geo.cells);
+  for (let i = 0; i < geo.cells; i++) cells[i] = geo.valid[i] ? EMPTY : OFF_BOARD;
   return cells;
 }
 
-function kingSquares(cells: Int8Array): number[] {
+function kingSquares(cells: Int8Array, geo: Geometry): number[] {
   const kings = [-1, -1, -1, -1];
-  for (let i = 0; i < CELLS; i++) {
+  for (let i = 0; i < geo.cells; i++) {
     const code = cells[i];
     if (code > 0 && typeOf(code) === KING) kings[seatOf(code)] = i;
   }
@@ -268,9 +374,24 @@ function inferredCastling(cells: Int8Array): number {
   return bits;
 }
 
-/** The standard FFA start position, Red to move. */
+/**
+ * Chaturaji's start position on the 8 x 8 board (CHATURAJI_SPEC.md section 4.1, from the live chess.com game): each seat in one corner, rotationally
+ * symmetric (a quarter turn clockwise per seat), back rank boat (a rook) - knight - bishop - king along its edge with four pawns in front of it.
+ * Red moves up the ranks, Blue to higher files, Yellow down the ranks, Green to lower files.
+ */
+export const SQUARE8_START: readonly string[] = [
+  'rR@a1', 'rN@b1', 'rB@c1', 'rK@d1', 'rP@a2', 'rP@b2', 'rP@c2', 'rP@d2',
+  'bR@a8', 'bN@a7', 'bB@a6', 'bK@a5', 'bP@b8', 'bP@b7', 'bP@b6', 'bP@b5',
+  'yR@h8', 'yN@g8', 'yB@f8', 'yK@e8', 'yP@h7', 'yP@g7', 'yP@f7', 'yP@e7',
+  'gR@h1', 'gN@h2', 'gB@h3', 'gK@h4', 'gP@g1', 'gP@g2', 'gP@g3', 'gP@g4',
+];
+
+/** The standard FFA start position, Red to move (or the start of the rules' own board: Chaturaji's). */
 export function initialState(rules: FourPlayerRules = FFA_RULES): FourPlayerState {
-  const cells = blankCells();
+  const geo = geometryOf(rules);
+  if (geo.id === 'square8') return stateFromPieces(SQUARE8_START, { rules }); // Chaturaji: Red to move, no castling rights (the option is off)
+  if (geo.id !== 'cross14') throw new Error(`no start position for board ${geo.id}`); // the layout below is the cross board's; a new board brings its own
+  const cells = blankCells(geo);
   for (let seat = 0; seat < 4; seat++) {
     for (let k = 0; k < 8; k++) {
       const along = 3 + k; // the back rank occupies indices 3..10 on its axis
@@ -296,9 +417,9 @@ export function initialState(rules: FourPlayerRules = FFA_RULES): FourPlayerStat
     turn: 0,
     status: ['active', 'active', 'active', 'active'],
     score: [0, 0, 0, 0],
-    castling: rules.mode === 'giveaway' ? 0 : inferredCastling(cells), // Giveaway has no castling: the rights start (and stay) empty
+    castling: optionsOf(rules).castling ? inferredCastling(cells) : 0, // Giveaway has no castling: the rights start (and stay) empty
     ep: null,
-    kings: kingSquares(cells),
+    kings: kingSquares(cells, geo),
     ply: 0,
     result: null,
     rules,
@@ -328,11 +449,13 @@ export interface PositionOptions {
  * square; Z/H/D/T are a promoted queen/knight/bishop/rook). Used by the tests to set up exact scenarios, and by anything that needs a custom position.
  */
 export function stateFromPieces(pieces: readonly string[], options: PositionOptions = {}): FourPlayerState {
-  const cells = blankCells();
+  const rules = options.rules ?? FFA_RULES;
+  const geo = geometryOf(rules);
+  const cells = blankCells(geo);
   for (const spec of pieces) {
     const match = /^([rbyg])([PNBRQKZHDT])@([a-n]\d{1,2})$/.exec(spec);
     if (!match) throw new Error(`bad piece spec: ${spec}`);
-    const square = parseSquare(match[3]);
+    const square = geo.parseSquare(match[3]);
     if (square < 0) throw new Error(`not a playable square: ${spec}`);
     if (cells[square] !== EMPTY) throw new Error(`square already taken: ${spec}`);
     cells[square] = pieceCode(SEAT_LETTERS.indexOf(match[1]) as Seat, TYPE_LETTERS[match[2]]);
@@ -342,21 +465,22 @@ export function stateFromPieces(pieces: readonly string[], options: PositionOpti
     turn: options.turn ?? 0,
     status: options.status ?? ['active', 'active', 'active', 'active'],
     score: options.score ?? [0, 0, 0, 0],
-    castling: options.castling ?? (options.rules?.mode === 'giveaway' ? 0 : inferredCastling(cells)),
+    castling: options.castling ?? (optionsOf(rules).castling ? inferredCastling(cells) : 0),
     ep: options.ep ?? null,
-    kings: kingSquares(cells),
+    kings: kingSquares(cells, geo),
     ply: options.ply ?? 0,
     result: null,
-    rules: options.rules ?? FFA_RULES,
+    rules,
   };
 }
 
 /** Lists the pieces of a state in stateFromPieces' notation (sorted by square), mainly for assertions. */
-export function listPieces(state: Pick<FourPlayerState, 'cells'>): string[] {
+export function listPieces(state: Pick<FourPlayerState, 'cells'> & { rules?: FourPlayerRules }): string[] {
+  const geo = state.rules ? geometryOf(state.rules) : CROSS14;
   const out: string[] = [];
-  for (let i = 0; i < CELLS; i++) {
+  for (let i = 0; i < state.cells.length; i++) {
     const code = state.cells[i];
-    if (code > 0) out.push(`${SEAT_LETTERS[seatOf(code)]}${LETTER_OF_TYPE[typeOf(code)]}@${squareName(i)}`);
+    if (code > 0) out.push(`${SEAT_LETTERS[seatOf(code)]}${LETTER_OF_TYPE[typeOf(code)]}@${geo.squareName(i)}`);
   }
   return out;
 }
@@ -372,36 +496,40 @@ const LETTER_STATUS: Record<string, SeatStatus> = { a: 'active', d: 'dead-king',
  * ("passedSquare:pawnSquare:seat" or "-"), ply, result ("-" or "winnerSeats,comma,separated:reason"). Round-trips exactly.
  */
 export function serialize(state: FourPlayerState): string {
+  const geo = geometryOf(state.rules);
+  const size = geo.size;
   const rows: string[] = [];
-  for (let rank = SIZE - 1; rank >= 0; rank--) {
+  for (let rank = size - 1; rank >= 0; rank--) {
     let row = '';
-    for (let file = 0; file < SIZE; file++) {
-      const code = state.cells[index(file, rank)];
+    for (let file = 0; file < size; file++) {
+      const code = state.cells[geo.index(file, rank)];
       row += code === OFF_BOARD ? '--' : code === EMPTY ? '..' : `${SEAT_LETTERS[seatOf(code)]}${LETTER_OF_TYPE[typeOf(code)]}`;
     }
     rows.push(row);
   }
-  const ep = state.ep ? `${squareName(state.ep.passed)}:${squareName(state.ep.pawn)}:${state.ep.by}` : '-';
+  const ep = state.ep ? `${geo.squareName(state.ep.passed)}:${geo.squareName(state.ep.pawn)}:${state.ep.by}` : '-';
   const result = state.result ? `${state.result.winners.join(',')}:${state.result.reason}` : '-';
   return [rows.join('/'), state.turn, state.status.map((s) => STATUS_LETTER[s]).join(''), state.score.join(','), state.castling, ep, state.ply, result].join(' ');
 }
 
 export function deserialize(text: string, rules: FourPlayerRules = FFA_RULES): FourPlayerState {
   const [board, turn, statuses, scores, castling, ep, ply, resultText] = text.trim().split(' ');
+  const geo = geometryOf(rules);
+  const size = geo.size;
   const rows = board.split('/');
-  if (rows.length !== SIZE) throw new Error('bad board');
-  const cells = new Int8Array(CELLS);
+  if (rows.length !== size) throw new Error('bad board');
+  const cells = new Int8Array(geo.cells);
   rows.forEach((row, i) => {
-    const rank = SIZE - 1 - i;
-    for (let file = 0; file < SIZE; file++) {
+    const rank = size - 1 - i;
+    for (let file = 0; file < size; file++) {
       const cell = row.slice(file * 2, file * 2 + 2);
-      cells[index(file, rank)] = cell === '--' ? OFF_BOARD : cell === '..' ? EMPTY : pieceCode(SEAT_LETTERS.indexOf(cell[0]) as Seat, LETTER_OF_TYPE.indexOf(cell[1]));
+      cells[geo.index(file, rank)] = cell === '--' ? OFF_BOARD : cell === '..' ? EMPTY : pieceCode(SEAT_LETTERS.indexOf(cell[0]) as Seat, LETTER_OF_TYPE.indexOf(cell[1]));
     }
   });
   let enPassant: EnPassant | null = null;
   if (ep !== '-') {
     const [passed, pawn, by] = ep.split(':');
-    enPassant = { passed: parseSquare(passed), pawn: parseSquare(pawn), by: Number(by) as Seat };
+    enPassant = { passed: geo.parseSquare(passed), pawn: geo.parseSquare(pawn), by: Number(by) as Seat };
   }
   const status = statuses.split('').map((letter) => LETTER_STATUS[letter]);
   let result: FourPlayerResult | null = null;
@@ -416,7 +544,7 @@ export function deserialize(text: string, rules: FourPlayerRules = FFA_RULES): F
     score: scores.split(',').map(Number),
     castling: Number(castling),
     ep: enPassant,
-    kings: kingSquares(cells),
+    kings: kingSquares(cells, geo),
     ply: Number(ply),
     result,
     rules,

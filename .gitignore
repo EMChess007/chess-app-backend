@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 nightly-fuzz-report.md
+nightly-fuzz-online-report.md
+# output of the browser end-to-end suite (scripts/e2e-browser): screenshots; the exported web build lives in the OS temp folder
+e2e-shots/
+e2e-out/

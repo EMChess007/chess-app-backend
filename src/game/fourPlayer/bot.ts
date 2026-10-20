@@ -24,9 +24,9 @@
  * for "ganging up" on a corpse.
  */
 
-import { forwardCoord, nextSeat, type Seat } from './board.js';
+import { nextSeat, type Seat } from './board.js';
 import { FLAG_CASTLE, FLAG_PROMOTION, applyMoveRaw, attackers, isInCheck, legalMoves, type Move } from './moves.js';
-import { PAWN, seatOf, typeOf, type FourPlayerState, type SeatStatus } from './state.js';
+import { PAWN, geometryOf, seatOf, typeOf, type FourPlayerState, type SeatStatus } from './state.js';
 
 type Rng = () => number;
 export type BotTier = 'greedy' | 'careful' | 'deep';
@@ -61,6 +61,7 @@ const STALEMATE_VALUE = -6;
 function materialBySeat(state: FourPlayerState): number[] {
   const mat = [0, 0, 0, 0];
   const cells = state.cells;
+  const geo = geometryOf(state.rules);
   for (let i = 0; i < cells.length; i++) {
     const code = cells[i];
     if (code <= 0) continue;
@@ -68,7 +69,7 @@ function materialBySeat(state: FourPlayerState): number[] {
     if (state.status[seat] !== 'active') continue;
     const type = typeOf(code);
     mat[seat] += VALUE[type];
-    if (type === PAWN) mat[seat] += 0.04 * forwardCoord(seat, i); // a small reward for advancing pawns
+    if (type === PAWN) mat[seat] += 0.04 * geo.forwardCoord(seat, i); // a small reward for advancing pawns
   }
   return mat;
 }
@@ -94,9 +95,10 @@ function onlyActive(seat: Seat): SeatStatus[] {
 
 /** The value of the piece that just moved to `to` if it can simply be taken (attacked by a live enemy and not defended), else 0. */
 function hangingValue(state: FourPlayerState, to: number, me: Seat): number {
-  if (attackers(state.cells, state.status, to, me) === 0) return 0;
+  const geo = geometryOf(state.rules);
+  if (attackers(state.cells, state.status, to, me, geo) === 0) return 0;
   const defender = nextSeat(me); // any seat other than `me`, so that `me`'s pieces count as attackers of the square
-  if (attackers(state.cells, onlyActive(me), to, defender) !== 0) return 0;
+  if (attackers(state.cells, onlyActive(me), to, defender, geo) !== 0) return 0;
   return VALUE[typeOf(state.cells[to])];
 }
 

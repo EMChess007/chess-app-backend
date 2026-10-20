@@ -25,23 +25,7 @@
  * i.e. in any direction — that can capture onto that square may do so (e.g. a Blue pawn can take a Red pawn en passant).
  */
 
-import {
-  DIRECTIONS,
-  FORWARD,
-  KING_TARGETS,
-  KNIGHT_TARGETS,
-  ORTHOGONAL_COUNT,
-  PAWN_START_COORD,
-  RAYS,
-  fileOf,
-  forwardCoord,
-  index,
-  isPlayable,
-  pawnCaptureSquares,
-  rankOf,
-  stepForward,
-  type Seat,
-} from './board.js';
+import { CROSS14, DIRECTIONS, FORWARD, ORTHOGONAL_COUNT, PAWN_START_COORD, type Geometry, type Seat } from './board.js';
 import { mandatoryCaptures } from './giveaway.js';
 import {
   BISHOP,
@@ -58,6 +42,8 @@ import {
   ROOK,
   ROOK_START_BIT,
   baseTypeOf,
+  geometryOf,
+  optionsOf,
   pieceCode,
   seatOf,
   typeOf,
@@ -95,12 +81,14 @@ const promotedPieceType = (move: Pick<Move, 'flags'>): number => (move.flags & F
 
 /**
  * A bitmask (bit = seat) of the live enemy seats that attack `square` — i.e. that would give check to `victim`'s king standing
- * there. Seats whose status is not 'active' never attack; `victim`'s own pieces never count.
+ * there. Seats whose status is not 'active' never attack; `victim`'s own pieces never count. `geo` is the board the cells belong to (the callers
+ * that have a state pass `geometryOf(state.rules)`; the cross board is the default).
  */
-export function attackers(cells: Int8Array, status: readonly SeatStatus[], square: number, victim: Seat): number {
+export function attackers(cells: Int8Array, status: readonly SeatStatus[], square: number, victim: Seat, geo: Geometry = CROSS14): number {
   let mask = 0;
-  const file = fileOf(square);
-  const rank = rankOf(square);
+  const size = geo.size;
+  const file = square % size;
+  const rank = (square / size) | 0;
 
   // Pawns: a pawn of seat `a` on p attacks p + forward ± sideways, so square is attacked from p = square - forward ∓ sideways.
   for (let a = 0; a < 4; a++) {
@@ -112,11 +100,11 @@ export function attackers(cells: Int8Array, status: readonly SeatStatus[], squar
     for (const sign of [1, -1]) {
       const pf = file - df - sign * sideF;
       const pr = rank - dr - sign * sideR;
-      if (isPlayable(pf, pr) && cells[index(pf, pr)] === pawn) mask |= 1 << a;
+      if (geo.isPlayable(pf, pr) && cells[pr * size + pf] === pawn) mask |= 1 << a;
     }
   }
 
-  const knightTargets = KNIGHT_TARGETS[square];
+  const knightTargets = geo.knightTargets[square];
   for (let i = 0; i < knightTargets.length; i++) {
     const code = cells[knightTargets[i]];
     if (code > 0 && baseTypeOf(code) === KNIGHT) {
@@ -125,7 +113,7 @@ export function attackers(cells: Int8Array, status: readonly SeatStatus[], squar
     }
   }
 
-  const kingTargets = KING_TARGETS[square];
+  const kingTargets = geo.kingTargets[square];
   for (let i = 0; i < kingTargets.length; i++) {
     const code = cells[kingTargets[i]];
     if (code > 0 && typeOf(code) === KING) {
@@ -135,7 +123,7 @@ export function attackers(cells: Int8Array, status: readonly SeatStatus[], squar
   }
 
   for (let d = 0; d < 8; d++) {
-    const ray = RAYS[square * 8 + d];
+    const ray = geo.rays[square * 8 + d];
     for (let i = 0; i < ray.length; i++) {
       const code = cells[ray[i]];
       if (code === EMPTY) continue;
@@ -153,9 +141,50 @@ export function attackers(cells: Int8Array, status: readonly SeatStatus[], squar
 }
 
 /** Whether `seat`'s king is currently attacked by any live enemy seat. */
-export function isInCheck(state: Pick<FourPlayerState, 'cells' | 'status' | 'kings'>, seat: Seat): boolean {
+export function isInCheck(state: Pick<FourPlayerState, 'cells' | 'status' | 'kings'> & { rules?: FourPlayerState['rules'] }, seat: Seat): boolean {
   const king = state.kings[seat];
-  return king >= 0 && attackers(state.cells, state.status, king, seat) !== 0;
+  return king >= 0 && attackers(state.cells, state.status, king, seat, state.rules ? geometryOf(state.rules) : CROSS14) !== 0;
+}
+
+/**
+ * How many LIVE enemy kings the piece standing on `square` attacks (check forks: Chaturaji scores a move whose piece attacks two / three kings, see
+ * `RuleOptions.forkPoints`). Only that one piece counts - not pieces whose line it opened, so a discovered check is not a fork - and only kings of
+ * seats that are still active (a resigned seat's walking king and an eliminated seat's king never count), never the mover's own. A pawn attacks its two
+ * forward diagonals, a promoted piece attacks as what it became, and a slider is stopped by the first piece on its ray (whoever owns it).
+ */
+export function kingsAttackedBy(state: Pick<FourPlayerState, 'cells' | 'status' | 'kings' | 'rules'>, square: number): number {
+  const code = state.cells[square];
+  if (code <= 0) return 0;
+  const seat = seatOf(code);
+  const type = baseTypeOf(code);
+  const geo = geometryOf(state.rules);
+  const cells = state.cells;
+  let count = 0;
+  for (let other = 0; other < 4; other++) {
+    if (other === seat || state.status[other] !== 'active') continue;
+    const king = state.kings[other];
+    if (king < 0) continue;
+    let attacks = false;
+    if (type === PAWN) attacks = geo.pawnCaptureSquares(seat, square).includes(king);
+    else if (type === KNIGHT) attacks = geo.knightTargets[square].includes(king);
+    else if (type === KING) attacks = geo.kingTargets[square].includes(king);
+    else {
+      const first = type === BISHOP ? ORTHOGONAL_COUNT : 0;
+      const last = type === ROOK ? ORTHOGONAL_COUNT : DIRECTIONS.length;
+      for (let d = first; d < last && !attacks; d++) {
+        const ray = geo.rays[square * 8 + d];
+        for (let i = 0; i < ray.length; i++) {
+          if (ray[i] === king) {
+            attacks = true;
+            break;
+          }
+          if (cells[ray[i]] !== EMPTY) break; // the first piece on the ray blocks it
+        }
+      }
+    }
+    if (attacks) count++;
+  }
+  return count;
 }
 
 // --- Move generation ---------------------------------------------------------------------------------------------------
@@ -164,16 +193,17 @@ export function isInCheck(state: Pick<FourPlayerState, 'cells' | 'status' | 'kin
  * Whether the piece `code` is a legal capture target for `seat`. FFA: any other seat's piece except a king (kings are only ever checked).
  * Giveaway (`giveawayStatus` given): any piece of another ACTIVE seat, kings included; an eliminated seat's pieces are walls and are never targets.
  */
-const isCapturable = (code: number, seat: Seat, giveawayStatus: readonly SeatStatus[] | null): boolean =>
-  code > 0 && seatOf(code) !== seat && (giveawayStatus === null ? typeOf(code) !== KING : giveawayStatus[seatOf(code)] === 'active');
+const isCapturable = (code: number, seat: Seat, giveawayStatus: readonly SeatStatus[] | null, kingsCapturable: boolean): boolean =>
+  code > 0 && seatOf(code) !== seat && (giveawayStatus === null ? kingsCapturable || typeOf(code) !== KING : giveawayStatus[seatOf(code)] === 'active');
 
-function pushPawnMove(out: Move[], state: FourPlayerState, seat: Seat, from: number, to: number, captured: number, flags: number): void {
-  if (forwardCoord(seat, to) < state.rules.promotionCoord) {
+function pushPawnMove(out: Move[], state: FourPlayerState, geo: Geometry, seat: Seat, from: number, to: number, captured: number, flags: number): void {
+  if (geo.forwardCoord(seat, to) < state.rules.promotionCoord) {
     out.push({ from, to, captured, flags });
     return;
   }
-  // Reaching the last line is a promotion, and the player picks the piece: one move per choice (queen first).
-  for (let choice = 0; choice < PROMOTABLE_TYPES.length; choice++) out.push({ from, to, captured, flags: flags | FLAG_PROMOTION | (choice << PROMOTION_SHIFT) });
+  // Reaching the last line is a promotion, and the player picks the piece: one move per choice (queen first), from the rules' promotion types.
+  // The flag stores the piece's index in PROMOTABLE_TYPES, so the encoding is the same whatever subset a rules object allows.
+  for (const type of optionsOf(state.rules).promotionTypes) out.push({ from, to, captured, flags: flags | FLAG_PROMOTION | (PROMOTABLE_TYPES.indexOf(type) << PROMOTION_SHIFT) });
 }
 
 /** Pseudo-legal moves (king safety NOT yet checked) for every piece `seat` can move right now. */
@@ -183,12 +213,16 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
   if (status === 'frozen') return out;
   const cells = state.cells;
   const giveawayStatus = state.rules.mode === 'giveaway' ? state.status : null;
+  const options = optionsOf(state.rules);
+  const kingsCapturable = options.captureTheKing;
+  const geo = geometryOf(state.rules);
+  const { rays, knightTargets, kingTargets } = geo;
 
   if (status === 'dead-king') {
     // Only the king walks, and only onto empty squares.
     const from = state.kings[seat];
     if (from < 0) return out;
-    const targets = KING_TARGETS[from];
+    const targets = kingTargets[from];
     for (let i = 0; i < targets.length; i++) if (cells[targets[i]] === EMPTY) out.push({ from, to: targets[i], captured: 0, flags: 0 });
     return out;
   }
@@ -199,43 +233,43 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
     const type = baseTypeOf(code); // a promoted piece moves like the piece it became
 
     if (type === PAWN) {
-      const one = stepForward(seat, from);
+      const one = geo.stepForward(seat, from);
       if (one >= 0 && cells[one] === EMPTY) {
-        pushPawnMove(out, state, seat, from, one, 0, 0);
-        if (forwardCoord(seat, from) === PAWN_START_COORD) {
-          const two = stepForward(seat, from, 2);
+        pushPawnMove(out, state, geo, seat, from, one, 0, 0);
+        if (options.pawnDoubleStep && geo.forwardCoord(seat, from) === PAWN_START_COORD) {
+          const two = geo.stepForward(seat, from, 2);
           if (two >= 0 && cells[two] === EMPTY) out.push({ from, to: two, captured: 0, flags: FLAG_DOUBLE_STEP });
         }
       }
-      for (const target of pawnCaptureSquares(seat, from)) {
+      for (const target of geo.pawnCaptureSquares(seat, from)) {
         if (target < 0) continue;
         const there = cells[target];
-        if (isCapturable(there, seat, giveawayStatus)) {
-          pushPawnMove(out, state, seat, from, target, there, 0);
+        if (isCapturable(there, seat, giveawayStatus, kingsCapturable)) {
+          pushPawnMove(out, state, geo, seat, from, target, there, 0);
         } else if (there === EMPTY && state.ep && state.ep.passed === target && state.ep.by !== seat && (giveawayStatus === null || giveawayStatus[state.ep.by] === 'active')) {
           const victim = cells[state.ep.pawn];
-          if (victim > 0 && typeOf(victim) === PAWN && seatOf(victim) === state.ep.by) pushPawnMove(out, state, seat, from, target, victim, FLAG_EN_PASSANT);
+          if (victim > 0 && typeOf(victim) === PAWN && seatOf(victim) === state.ep.by) pushPawnMove(out, state, geo, seat, from, target, victim, FLAG_EN_PASSANT);
         }
       }
     } else if (type === KNIGHT) {
-      const targets = KNIGHT_TARGETS[from];
+      const targets = knightTargets[from];
       for (let i = 0; i < targets.length; i++) {
         const there = cells[targets[i]];
-        if (there === EMPTY || isCapturable(there, seat, giveawayStatus)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
+        if (there === EMPTY || isCapturable(there, seat, giveawayStatus, kingsCapturable)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
       }
     } else if (type === KING) {
-      const targets = KING_TARGETS[from];
+      const targets = kingTargets[from];
       for (let i = 0; i < targets.length; i++) {
         const there = cells[targets[i]];
-        if (there === EMPTY || isCapturable(there, seat, giveawayStatus)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
+        if (there === EMPTY || isCapturable(there, seat, giveawayStatus, kingsCapturable)) out.push({ from, to: targets[i], captured: there > 0 ? there : 0, flags: 0 });
       }
-      for (let side = 0; side < 2 && giveawayStatus === null; side++) {
+      for (let side = 0; side < 2 && options.castling; side++) {
         if (!(state.castling & (1 << (seat * 2 + side))) || from !== KING_START_SQUARE[seat]) continue;
         const castle = CASTLES[seat][side];
         if (cells[castle.rook] !== pieceCode(seat, ROOK)) continue;
         if (castle.between.some((square) => cells[square] !== EMPTY)) continue;
         // The king may not castle out of, through or into check.
-        if (castle.kingPath.some((square) => attackers(cells, state.status, square, seat) !== 0)) continue;
+        if (castle.kingPath.some((square) => attackers(cells, state.status, square, seat, geo) !== 0)) continue;
         out.push({ from, to: castle.kingTo, captured: 0, flags: FLAG_CASTLE | (side === 1 ? FLAG_CASTLE_SIDE_1 : 0) });
       }
     } else {
@@ -243,14 +277,14 @@ export function pseudoMoves(state: FourPlayerState, seat: Seat): Move[] {
       const first = type === BISHOP ? ORTHOGONAL_COUNT : 0;
       const last = type === ROOK ? ORTHOGONAL_COUNT : DIRECTIONS.length;
       for (let d = first; d < last; d++) {
-        const ray = RAYS[from * 8 + d];
+        const ray = rays[from * 8 + d];
         for (let i = 0; i < ray.length; i++) {
           const there = cells[ray[i]];
           if (there === EMPTY) {
             out.push({ from, to: ray[i], captured: 0, flags: 0 });
             continue;
           }
-          if (isCapturable(there, seat, giveawayStatus)) out.push({ from, to: ray[i], captured: there, flags: 0 });
+          if (isCapturable(there, seat, giveawayStatus, kingsCapturable)) out.push({ from, to: ray[i], captured: there, flags: 0 });
           break;
         }
       }
@@ -299,13 +333,15 @@ export function legalMoves(state: FourPlayerState, seat: Seat): Move[] {
   const pseudo = pseudoMoves(state, seat);
   if (pseudo.length === 0) return pseudo;
   if (state.rules.mode === 'giveaway') return mandatoryCaptures(pseudo);
+  if (optionsOf(state.rules).captureTheKing) return pseudo; // Capture the King: no king safety - a check never has to be answered, nothing is ever pinned
+  const geo = geometryOf(state.rules);
   const scratch = state.cells.slice();
   const out: Move[] = [];
   for (const move of pseudo) {
     const movesKing = typeOf(scratch[move.from]) === KING;
     const undo = makeScratch(scratch, state, move, seat);
     const king = movesKing ? move.to : state.kings[seat];
-    const exposed = king >= 0 && attackers(scratch, state.status, king, seat) !== 0;
+    const exposed = king >= 0 && attackers(scratch, state.status, king, seat, geo) !== 0;
     undo();
     if (!exposed) out.push(move);
   }
@@ -337,11 +373,17 @@ export function applyMoveRaw(state: FourPlayerState, move: Move): FourPlayerStat
   const score = state.score.slice();
   const kings = state.kings.slice();
 
+  const options = optionsOf(state.rules);
   if (move.captured) {
     const victimSeat = seatOf(move.captured);
     if (state.rules.mode === 'giveaway') {
       // No points. A captured king is simply gone: clear its square so `kings` stays what a round trip through serialize would recompute.
       if (typeOf(move.captured) === KING) kings[victimSeat] = -1;
+    } else if (options.captureTheKing && typeOf(move.captured) === KING) {
+      // Capture the King: the king is worth `kingPoints` whoever it belonged to (a live seat's, or a resigned seat's walking one), once; it is gone, and
+      // eliminating its seat (or freezing the walking king) is elimination.ts's job (`playMove`), because it can end the game.
+      score[seat] += options.kingPoints;
+      kings[victimSeat] = -1;
     } else if (state.status[victimSeat] === 'active') score[seat] += CAPTURE_POINTS[typeOf(move.captured)] ?? 0;
   }
 
@@ -357,20 +399,31 @@ export function applyMoveRaw(state: FourPlayerState, move: Move): FourPlayerStat
     kings[seat] = move.to;
     castling &= ~(3 << (seat * 2));
   }
-  const fromBit = ROOK_START_BIT.get(move.from);
-  if (fromBit !== undefined) castling &= ~(1 << fromBit);
-  const toBit = ROOK_START_BIT.get(move.to);
-  if (toBit !== undefined) castling &= ~(1 << toBit);
+  if (options.castling) {
+    // The rook-start table is the cross board's: only a rules object with castling (and so a board it was built for) clears rights by square.
+    const fromBit = ROOK_START_BIT.get(move.from);
+    if (fromBit !== undefined) castling &= ~(1 << fromBit);
+    const toBit = ROOK_START_BIT.get(move.to);
+    if (toBit !== undefined) castling &= ~(1 << toBit);
+  }
 
-  const ep = move.flags & FLAG_DOUBLE_STEP ? { passed: stepForward(seat, move.from), pawn: move.to, by: seat } : null;
+  const ep = move.flags & FLAG_DOUBLE_STEP ? { passed: geometryOf(state.rules).stepForward(seat, move.from), pawn: move.to, by: seat } : null;
   return { ...state, cells, score, kings, castling, ep, ply: state.ply + 1 };
 }
 
 const PROMOTION_LETTERS: Record<number, string> = { [QUEEN]: 'Q', [ROOK]: 'R', [BISHOP]: 'B', [KNIGHT]: 'N' };
 
 /** Coordinate notation for the move list: "e2-e4", "d4xe5", "e7-e8=Q" (or =R / =B / =N), "O-O" / "O-O-O" (side 0 is the long side for Red/Yellow only by position, so castling shows both squares). */
-export function moveLabel(move: Move): string {
-  const name = (square: number) => `${'abcdefghijklmn'[fileOf(square)]}${rankOf(square) + 1}`;
+export function moveLabelOn(move: Move, geo: Geometry): string {
+  const name = (square: number) => geo.squareName(square);
   if (move.flags & FLAG_CASTLE) return `${name(move.from)}-${name(move.to)} (castle)`;
   return `${name(move.from)}${move.captured ? 'x' : '-'}${name(move.to)}${move.flags & FLAG_PROMOTION ? `=${PROMOTION_LETTERS[promotionOf(move)]}` : ''}${move.flags & FLAG_EN_PASSANT ? ' e.p.' : ''}`;
+}
+
+/**
+ * `moveLabelOn` for the cross board. It takes no rules because it is passed to `.map(moveLabel)` (a second parameter would receive the array index);
+ * code that may be on another board uses `moveLabelOn(move, geometryOf(state.rules))`.
+ */
+export function moveLabel(move: Move): string {
+  return moveLabelOn(move, CROSS14);
 }

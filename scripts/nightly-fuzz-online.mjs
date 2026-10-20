@@ -34,13 +34,16 @@
  *  - 4 Player GIVEAWAY: the same four-socket game with `variant: 'giveaway'` (clients read every snapshot with the Giveaway rules, from the app's own engine): all of the above, plus
  *    a QUIET move submitted while a capture is mandatory MUST be refused, `four_match_found` / rejoin must name the variant, and the four_game_over must agree with the app
  *    engine's own reading (reason, winners, `scores` = pieces left) and with the Giveaway rule it claims (the winner has no pieces / has no legal move / is the last seat standing).
+ *  - CHATURAJI: the same four-socket game with `variant: 'chaturaji'` on the 8 x 8 board (squares named and probed on THAT board): all of the above, plus a pawn double step MUST be
+ *    refused (there is none), a resigned seat walks on as a dead king, and the four_game_over must agree with the app engine (scores = points, winners = highest score, ties shared)
+ *    and be one of Chaturaji's endings (three seats out, or the ply cap) - strict: any other reason is an issue.
  *
  * Usage:
  *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
  *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
  *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode]
- * (the others default to the same count as fogGames; fourPlayerGiveawayGames defaults to fourPlayerGames.) BACKEND_URL env var overrides the
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames]
+ * (the others default to the same count as fogGames; fourPlayerGiveawayGames and chaturajiGames default to fourPlayerGames.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
 import { writeFileSync } from 'node:fs';
@@ -54,10 +57,10 @@ import { getLegalDuckPlacementSquares, hasNoDuckMoves } from '../../src/logic/du
 // the other variants' logic: under tsx the app's .ts files load as CommonJS, and a namespace import of its index.ts (which is only `export *`) would
 // expose nothing but `default`.
 import { PLAYABLE_SQUARES, squareName } from '../../src/logic/fourPlayer/board.ts';
-import { BISHOP, GIVEAWAY_RULES, KNIGHT, QUEEN, ROOK, deserialize } from '../../src/logic/fourPlayer/state.ts';
+import { BISHOP, CHATURAJI_RULES, GIVEAWAY_RULES, KNIGHT, PAWN, QUEEN, ROOK, deserialize, geometryOf, typeOf } from '../../src/logic/fourPlayer/state.ts';
 import { legalMoves, promotionOf, pseudoMoves } from '../../src/logic/fourPlayer/moves.ts';
 import { piecesLeft } from '../../src/logic/fourPlayer/giveaway.ts';
-const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf, pseudoMoves, piecesLeft, GIVEAWAY_RULES };
+const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf, pseudoMoves, piecesLeft, GIVEAWAY_RULES, CHATURAJI_RULES, geometryOf, PAWN, typeOf };
 import { HORDE_START_FEN, getHordeMoves, getHordeWinnerFromFen } from '../../src/logic/horde.ts';
 import { getCrazyhouseMoves, initialCrazyhouseState, RESERVE_PIECE_TYPES } from '../../src/logic/crazyhouse.ts';
 
@@ -73,6 +76,8 @@ const HORDE_GAMES = Number(process.argv[9] ?? GAMES);
 const CRAZYHOUSE_GAMES = Number(process.argv[10] ?? GAMES);
 // Threefold repetition over real sockets, per mode (see playRepetitionGame). Small by default: every game is a fixed 8-9 ply shuffle.
 const REPETITION_GAMES = Number(process.argv[11] ?? 3);
+// Chaturaji over four real sockets (playFourPlayerGame with variant 'chaturaji'). Last on the command line so the positions of the older arguments never move.
+const CHATURAJI_GAMES = Number(process.argv[12] ?? FOUR_GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -603,19 +608,22 @@ async function playDuckGame(gameIndex) {
  */
 async function playFourPlayerGame(gameIndex, variant = 'ffa') {
   const giveaway = variant === 'giveaway';
-  const rules = giveaway ? FP.GIVEAWAY_RULES : undefined; // the rules every snapshot is read with (the snapshot text has none)
+  const chaturaji = variant === 'chaturaji';
+  const rules = giveaway ? FP.GIVEAWAY_RULES : chaturaji ? FP.CHATURAJI_RULES : undefined; // the rules every snapshot is read with (the snapshot text has none)
+  const board = FP.geometryOf(rules ?? { mode: 'ffa' }); // the squares are named (and probed) on THIS game's board: Chaturaji's is 8 x 8, not the cross board
+  const prefix = giveaway ? 'G' : chaturaji ? 'C' : 'F';
   const issues = [];
   const stats = { plies: 0, illegalProbes: 0, finished: false, naturalEnd: false, rejoins: 0, takeovers: 0, resigns: 0 };
   const problem = (kind, extra = {}) => issues.push({ kind, game: gameIndex, ply: stats.plies, ...extra });
   const timeControl = { initialSeconds: 300, incrementSeconds: 2 };
-  const names = [0, 1, 2, 3].map((i) => `${giveaway ? 'G' : 'F'}${gameIndex}x${i}`);
+  const names = [0, 1, 2, 3].map((i) => `${prefix}${gameIndex}x${i}`);
   const sockets = [];
   for (const name of names) sockets.push(await connect(name));
   const clients = sockets.map((socket) => fourClient(socket, rules));
   const found = sockets.map((s) => waitFor(s, 'four_match_found')); // BEFORE the emits - see waitFor's doc comment
   found.forEach((p) => p.catch(() => {})); // no unhandled rejection if a join fails first; the caller still sees it
   for (let i = 0; i < 4; i++) {
-    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl, timeControlLabel: '5 | 2', ...(giveaway ? { variant } : {}) }); // as the app: the variant only for Giveaway
+    const ack = await emitAck(sockets[i], 'four_join_queue', { timeControl, timeControlLabel: '5 | 2', ...(variant !== 'ffa' ? { variant } : {}) }); // as the app: the variant only when it is not 4 Player Chess
     if (!ack.ok) problem('four-join-queue-refused', { player: i, error: ack.error });
   }
   const matches = await Promise.all(found);
@@ -777,22 +785,28 @@ async function playFourPlayerGame(gameIndex, variant = 'ffa') {
     if (Math.random() < 0.3) {
       const pick = moves[randInt(moves.length)];
       const legalTos = new Set(moves.filter((m) => m.from === pick.from).map((m) => m.to));
-      const to = FP.PLAYABLE_SQUARES.find((s) => s !== pick.from && !legalTos.has(s));
-      probes.push({ socketOf: turn, payload: { roomId, from: FP.squareName(pick.from), to: FP.squareName(to) }, kind: 'server-ACCEPTED-illegal-fourplayer-move' });
+      const to = board.playableSquares.find((s) => s !== pick.from && !legalTos.has(s));
+      probes.push({ socketOf: turn, payload: { roomId, from: board.squareName(pick.from), to: board.squareName(to) }, kind: 'server-ACCEPTED-illegal-fourplayer-move' });
     }
     if (giveaway && Math.random() < 0.5 && moves.every((m) => m.captured !== 0)) {
       // A capture is mandatory: a QUIET move that is otherwise perfectly playable must be refused (the server enforces the rule itself).
       const quiet = FP.pseudoMoves(own.tracked, turn).filter((m) => m.captured === 0);
       if (quiet.length > 0) {
         const q = quiet[randInt(quiet.length)];
-        probes.push({ socketOf: turn, payload: { roomId, from: FP.squareName(q.from), to: FP.squareName(q.to) }, kind: 'server-ACCEPTED-quiet-move-while-capture-mandatory' });
+        probes.push({ socketOf: turn, payload: { roomId, from: board.squareName(q.from), to: board.squareName(q.to) }, kind: 'server-ACCEPTED-quiet-move-while-capture-mandatory' });
       }
+    }
+    if (chaturaji && Math.random() < 0.3) {
+      // A pawn two squares forward is not a Chaturaji move (there is no double step), though it is a legal one in 4 Player Chess: the server must refuse it.
+      const step = moves.find((m) => FP.typeOf(own.tracked.cells[m.from]) === FP.PAWN && m.captured === 0 && board.stepForward(turn, m.from, 1) === m.to);
+      const twice = step ? board.stepForward(turn, step.from, 2) : -1;
+      if (twice >= 0 && !moves.some((m) => m.from === step.from && m.to === twice)) probes.push({ socketOf: turn, payload: { roomId, from: board.squareName(step.from), to: board.squareName(twice) }, kind: 'server-ACCEPTED-chaturaji-pawn-double-step' });
     }
     if (Math.random() < 0.15) {
       const other = [0, 1, 2, 3].find((s) => s !== turn && seatsOf[s].connected);
       if (other !== undefined) {
         const m = FP.legalMoves(own.tracked, other)[0];
-        if (m) probes.push({ socketOf: other, payload: { roomId, from: FP.squareName(m.from), to: FP.squareName(m.to) }, kind: 'server-ACCEPTED-out-of-turn-fourplayer-move' });
+        if (m) probes.push({ socketOf: other, payload: { roomId, from: board.squareName(m.from), to: board.squareName(m.to) }, kind: 'server-ACCEPTED-out-of-turn-fourplayer-move' });
       }
     }
     const seqBefore = leader.latest().seq;
@@ -810,7 +824,7 @@ async function playFourPlayerGame(gameIndex, variant = 'ffa') {
     const pick = moves[randInt(moves.length)];
     const promotion = FP.promotionOf(pick);
     const letter = promotion ? { [FP.QUEEN]: 'q', [FP.ROOK]: 'r', [FP.BISHOP]: 'b', [FP.KNIGHT]: 'n' }[promotion] : undefined;
-    const payload = { roomId, from: FP.squareName(pick.from), to: FP.squareName(pick.to), ...(letter ? { promotion: letter } : {}) };
+    const payload = { roomId, from: board.squareName(pick.from), to: board.squareName(pick.to), ...(letter ? { promotion: letter } : {}) };
     await paced(turn);
     const ack = await emitAck(mover.socket, 'four_make_move', payload);
     if (!ack.ok) {
@@ -875,6 +889,13 @@ async function playFourPlayerGame(gameIndex, variant = 'ffa') {
         }
         if (!['outOfPieces', 'stuck', 'lastStanding', 'cap', 'abandoned'].includes(over.reason)) problem('giveaway-game-over-with-a-chess-reason', { over });
       }
+      if (chaturaji && final.result) {
+        // ...and a Chaturaji ending is one of its own: three seats out (the last king, or the last resignation), or the ply cap. Never a mate, a stalemate result or a dead position.
+        if (!['elimination', 'cap', 'abandoned'].includes(over.reason)) problem('chaturaji-game-over-with-a-foreign-reason', { over });
+        const out = [0, 1, 2, 3].filter((s) => final.status[s] !== 'active');
+        if (over.reason === 'elimination' && out.length !== 3) problem('chaturaji-elimination-without-three-seats-out', { over, status: final.status });
+        if (over.reason === 'cap' && final.ply < 1000) problem('chaturaji-cap-before-the-cap', { over, ply: final.ply });
+      }
       const last = lead().latest();
       if (last.text !== over.state) problem('game-over-snapshot-differs-from-the-last-four-state', { lastSeq: last.seq });
     }
@@ -884,7 +905,7 @@ async function playFourPlayerGame(gameIndex, variant = 'ffa') {
       if (seqs.some((q, i) => i > 0 && q !== seqs[i - 1] + 1)) problem('seq-not-contiguous', { seat: seatIndexOf(s), seqs: seqs.slice(0, 60) });
     }
     // A late rejoin of the finished game answers the result.
-    const late = await connect(`${giveaway ? 'G' : 'F'}${gameIndex}-late`);
+    const late = await connect(`${prefix}${gameIndex}-late`);
     const lateAck = await emitAck(late, 'four_rejoin', { roomId, playerToken: seatsOf[randInt(4)].token });
     if (!(lateAck.ok === true && lateAck.finished === true && JSON.stringify(lateAck.gameOver) === JSON.stringify(over))) problem('rejoin-after-end-wrong', { ack: lateAck });
     late.disconnect();
@@ -1404,6 +1425,27 @@ async function main() {
   }
   allIssues.push(...fourGaStats.issues.map((i) => ({ ...i, variant: 'fourPlayerGiveaway' })));
 
+  // --- Chaturaji ---
+  const cjStats = { games: 0, plies: 0, probes: 0, finished: 0, natural: 0, rejoins: 0, takeovers: 0, resigns: 0, issues: [] };
+  for (let g = 0; g < CHATURAJI_GAMES; g++) {
+    try {
+      const { stats, issues } = await playFourPlayerGame(g, 'chaturaji');
+      cjStats.games++;
+      cjStats.plies += stats.plies;
+      cjStats.probes += stats.illegalProbes;
+      if (stats.finished) cjStats.finished++;
+      if (stats.naturalEnd) cjStats.natural++;
+      cjStats.rejoins += stats.rejoins;
+      cjStats.takeovers += stats.takeovers;
+      cjStats.resigns += stats.resigns;
+      cjStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${CHATURAJI_GAMES} Chaturaji games played`);
+    } catch (err) {
+      cjStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...cjStats.issues.map((i) => ({ ...i, variant: 'chaturaji' })));
+
   // --- Horde ---
   const hordeStats = { games: 0, plies: 0, probes: 0, finished: 0, blackWins: 0, issues: [] };
   for (let g = 0; g < HORDE_GAMES; g++) {
@@ -1468,13 +1510,14 @@ async function main() {
   console.log(`Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture).`);
   console.log(`4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games, ${fourStats.plies} plies, ${fourStats.probes} illegal/out-of-turn moves correctly refused, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself).`);
   console.log(`4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games, ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal/out-of-turn/quiet-while-capture-mandatory moves correctly refused, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself).`);
+  console.log(`Chaturaji: ${cjStats.games}/${CHATURAJI_GAMES} games, ${cjStats.plies} plies, ${cjStats.probes} illegal/out-of-turn/double-step moves correctly refused, ${cjStats.rejoins} disconnect/rejoin cycles (${cjStats.takeovers} bot takeovers observed), ${cjStats.resigns} resignations, ${cjStats.finished} games ended (${cjStats.natural} by the engine itself).`);
   console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
   console.log(`Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused, ${czStats.finished} games ended.`);
   console.log(`Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes (${REPETITION_GAMES} each), every one a draw by 'repetition' at exactly the predicted ply.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess + 4 Player Giveaway + Horde + Crazyhouse)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess + 4 Player Giveaway + Chaturaji + Horde + Crazyhouse)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -1489,6 +1532,7 @@ async function main() {
     `- Duck Chess: ${duckStats.games}/${DUCK_GAMES} games, ${duckStats.plies} turns, ${duckStats.probes} illegal turns correctly refused by the server, ${duckStats.finished} games ended (${duckStats.kingCaptures} by a king capture)`,
     `- 4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games (four real sockets each), ${fourStats.plies} plies, ${fourStats.probes} illegal / out-of-turn moves correctly refused by the server, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself); every seq checked for byte-identical snapshots across all four sockets`,
     `- 4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games (four real sockets each), ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal / out-of-turn / quiet-while-a-capture-is-mandatory moves correctly refused by the server, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, pieces-left scores) checked against the app engine`,
+    `- Chaturaji: ${cjStats.games}/${CHATURAJI_GAMES} games (four real sockets each, 8 x 8 board), ${cjStats.plies} plies, ${cjStats.probes} illegal / out-of-turn / pawn-double-step moves correctly refused by the server, ${cjStats.rejoins} disconnect/rejoin cycles (${cjStats.takeovers} bot takeovers observed), ${cjStats.resigns} resignations, ${cjStats.finished} games ended (${cjStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, points) checked against the app engine`,
     `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
     `- Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused by the server, ${czStats.finished} games ended`,
     `- Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes, each ended by 'repetition' at exactly the predicted ply on both sockets (Nf3 Nf6 Ng1 Ng8 shuffle)`,

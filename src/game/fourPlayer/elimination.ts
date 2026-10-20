@@ -33,15 +33,18 @@
  */
 
 import { nextSeat, seatBefore, type Seat } from './board.js';
-import { applyMoveRaw, attackers, legalMoves, type Move } from './moves.js';
+import { applyMoveRaw, attackers, kingsAttackedBy, legalMoves, type Move } from './moves.js';
 import { capWinners, giveawayResult, seatOutOfPieces } from './giveaway.js';
-import { activeSeats, HARD_MAX_PLIES, KING, seatOf, typeOf, type FourPlayerResult, type FourPlayerState, type SeatStatus } from './state.js';
+import { activeSeats, geometryOf, HARD_MAX_PLIES, KING, optionsOf, seatOf, typeOf, type FourPlayerResult, type FourPlayerState, type SeatStatus } from './state.js';
 
-export type EliminationReason = 'checkmate' | 'stalemate' | 'resign' | 'timeout';
+/** `kingCaptured` is Capture the King's only way to be eliminated by an opponent: the seat's king was taken (`credit` = the capturer). */
+export type EliminationReason = 'checkmate' | 'stalemate' | 'resign' | 'timeout' | 'kingCaptured';
 
 export type GameEvent =
   | { kind: 'move'; seat: Seat; move: Move }
   | { kind: 'deadKingMove'; seat: Seat; move: Move }
+  /** Check-fork points (`RuleOptions.forkPoints`): the mover's piece attacks `kings` (2 or 3) live enemy kings and scores `points` for it. */
+  | { kind: 'fork'; seat: Seat; kings: number; points: number }
   | { kind: 'eliminated'; seat: Seat; reason: EliminationReason; credit: Seat | null; points: readonly number[] }
   | { kind: 'frozen'; seat: Seat }
   | { kind: 'gameOver'; result: FourPlayerResult };
@@ -57,7 +60,7 @@ type Rng = () => number;
 export function mateCredit(state: FourPlayerState, seat: Seat): Seat | null {
   const king = state.kings[seat];
   if (king < 0) return null;
-  const mask = attackers(state.cells, state.status, king, seat);
+  const mask = attackers(state.cells, state.status, king, seat, geometryOf(state.rules));
   for (let steps = 1; steps <= 3; steps++) {
     const candidate = seatBefore(seat, steps);
     if (mask & (1 << candidate)) return candidate;
@@ -80,7 +83,7 @@ function finishIfOver(state: FourPlayerState, events: GameEvent[]): FourPlayerSt
     return active.length <= 1 ? finishWith(state, giveawayResult(active, 'lastStanding'), events) : state;
   }
   if (activeSeats(state).length <= 1) return endGame(state, 'elimination', events);
-  return endIfDeadPosition(state, events);
+  return optionsOf(state.rules).deadPositionEnds ? endIfDeadPosition(state, events) : state;
 }
 
 /** Ends the game with this exact result (and announces it). */
@@ -91,9 +94,24 @@ function finishWith(state: FourPlayerState, result: FourPlayerResult, events: Ga
 
 function endGame(state: FourPlayerState, reason: FourPlayerResult['reason'], events: GameEvent[]): FourPlayerState {
   if (state.rules.mode === 'giveaway') return finishWith(state, giveawayResult(capWinners(state), reason), events); // only 'cap' reaches here: the fewest pieces win
-  const best = Math.max(...state.score);
-  const winners = ([0, 1, 2, 3] as Seat[]).filter((seat) => state.score[seat] === best);
-  return finishWith(state, { winners, reason }, events);
+  let scored = state;
+  const bonus = optionsOf(state.rules).lastStandingKingBonus;
+  if (bonus > 0 && reason === 'elimination') {
+    // The one seat left is paid for every OTHER seat's king still on the board: a resigned / timed-out seat's walking king (a captured king is gone, and an
+    // eliminated seat whose king was captured has none). Nobody left = nobody to pay.
+    const last = activeSeats(state);
+    if (last.length === 1) {
+      const kingsLeft = ([0, 1, 2, 3] as Seat[]).filter((seat) => seat !== last[0] && state.kings[seat] >= 0).length;
+      if (kingsLeft > 0) {
+        const score = state.score.slice();
+        score[last[0]] += bonus * kingsLeft;
+        scored = { ...state, score };
+      }
+    }
+  }
+  const best = Math.max(...scored.score);
+  const winners = ([0, 1, 2, 3] as Seat[]).filter((seat) => scored.score[seat] === best);
+  return finishWith(scored, { winners, reason }, events);
 }
 
 /**
@@ -101,7 +119,7 @@ function endGame(state: FourPlayerState, reason: FourPlayerResult['reason'], eve
  * points are awarded per `reason`, and the game ends if only one seat is left. Resign/timeout award nothing. No-op for a seat that is
  * not active.
  */
-export function eliminateSeat(state: FourPlayerState, seat: Seat, reason: EliminationReason, events: GameEvent[] = []): FourPlayerState {
+export function eliminateSeat(state: FourPlayerState, seat: Seat, reason: EliminationReason, events: GameEvent[] = [], creditSeat: Seat | null = null): FourPlayerState {
   if (state.status[seat] !== 'active' || state.result) return state;
   if (state.rules.mode === 'giveaway') {
     // Resigned / flagged: out of contention, never a winner. Frozen at once (no walking king); its pieces stay as walls. No points, no credit.
@@ -119,7 +137,10 @@ export function eliminateSeat(state: FourPlayerState, seat: Seat, reason: Elimin
     for (const other of activeSeats(state)) if (other !== seat) score[other] += rules.stalemateOthersPoints;
   }
   const points = score.map((value, i) => value - state.score[i]);
-  let next: FourPlayerState = { ...withStatus(state, seat, 'dead-king'), score, castling: state.castling & ~(3 << (seat * 2)) };
+  // Its king was captured: there is no king left to walk, so the seat is inert at once ('frozen') and its army stays on the board as dead pieces.
+  // Any other elimination leaves the walking king ('dead-king').
+  if (reason === 'kingCaptured') credit = creditSeat;
+  let next: FourPlayerState = { ...withStatus(state, seat, reason === 'kingCaptured' ? 'frozen' : 'dead-king'), score, castling: state.castling & ~(3 << (seat * 2)) };
   events.push({ kind: 'eliminated', seat, reason, credit, points });
   next = finishIfOver(next, events);
   return next;
@@ -166,7 +187,8 @@ export function advance(state: FourPlayerState, events: GameEvent[], rng: Rng = 
     const moves = legalMoves(current, seat);
     if (status === 'active') {
       if (moves.length > 0) return current;
-      const inCheck = current.kings[seat] >= 0 && attackers(current.cells, current.status, current.kings[seat], seat) !== 0;
+      // Capture the King has no checkmate: a seat with no move at all is simply stalemated (eliminated, and the rules' stalemate points apply - 0 for Chaturaji).
+      const inCheck = !optionsOf(current.rules).captureTheKing && current.kings[seat] >= 0 && attackers(current.cells, current.status, current.kings[seat], seat, geometryOf(current.rules)) !== 0;
       current = eliminateSeat(current, seat, inCheck ? 'checkmate' : 'stalemate', events);
       continue;
     }
@@ -217,6 +239,29 @@ export function playMove(state: FourPlayerState, move: Move, rng: Rng = Math.ran
     // A seat whose last piece was just captured has won - checked BEFORE the cap, so it also beats a tie-break on the cap ply.
     const out = seatOutOfPieces(next, state.turn);
     if (out !== null) next = finishWith(next, giveawayResult([out], 'outOfPieces'), events);
+  } else {
+    const options = optionsOf(next.rules);
+    if (options.forkPoints) {
+      // Check forks: the piece that just moved attacks 2 / 3 live enemy kings. Scored BEFORE a king capture can end the game, so the final scores include it.
+      const kings = kingsAttackedBy(next, move.to);
+      const points = kings >= 3 ? options.forkPoints.triple : kings === 2 ? options.forkPoints.double : 0;
+      if (points > 0) {
+        const score = next.score.slice();
+        score[state.turn] += points;
+        next = { ...next, score };
+        events.push({ kind: 'fork', seat: state.turn, kings, points });
+      }
+    }
+    if (options.captureTheKing && move.captured && typeOf(move.captured) === KING) {
+      // The king was just captured (applyMoveRaw scored it and cleared `kings`): its seat is out - an active seat is eliminated (and may end the game), a
+      // resigned seat's walking king just stops walking.
+      const victim = seatOf(move.captured);
+      if (next.status[victim] === 'active') next = eliminateSeat(next, victim, 'kingCaptured', events, state.turn);
+      else if (next.status[victim] === 'dead-king') {
+        next = withStatus(next, victim, 'frozen');
+        events.push({ kind: 'frozen', seat: victim });
+      }
+    }
   }
   next = capIfReached(next, events);
   next = advance(next, events, rng);

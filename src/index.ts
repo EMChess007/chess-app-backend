@@ -6,7 +6,9 @@ import { rateLimit } from 'express-rate-limit';
 import helmet from 'helmet';
 import { Server as SocketIOServer } from 'socket.io';
 import { registerFourPlayerHandlers } from './game/fourPlayerHandlers.js';
+import { FourStartSnapshots, createFourTestSetupRouter, resolveFourTestSeed, resolveFourTestSetup, seededFourDeps } from './game/fourTestSwitches.js';
 import { registerSocketHandlers } from './game/socketHandlers.js';
+import { createAuthLimiter } from './lib/authRateLimit.js';
 import authRouter from './routes/auth.js';
 import gamesRouter from './routes/games.js';
 import puzzlesRouter from './routes/puzzles.js';
@@ -40,13 +42,8 @@ app.use(globalLimiter);
 // Tighter limit specifically for login/register — these are the endpoints an attacker would
 // actually want to hammer (password brute-forcing, mass fake-account creation), and are cheap for
 // a legitimate user to stay well under (nobody logs in or registers 20+ times in 15 minutes).
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many attempts. Please try again later.' },
-});
+// 20 per 15 minutes (src/lib/authRateLimit.ts, which also holds the test-only, never-in-production override).
+const authLimiter = createAuthLimiter();
 
 // Without this, a successful request produces zero terminal output — indistinguishable from
 // a request that never arrived at all, which makes "is my client even reaching the backend?"
@@ -63,6 +60,12 @@ app.use('/users', usersRouter);
 app.use('/games', gamesRouter);
 app.use('/puzzles', puzzlesRouter);
 
+// TEST-ONLY switches of the 4-seat server (src/game/fourTestSwitches.ts): with neither environment variable set (production, and every normal run) nothing below changes anything.
+const fourTestSeed = resolveFourTestSeed();
+const fourStartSnapshots = new FourStartSnapshots();
+const fourTestSetup = resolveFourTestSetup();
+if (fourTestSetup) app.use('/test-setup', createFourTestSetupRouter(fourStartSnapshots));
+
 // Express 5 forwards rejected promises from async route handlers here automatically, so a
 // DB hiccup or bug returns a 500 to that one request instead of crashing the whole process.
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
@@ -78,10 +81,12 @@ const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, { cors: { origin: '*' } });
 registerSocketHandlers(io);
 // 4 Player Chess Online: its own `four_*` events on its own connection listener - no code or state shared with the 2-player handlers above.
-registerFourPlayerHandlers(io);
+registerFourPlayerHandlers(io, { ...seededFourDeps(fourTestSeed), ...(fourTestSetup ? { startSnapshotFor: (variant) => fourStartSnapshots.take(variant) } : {}) });
 
 // Listening on 0.0.0.0 (not just localhost) so devices on the same LAN — e.g. a phone
 // running Expo Go — can reach this server via the computer's local network IP.
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`chess-app backend listening on http://0.0.0.0:${PORT} (REST + Socket.IO)`);
+  // Which mode the process is really in (the test-only switches are ignored in "production"): readable in the host's deploy log. Prints the mode only, never another variable.
+  console.log(`[startup] NODE_ENV=${process.env.NODE_ENV ?? '(unset)'}`);
 });

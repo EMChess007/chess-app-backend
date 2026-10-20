@@ -135,7 +135,7 @@ ok(resolveAuthRateLimit({ NODE_ENV: 'test', AUTH_RATE_LIMIT_MAX: '500' }) === 20
   const code = source.split('\n').filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('/**') && !line.trim().startsWith('//')).join('\n');
   const envReads = [...code.matchAll(/\benv\.([A-Za-z_]+)|\benv\[/g)].map((m) => m[1] ?? '[computed]');
   ok(JSON.stringify([...new Set(envReads)].sort()) === JSON.stringify(['AUTH_RATE_LIMIT_TEST_OVERRIDE', 'NODE_ENV']), `(d) the module reads exactly two variables: ${[...new Set(envReads)].join(', ')}`);
-  ok((code.match(/process\.env/g) ?? []).length === 2 && !/JWT|SECRET|DATABASE|PASSWORD|TOKEN|KEY/i.test(code.replace(/AUTH_RATE_LIMIT_TEST_OVERRIDE/g, '')), '(d) process.env appears only as the two default parameters, and no secret-like name is mentioned');
+  ok((code.match(/process\.env/g) ?? []).length === 2 && !/JWT|SECRET|DATABASE|PASSWORD|TOKEN|KEY/i.test(code.replace(/AUTH_RATE_LIMIT_TEST_OVERRIDE/g, '').replace(/keyGenerator/g, '')), '(d) process.env appears only as the two default parameters, and no secret-like name is mentioned');
   const secretLogs = await captureLogs(async () => {
     const env = { NODE_ENV: 'production', AUTH_RATE_LIMIT_TEST_OVERRIDE: '555', JWT_SECRET: 'jwt-secret-sentinel', DATABASE_URL: 'postgresql://u:db-password-sentinel@h/db', DATABASE_PASSWORD: 'pw-sentinel' };
     resolveAuthRateLimit(env);
@@ -147,7 +147,7 @@ ok(resolveAuthRateLimit({ NODE_ENV: 'test', AUTH_RATE_LIMIT_MAX: '500' }) === 20
 }
 {
   const index = read('src/index.ts');
-  ok(/const authLimiter = createAuthLimiter\(\);/.test(index) && !/authLimiter = rateLimit/.test(index) && index.includes("app.use('/auth', authLimiter, authRouter);"), 'the wiring: index.ts mounts createAuthLimiter() on /auth and builds no limiter of its own');
+  ok(index.includes('const authLimiter = createAuthLimiter(process.env, console.warn, httpKey);') && !/authLimiter = rateLimit/.test(index) && index.includes("app.use('/auth', authLimiter, authRouter);"), 'the wiring: index.ts mounts createAuthLimiter(...) (keyed by the client address, test-trust-proxy.mjs) on /auth and builds no limiter of its own');
   ok(!/AUTH_RATE_LIMIT/.test(index), 'index.ts itself mentions no override variable');
 }
 {

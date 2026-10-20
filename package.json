@@ -25,6 +25,7 @@
     "test:fourTestSwitches": "tsx scripts/test-four-test-switches.mjs",
     "test:attemptLimiter": "tsx scripts/test-attempt-limiter.mjs",
     "test:joinChallengeLimit": "tsx scripts/test-join-challenge-limit.mjs",
+    "test:trustProxy": "tsx scripts/test-trust-proxy.mjs",
     "check:productionInstall": "node scripts/check-production-install.mjs",
     "test:giveaway": "tsx scripts/test-giveaway.mjs",
     "test:atomic": "tsx scripts/test-atomic.mjs",

@@ -288,6 +288,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:joinChallengeLimit
 
+      - name: Run the HTTP client-address tests (trust proxy with 0, 1 and 2 hops - the global and login limiters count per address, the diagnostic returns only the caller's own)
+        working-directory: chess-app/backend
+        run: npm run test:trustProxy
+
       - name: Production-style install and build (NODE_ENV=production skips devDependencies - the build must not need one)
         working-directory: chess-app/backend
         run: npm run check:productionInstall

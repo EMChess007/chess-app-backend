@@ -1,3 +1,4 @@
+import type { Request } from 'express';
 import { rateLimit } from 'express-rate-limit';
 
 /**
@@ -32,13 +33,21 @@ export function resolveAuthRateLimit(env: Record<string, string | undefined> = p
   return limit;
 }
 
-/** The limiter src/index.ts mounts on /auth. Keyed like every express-rate-limit default (the client address). */
-export function createAuthLimiter(env: Record<string, string | undefined> = process.env, warn: (message: string) => void = console.warn) {
+/**
+ * The limiter src/index.ts mounts on /auth. Keyed by `keyGenerator` (src/index.ts passes `httpKeyGenerator(hops)` of src/lib/httpClientKey.ts, the client address derived by the
+ * same rule as the sockets'); without one it falls back to express-rate-limit's default, `req.ip`.
+ */
+export function createAuthLimiter(
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = console.warn,
+  keyGenerator?: (req: Request) => string,
+) {
   return rateLimit({
     windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
     limit: resolveAuthRateLimit(env, warn),
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: AUTH_RATE_LIMIT_MESSAGE },
+    ...(keyGenerator ? { keyGenerator } : {}),
   });
 }

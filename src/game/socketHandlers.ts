@@ -1,7 +1,9 @@
 import type { Server, Socket } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { verifyToken } from '../lib/jwt.js';
+import { clientIpOf, resolveTrustedHops } from '../lib/clientIp.js';
 import { ChallengeManager } from './challenges.js';
+import { JOIN_LIMITER_SWEEP_MS, JOIN_REFUSED_MESSAGE, createJoinChallengeLimiter } from './joinChallengeLimiter.js';
 import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
 import { SetupChessPairingManager } from './setupChessPairing.js';
@@ -102,6 +104,11 @@ export function registerSocketHandlers(io: Server): void {
   const matchmaker = new Matchmaker();
   const rooms = new RoomManager(io);
   const challenges = new ChallengeManager();
+  // Failed `join_challenge` attempts are limited per socket, per user and per client address (joinChallengeLimiter.ts); the address is derived without trusting a header a
+  // client can write (lib/clientIp.ts). The sweeper is unref'd so it never keeps the process alive.
+  const joinLimiter = createJoinChallengeLimiter();
+  const trustedProxyHops = resolveTrustedHops();
+  setInterval(() => joinLimiter.sweep(), JOIN_LIMITER_SWEEP_MS).unref();
   const tournaments = new TournamentManager(io, rooms);
   const setupChessPairings = new SetupChessPairingManager(io, rooms);
 
@@ -267,10 +274,21 @@ export function registerSocketHandlers(io: Server): void {
     });
 
     socket.on('join_challenge', (payload: JoinChallengePayload, ack?: (res: Ack) => void) => {
+      const attemptKeys = {
+        socket: socket.id,
+        user: userId,
+        ip: clientIpOf({ peer: socket.handshake?.address ?? '', forwardedFor: socket.handshake?.headers?.['x-forwarded-for'] }, trustedProxyHops),
+      };
+      // A blocked scope refuses WITHOUT looking at the code, with the same message as a wrong code (the answer must not tell which it was).
+      if (!joinLimiter.check(attemptKeys).allowed) {
+        ack?.({ ok: false, error: JOIN_REFUSED_MESSAGE });
+        return;
+      }
       const code = typeof payload?.code === 'string' ? payload.code.trim().toUpperCase() : '';
       const challenge = challenges.find(code);
       if (!challenge) {
-        ack?.({ ok: false, error: 'That challenge code was not found or has expired.' });
+        joinLimiter.recordFailure(attemptKeys); // a wrong, expired or malformed guess counts; a successful join below counts for nothing and resets nothing
+        ack?.({ ok: false, error: JOIN_REFUSED_MESSAGE });
         return;
       }
       if (challenge.creatorSocketId === socket.id) {

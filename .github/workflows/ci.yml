@@ -276,6 +276,14 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:authRateLimit
 
+      - name: Run the 4-seat test-switch tests (bot seed and start-position endpoint: opt-in, never in production; boots the real server in production mode)
+        working-directory: chess-app/backend
+        run: npm run test:fourTestSwitches
+
+      - name: Production-style install and build (NODE_ENV=production skips devDependencies - the build must not need one)
+        working-directory: chess-app/backend
+        run: npm run check:productionInstall
+
       - name: Dump server log on failure
         if: failure()
         run: cat chess-app/backend/server.log || true

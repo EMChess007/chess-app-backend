@@ -85,7 +85,7 @@ function serveStatic(rootDir, port) {
  * @param {{ apiPort?: number, webPort?: number, fillMs?: number, graceMs?: number, webDir?: string, log?: (m: string) => void }} [options]
  *   `webDir`: an already exported build to serve instead of exporting one (a rerun while iterating).
  */
-export async function startStack({ apiPort = 3191, webPort = 8087, fillMs = 8000, graceMs = Number(process.env.E2E_GRACE_MS) || 2500, webDir, log = console.log } = {}) {
+export async function startStack({ apiPort = 3191, webPort = 8087, fillMs = 8000, graceMs = Number(process.env.E2E_GRACE_MS) || 2500, seed = Number(process.env.E2E_SEED) || 20261020, webDir, log = console.log } = {}) {
   await assertPort('backend', apiPort);
   await assertPort('web', webPort);
   const databaseUrl = resolveDatabaseUrl();
@@ -110,7 +110,7 @@ export async function startStack({ apiPort = 3191, webPort = 8087, fillMs = 8000
     const tsxCli = join(BACKEND, 'node_modules', 'tsx', 'dist', 'cli.mjs');
     const backend = spawn(process.execPath, [tsxCli, 'src/index.ts'], {
       cwd: BACKEND,
-      env: { ...process.env, PORT: String(apiPort), FOUR_FILL_MS: String(fillMs), FOUR_GRACE_MS: String(graceMs), AUTH_RATE_LIMIT_TEST_OVERRIDE: '1000', NODE_ENV: 'development' },
+      env: { ...process.env, PORT: String(apiPort), FOUR_FILL_MS: String(fillMs), FOUR_GRACE_MS: String(graceMs), FOUR_TEST_SEED: String(seed), FOUR_TEST_SETUP_ENDPOINT: 'enabled', AUTH_RATE_LIMIT_TEST_OVERRIDE: '1000', NODE_ENV: 'development' },
       stdio: 'ignore',
       detached: process.platform !== 'win32',
     });
@@ -158,7 +158,13 @@ export async function startStack({ apiPort = 3191, webPort = 8087, fillMs = 8000
       return { ...user, userId: body.user.id, token: body.token };
     }
 
-    return { apiUrl, webUrl, createAccount, tracker, stop, apiPort, webPort, graceMs };
+    /** Arms ONE start position for the next room of `variant` (the server's test-setup endpoint, enabled only for this private backend). */
+    async function armStart(variant, snapshot) {
+      const res = await fetch(`${apiUrl}/test-setup/four-start`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ variant, snapshot }) });
+      if (res.status !== 200) throw new Error(`could not arm a start position (${res.status})`);
+    }
+
+    return { apiUrl, webUrl, createAccount, armStart, tracker, stop, apiPort, webPort, graceMs, seed };
   } catch (err) {
     await stop();
     throw err;

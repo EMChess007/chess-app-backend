@@ -152,7 +152,8 @@ ok(resolveAuthRateLimit({ NODE_ENV: 'test', AUTH_RATE_LIMIT_MAX: '500' }) === 20
 }
 {
   // The variable is set by the browser end-to-end stack ONLY. Not in any config file, not in a workflow, not in the env example, not in anything Render could read.
-  const allowed = new Set(['src/lib/authRateLimit.ts', 'scripts/test-auth-rate-limit.mjs', 'scripts/e2e-browser/stack.mjs', 'TESTING.md', 'CHECKLIST.md']);
+  // (test-four-test-switches.mjs boots a real production-mode server with the variable set, to prove the 429 and the single warning there)
+  const allowed = new Set(['src/lib/authRateLimit.ts', 'scripts/test-auth-rate-limit.mjs', 'scripts/test-four-test-switches.mjs', 'scripts/e2e-browser/stack.mjs', 'TESTING.md', 'CHECKLIST.md', 'AGENTS.md']);
   const hits = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {

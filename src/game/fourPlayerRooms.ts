@@ -85,6 +85,7 @@ import {
   chooseBotMoveFor,
   clockTick,
   createClock,
+  deserialize,
   findLegalMove,
   initialState,
   CROSS14,
@@ -144,6 +145,8 @@ export interface CreateFourRoomParams {
   timeControlLabel?: string;
   /** Which game this room plays; omitted = 4 Player Chess. Fixed for the room's whole life. */
   variant?: FourVariant;
+  /** TEST ONLY (src/game/fourTestSwitches.ts): start from this snapshot instead of the standard position. Never set in production: the only caller that passes it is the test-setup endpoint's hook. */
+  startSnapshot?: string;
 }
 
 export interface CreateFourRoomResult {
@@ -287,7 +290,7 @@ export class FourRoomManager {
       id,
       variant: variant.value,
       status: 'active',
-      state: initialState(rulesFor(variant.value)),
+      state: params.startSnapshot === undefined ? initialState(rulesFor(variant.value)) : deserialize(params.startSnapshot, rulesFor(variant.value)),
       clock: createClock(timeControl.value.initialSeconds, timeControl.value.incrementSeconds, true),
       turnStartedAt: Date.now(),
       seq: 0,

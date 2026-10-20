@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { startStack, sleep } from './stack.mjs';
 import { User, launchBrowser, PHONE_LARGE, PHONE_SMALL } from './app.mjs';
 import { Match, mulberry32 } from './match.mjs';
-import { SEAT_NAMES, SQUARE8, findRoom, legalMoves } from './truth.mjs';
+import { SEAT_NAMES, SQUARE8, findRoom, legalMoves, promotionStart } from './truth.mjs';
 import { io } from 'socket.io-client';
 
 const only = (process.env.E2E_ONLY ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -25,6 +25,7 @@ if (shotsDir) mkdirSync(shotsDir, { recursive: true });
 const log = (m) => console.log(m);
 
 const results = [];
+const retries = [];
 const ok = (cond, message) => {
   if (!cond) throw new Error(`FAILED: ${message}`);
   console.log(`    ok  ${message}`);
@@ -382,6 +383,95 @@ async function scenarioLayout(ctx) {
   await shot(a, `G-${ctx.viewport.width}x${ctx.viewport.height}-mid`);
 }
 
+// --- H: an automatic promotion to a boat, through the UI, in a natural online game ---------------------------------------------------------
+
+/**
+ * The server's test-setup endpoint starts the next Chaturaji room from a constructed position (four kings and, for every seat, a pawn one step from promoting); everything after
+ * that is the real thing: two users queue through the UI, bots fill the table, each human PROMOTES BY TAPPING the pawn's square and the square in front of it - no piece is chosen,
+ * no dialog appears - and every screen must show the boat and equal the server.
+ */
+async function scenarioH(ctx) {
+  const [a, b] = ctx.users;
+  const { snapshot, pawns } = promotionStart();
+  await ctx.stack.armStart('chaturaji', snapshot);
+  const match = await Match.start(ctx.stack, [a, b], { rng: mulberry32(808), log });
+  ctx.match = match;
+  ok(match.room.state.cells.filter((code) => code > 0).length <= 8, `the room started from the constructed position (four kings and four pawns one step from promoting, at ${pawns.join(', ')}), not from the standard 32 pieces`);
+  await match.converge('the constructed start position');
+  await shot(a, 'H-start');
+  const promoted = new Set();
+  for (let i = 0; i < 80 && promoted.size < 2; i++) {
+    needActive(match, [], 'the next promotion');
+    const user = match.userToMove();
+    if (!user) {
+      const seq = match.room.seq;
+      await match.watcher.waitFor((r) => r.seq > seq || r.state.result, 'the next position', 120_000);
+      await match.converge('after a bot move');
+      continue;
+    }
+    const seat = match.seatOf(user);
+    const move = legalMoves(match.room.state, seat).find((m) => (m.flags & 4) !== 0);
+    if (!promoted.has(user) && !move) throw new Inconclusive(`${user.name}'s pawn can no longer promote (ply ${match.room.state.ply})`);
+    if (!promoted.has(user)) {
+      const from = SQUARE8.squareName(move.from);
+      const to = SQUARE8.squareName(move.to);
+      const burstsBefore = await Promise.all(match.screens.map(async (u) => (await u.seen()).filter((s) => s.startsWith('promotion-burst')).length));
+      await match.humanMove(user, move);
+      ok((await user.page.getByText('Promote to').count()) === 0, `${user.name} (${SEAT_NAMES[seat]}) promoted ${from}-${to} by two taps: no "Promote to" question was asked`);
+      ok([4, 10].includes(match.room.state.cells[move.to] & 15) && match.room.state.cells[move.to] >> 4 === seat, `the server holds ${SEAT_NAMES[seat]}'s new BOAT on ${to}`);
+      await match.converge(`after ${user.name} promoted`);
+      for (const [index, u] of match.screens.entries()) {
+        const cells = await u.board();
+        ok(cells[to]?.startsWith(`${to}, ${SEAT_NAMES[seat]} boat`), `${u.name}'s screen draws a ${SEAT_NAMES[seat]} boat on ${to} (${cells[to]})`);
+        let seenAgain = false;
+        for (let k = 0; k < 100 && !seenAgain; k++) {
+          seenAgain = (await u.seen()).filter((s) => s.startsWith('promotion-burst')).length > burstsBefore[index];
+          if (!seenAgain) await sleep(50);
+        }
+        ok(seenAgain, `${u.name}'s screen showed the promotion marker`);
+      }
+      await shot(user, `H-promoted-${SEAT_NAMES[seat]}`);
+      promoted.add(user);
+    } else {
+      await match.humanMove(user, match.chooseMove(seat));
+      await match.converge(`after ${user.name}'s ordinary move`);
+    }
+  }
+  ok(promoted.size === 2, 'both humans promoted a pawn to a boat on the real server, through the UI');
+}
+
+// --- I: D15 - the server answers with another variant's game -------------------------------------------------------------------------
+
+/**
+ * D15 (CHATURAJI_SPEC.md): a client that asked for Chaturaji and is handed another game must refuse it, say so and leave. The page's connection is routed through Playwright, which
+ * rewrites the `variant` of the `four_match_found` the real server sends to ONE of the two players into "ffa" - exactly what an older server that predates Chaturaji would answer.
+ */
+async function scenarioD15(ctx) {
+  const [a, b] = ctx.users; // their pages were routed through watchSocket before their first load (`socketWatch` in the scenario table)
+  await a.queue('chaturaji', '10 min');
+  await b.queue('chaturaji', '10 min');
+  const message = 'This server does not support Chaturaji yet, so it started a different game. You have left it. Please try again later.';
+  await a.page.getByText(message, { exact: true }).waitFor({ timeout: 90_000 }).catch((err) => {
+    throw new Error(`${err.message.split('\n')[0]} (the page's socket: sent ${JSON.stringify(a.socketLog.sent)}, received ${JSON.stringify(a.socketLog.received)}, ${a.socketLog.connections ?? 0} connections, rewritten ${a.socketLog.rewritten})`);
+  });
+  ok(a.socketLog.rewritten === 1, 'the match the server sent to the first player was shown to the page as another game (variant "ffa")');
+  ok(true, `the first player's screen says: "${message}"`);
+  ok(!(await a.hasBoard()) && (await a.page.getByLabel(/board/i).count()) === 0, 'no board of any game is on that screen');
+  await shot(a, 'I-d15-refusal');
+  await boardUp(b);
+  const match = await Match.attach(ctx.stack, [a, b], { rng: mulberry32(909), log });
+  ctx.match = match;
+  const seatA = match.seatOf(a);
+  await match.watcher.waitFor((r) => r.state.status[seatA] !== 'active', 'the refused player\'s seat to be given up (the page resigns it)', 30_000);
+  ok((a.socketLog.sent.four_make_move ?? 0) === 0, 'the refusing page sent no move to the server');
+  ok(a.socketLog.sent.four_resign === 1, 'it told the server, once, that it leaves the room (four_resign)');
+  ok(!match.room.moves.some((m) => m.seat === seatA && m.actor === 'human'), 'the server applied no human move for the refused player\'s seat');
+  ok(match.room.moves.every((m) => m.actor !== 'human'), 'no human move was applied anywhere in that room (neither player moved: the other one only watched the board)');
+  match.screens = [b];
+  await match.converge('the other player\'s screen');
+  ok(true, 'the other player, whose match was not rewritten, is on the real Chaturaji board and equals the server');
+}
+
 const SCENARIOS = {
   A: { name: 'two humans and two bots, ten rounds', accounts: 2, run: scenarioA },
   B: { name: 'takeover by a bot and hand-back (menu and closed tab)', accounts: 2, run: scenarioB },
@@ -391,6 +481,9 @@ const SCENARIOS = {
   F: { name: 'three variants queued at once stay in their own rooms', accounts: 6, run: scenarioF },
   G1: { name: 'layout at 360x640', accounts: 2, viewport: PHONE_SMALL, run: scenarioLayout },
   G2: { name: 'layout at 412x915', accounts: 2, viewport: PHONE_LARGE, run: scenarioLayout },
+  H: { name: 'an automatic promotion to a boat, through the UI', accounts: 2, run: scenarioH },
+  I: { name: 'D15: the server answers with another variant\'s game', accounts: 2, socketWatch: (index) => (index === 0 ? { rewriteMatchVariant: 'ffa' } : {}), run: scenarioD15 },
+  T: { name: 'scenario A again on an emulated touch phone (412x915): taps, not mouse clicks', accounts: 2, touch: true, run: scenarioA },
 };
 
 // --- the harness -----------------------------------------------------------------------------------------------------------------------
@@ -403,23 +496,27 @@ async function main() {
     for (const [key, scenario] of Object.entries(SCENARIOS)) {
       if (only.length && !only.some((o) => key === o || key.startsWith(o))) continue;
       console.log(`\n=== ${key}. ${scenario.name} ===`);
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      // At most ONE replay per scenario (and TWO per run, checked at the end): the replay exists only for a game a bot cut short before the step under test (Inconclusive);
+      // every one is printed with its scenario and reason and counted in the summary line.
+      for (let attempt = 1; attempt <= 2; attempt++) {
         const users = [];
         const ctx = { stack, browser, users, match: null, viewport: scenario.viewport ?? PHONE_LARGE };
         let again = false;
         try {
           for (let i = 0; i < scenario.accounts; i++) {
-            const user = await User.open(browser, stack.webUrl, `${key}${i + 1}`, ctx.viewport);
+            const user = await User.open(browser, stack.webUrl, `${key}${i + 1}`, ctx.viewport, { touch: !!scenario.touch, socketWatch: scenario.socketWatch ? scenario.socketWatch(i) : null });
             await user.login(await stack.createAccount(`${key.toLowerCase()}${i}`));
             users.push(user);
           }
           await scenario.run(ctx);
           results.push({ key, pass: true });
         } catch (err) {
-          if (err instanceof Inconclusive && attempt < 3) {
+          if (err instanceof Inconclusive && attempt < 2) {
             again = true;
-            console.log(`    retry  ${err.message} - the bots ended this game early; playing it again with a fresh game (try ${attempt + 1} of 3)`);
+            retries.push({ key, reason: err.message });
+            console.log(`    RETRY [${key}] Inconclusive: ${err.message} - a bot cut this game short before the step under test; playing the scenario again with a fresh game (retry ${retries.filter((r) => r.key === key).length} of at most 1 for this scenario, ${retries.length} of at most 2 in this run)`);
           } else {
+            if (err instanceof Inconclusive) console.log(`    INCONCLUSIVE [${key}] again: ${err.message} - more than 1 retry for this scenario is a failure`);
             failed = true;
             results.push({ key, pass: false, error: String(err instanceof Error ? err.message : err) });
             console.log(`    FAIL  ${err instanceof Error ? err.message : err}`);
@@ -442,6 +539,12 @@ async function main() {
     console.log(`\naccounts deleted: ${cleanup.deleted} (left: ${cleanup.remaining})`);
   }
   console.log('\n' + results.map((r) => `${r.pass ? 'PASS' : 'FAIL'}  ${r.key}${r.error ? `  ${r.error}` : ''}`).join('\n'));
+  const perScenario = Object.entries(retries.reduce((acc, r) => ({ ...acc, [r.key]: (acc[r.key] ?? 0) + 1 }), {})).map(([k, n]) => `${k}=${n}`);
+  if (retries.length > 2) {
+    failed = true;
+    console.log(`FAIL  the run needed ${retries.length} retries: more than 2 per run is a failure`);
+  }
+  console.log(`summary: ${results.filter((r) => r.pass).length} passed, ${results.filter((r) => !r.pass).length} failed; retries: ${retries.length}${perScenario.length ? ` (${perScenario.join(', ')})` : ''} (limits: 1 per scenario, 2 per run); seed ${stack.seed}`);
   process.exit(failed ? 1 : 0);
 }
 

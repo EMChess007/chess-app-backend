@@ -474,7 +474,8 @@ console.log('\n=== 7. The server wiring (source pins) ===');
   check((handlers.match(/socket\.on\(/g) ?? []).length === 2, 'handlers: socket.on appears only in listen() and for disconnect (nothing bypasses the safe wrapper)');
   const handlerCode = handlers.split('\n').filter((line) => !/^\s*(\*|\/\*|\/\/)/.test(line)).join('\n'); // code only: the header comment names ack?.() in prose
   check(!/ack\?\.\(/.test(handlerCode), 'handlers: no `ack?.()` (that throws on a non-function ack) anywhere in the code');
-  check(/registerSocketHandlers\(io\);\n(\/\/[^\n]*\n)*registerFourPlayerHandlers\(io\);/.test(index) && (index.match(/registerFourPlayerHandlers/g) ?? []).length === 2, 'index.ts: registerFourPlayerHandlers is imported once and called once, right after registerSocketHandlers(io)');
+  // (since Chaturaji W5 the call passes the test-only switches' dependencies - `seededFourDeps(...)` and the snapshot hook, both empty unless an opt-in variable is set outside production; test-four-test-switches.mjs pins that part)
+  check(/registerSocketHandlers\(io\);\n(\/\/[^\n]*\n)*registerFourPlayerHandlers\(io(, \{ \.\.\.seededFourDeps\(fourTestSeed\), [^\n]*\})?\);/.test(index) && (index.match(/registerFourPlayerHandlers/g) ?? []).length === 2, 'index.ts: registerFourPlayerHandlers is imported once and called once, right after registerSocketHandlers(io)');
   check(!/four_|fourPlayer/i.test(twoPlayer), 'the 2-player socketHandlers.ts does not mention the 4-player code at all (no shared path)');
 }
 

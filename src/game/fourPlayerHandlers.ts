@@ -23,7 +23,7 @@ import { prisma } from '../lib/prisma.js';
 import { verifyToken } from '../lib/jwt.js';
 import { FourPlayerMatchmaker, type FourMatchmakerDeps } from './fourPlayerMatchmaking.js';
 import { FourRoomManager } from './fourPlayerRooms.js';
-import { validateFourJoinQueue, type FourQueueUpdatePayload } from './fourPlayerWire.js';
+import { validateFourJoinQueue, type FourQueueUpdatePayload, type FourVariant } from './fourPlayerWire.js';
 
 export interface FourHandlerDeps {
   /** A user's display name; default: the username from the database. A rejection falls back to "Player". */
@@ -34,6 +34,8 @@ export interface FourHandlerDeps {
   roomOptions?: ConstructorParameters<typeof FourRoomManager>[1];
   /** Options for the matchmaker (fill wait, random source) - tests and the dev override. */
   matchmakerOptions?: Pick<FourMatchmakerDeps, 'fillWaitMs' | 'randomInt'>;
+  /** TEST ONLY (src/game/fourTestSwitches.ts): a start snapshot armed for the next room of this variant, or undefined. Absent in production. */
+  startSnapshotFor?: (variant: FourVariant) => string | undefined;
 }
 
 type Reply = (response: unknown) => void;
@@ -94,7 +96,8 @@ export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {
   const matchmaker = new FourPlayerMatchmaker({
     ...deps.matchmakerOptions,
     startGame: (seats, timeControl, timeControlLabel, variant) => {
-      const created = rooms.createRoom({ seats, timeControl, timeControlLabel, variant });
+      const startSnapshot = deps.startSnapshotFor?.(variant);
+      const created = rooms.createRoom({ seats, timeControl, timeControlLabel, variant, ...(startSnapshot === undefined ? {} : { startSnapshot }) });
       console.log(`[fourSocket] match_found room=${created.roomId} variant=${variant} humans=${seats.filter((s) => s.kind === 'human').length} bots=${seats.filter((s) => s.kind === 'bot').length} ${timeControl.initialSeconds}+${timeControl.incrementSeconds}`);
     },
     notify: (socketId, update: FourQueueUpdatePayload) => {

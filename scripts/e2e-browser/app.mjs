@@ -16,16 +16,20 @@ export async function launchBrowser() {
 
 /** A user: a context (own storage), a page, and helpers bound to them. */
 export class User {
-  constructor(name, context, page, webUrl) {
+  constructor(name, context, page, webUrl, touch = false) {
     this.name = name;
     this.context = context;
     this.page = page;
     this.webUrl = webUrl;
     this.account = null;
+    this.touch = touch;
+    /** What this page sent to the server and what it was told, counted by event name (filled by `watchSocket`). */
+    this.socketLog = { sent: {}, received: {}, rewritten: 0 };
   }
 
-  static async open(browser, webUrl, name, viewport = PHONE_LARGE) {
-    const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
+  /** `touch`: an emulated phone (touch events, a mobile user agent): every tap is a real touch, not a mouse click. */
+  static async open(browser, webUrl, name, viewport = PHONE_LARGE, { touch = false, socketWatch = null } = {}) {
+    const context = await browser.newContext({ viewport, deviceScaleFactor: 1, ...(touch ? { hasTouch: true, isMobile: true } : {}) });
     // A recorder in every page: each time a "+N", the king-attacked pill or the promotion marker APPEARS it is logged, so a test can ask afterwards "did this screen ever
     // show +3 at seat 1?" without racing the 1.8 s the indicator stays.
     await context.addInitScript(() => {
@@ -56,8 +60,11 @@ export class User {
       };
       new MutationObserver((records) => records.forEach(rescan)).observe(document, { childList: true, subtree: true, characterData: true });
     });
+    const user = new User(name, context, null, webUrl, touch);
+    // Playwright wraps the page's WebSocket constructor with an init script, which only applies to documents loaded AFTER the route exists: it has to be installed before the first goto.
+    if (socketWatch) await user.watchSocket(socketWatch);
     const page = await context.newPage();
-    const user = new User(name, context, page, webUrl);
+    user.page = page;
     page.on('pageerror', (e) => (user.pageErrors ??= []).push(String(e)));
     await page.goto(webUrl);
     await page.getByText('Play', { exact: true }).first().waitFor({ timeout: 60_000 });
@@ -68,19 +75,25 @@ export class User {
     return this.page.getByText(label, { exact: true, ...options });
   }
 
+  /** A press on a locator: a touch tap on a touch user, a mouse click otherwise. */
+  async press(locator) {
+    if (this.touch) await locator.tap();
+    else await locator.click();
+  }
+
   async tapText(label) {
-    await this.text(label).last().click();
+    await this.press(this.text(label).last());
   }
 
   /** Logs in through the Log In screen: Play -> Chaturaji online -> "Log in" in the dialog -> the form. */
   async login(account) {
     this.account = account;
     await this.tapText('Play');
-    await this.page.getByLabel('Chaturaji online').click();
+    await this.press(this.page.getByLabel('Chaturaji online'));
     await this.tapText('Log in / Sign up');
     await this.page.getByPlaceholder('Email').fill(account.email);
     await this.page.getByPlaceholder('Password').fill(account.password);
-    await this.text('Log In').last().click();
+    await this.press(this.text('Log In').last());
     await this.page.getByText('Log In', { exact: true }).first().waitFor({ state: 'detached', timeout: 20_000 });
   }
 
@@ -88,11 +101,11 @@ export class User {
   async queue(variantLabel, timeControl) {
     await this.tapText('Play');
     const online = { chaturaji: 'Chaturaji online' }[variantLabel];
-    if (online) await this.page.getByLabel(online).click();
+    if (online) await this.press(this.page.getByLabel(online));
     else {
       // the 4 Player cards have no aria-label on their Online buttons: the nearest ancestor of the card's title that holds an "Online" button is the card itself
       const card = this.page.locator(`xpath=//*[normalize-space(text())="${variantLabel}"]/ancestor::div[.//*[normalize-space(text())="Online"]][1]`).first();
-      await card.getByText('Online', { exact: true }).click();
+      await this.press(card.getByText('Online', { exact: true }));
     }
     await this.tapText(timeControl);
   }
@@ -165,8 +178,38 @@ export class User {
     const cell = this.page.locator(`[aria-label^="${name},"], [aria-label="${name}"]`).first();
     const box = await cell.boundingBox();
     if (!box) throw new Error(`${this.name}: square ${name} is not on screen`);
-    await this.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    if (this.touch) await this.page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    else await this.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await sleep(60);
+  }
+
+  /**
+   * Sits between this page and the server: counts what the page SENDS by event name (`socketLog.sent`) and, when `rewriteMatchVariant` is given, rewrites the `variant` of the
+   * `four_match_found` the server sends to the page - the way to show the page a server that answers with another game than the one asked for (D15). Installed by `open` (the
+   * `socketWatch` option), before the page's first load.
+   */
+  async watchSocket({ rewriteMatchVariant } = {}) {
+    await this.context.routeWebSocket('**/socket.io/**', (ws) => {
+      this.socketLog.connections = (this.socketLog.connections ?? 0) + 1;
+      const server = ws.connectToServer();
+      ws.onMessage((message) => {
+        if (typeof message === 'string' && message.startsWith('42')) {
+          const m = /^42\d*\["([a-z_]+)"/.exec(message);
+          if (m) this.socketLog.sent[m[1]] = (this.socketLog.sent[m[1]] ?? 0) + 1;
+        }
+        server.send(message);
+      });
+      server.onMessage((message) => {
+        const got = typeof message === 'string' ? /^42\d*\["([a-z_]+)"/.exec(message) : null;
+        if (got) this.socketLog.received[got[1]] = (this.socketLog.received[got[1]] ?? 0) + 1;
+        if (rewriteMatchVariant && typeof message === 'string' && message.startsWith('42["four_match_found"')) {
+          const body = JSON.parse(message.slice(2));
+          body[1] = { ...body[1], variant: rewriteMatchVariant };
+          this.socketLog.rewritten++;
+          ws.send(`42${JSON.stringify(body)}`);
+        } else ws.send(message);
+      });
+    });
   }
 
   async offeredSquares() {

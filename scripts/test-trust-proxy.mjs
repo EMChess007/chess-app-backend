@@ -95,8 +95,16 @@ ok(limiterKeyOf('2001:db8:aaaa:bb00::1') !== limiterKeyOf('2001:db8:aaaa:bc00::1
 {
   const req = (peer, forwardedFor) => ({ socket: { remoteAddress: peer }, headers: forwardedFor === undefined ? {} : { 'x-forwarded-for': forwardedFor } });
   const d = describeClientIp(req('10.0.0.5', '203.0.113.9, 10.1.1.1'), 2);
-  ok(JSON.stringify(Object.keys(d)) === JSON.stringify(['clientIp', 'xffEntries', 'peerIsPrivate', 'hops']), 'diagnostic: exactly the four keys clientIp, xffEntries, peerIsPrivate, hops');
-  ok(d.clientIp === '203.0.113.9' && d.xffEntries === 2 && d.peerIsPrivate === true && d.hops === 2, 'diagnostic: 2 hops, 2 entries, private peer -> the client entry');
+  ok(JSON.stringify(Object.keys(d)) === JSON.stringify(['clientIp', 'xffEntries', 'peerIsPrivate', 'hops', 'clientIsPrivate', 'chain']), 'diagnostic: exactly the six keys clientIp, xffEntries, peerIsPrivate, hops, clientIsPrivate, chain');
+  ok(d.clientIp === '203.0.113.9' && d.xffEntries === 2 && d.peerIsPrivate === true && d.hops === 2 && d.clientIsPrivate === false, 'diagnostic: 2 hops, 2 entries, private peer -> the client entry');
+  ok(JSON.stringify(d.chain) === JSON.stringify(['public', 'private']), 'diagnostic: the chain names the KIND of each entry, left to right (public, private)');
+  ok(JSON.stringify(describeClientIp(req('10.0.0.5', 'unknown, 203.0.113.9, fe80::1, 2001:db8::1, 10.1.1.1:8080'), 1).chain) === JSON.stringify(['invalid', 'public', 'private', 'public', 'invalid']), 'diagnostic: a name or an address with a port is "invalid", an IPv6 link-local is "private", a documentation IPv6 is "public"');
+  ok(describeClientIp(req('10.0.0.5', Array.from({ length: 30 }, (_, i) => `198.51.100.${i + 1}`).join(', ')), 1).chain.length === 8, 'diagnostic: at most the last 8 entries are classified (a hostile 30-entry header cannot grow the answer)');
+  // 22 public entries then 8 private ones: only the LAST eight (the platform's side) are shown, never the first eight (the client's side)
+  const hostile = [...Array.from({ length: 22 }, (_, i) => `198.51.100.${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `10.0.0.${i + 1}`)].join(', ');
+  ok(describeClientIp(req('10.0.0.5', hostile), 1).chain.join() === 'private,private,private,private,private,private,private,private', 'diagnostic: the cap keeps the LAST entries - the platform\'s side of the chain - not the first');
+  ok(describeClientIp(req('10.0.0.5', ' , 203.0.113.9,, 10.1.1.1 ,'), 1).chain.join() === 'public,private', 'diagnostic: empty entries between commas are skipped, not reported as invalid');
+  ok(describeClientIp(req('10.0.0.5', ['203.0.113.9', '10.1.1.1, 10.2.2.2']), 1).chain.join() === 'public,private,private', 'diagnostic: a header delivered as an array is classified as one list');
   ok(describeClientIp(req('198.51.100.20'), 1).peerIsPrivate === false && describeClientIp(req('198.51.100.20'), 1).xffEntries === 0, 'diagnostic: a public peer is reported as not private; no header counts 0 entries');
   ok(describeClientIp(req('10.0.0.5', ' , ,'), 1).xffEntries === 0 && describeClientIp(req('10.0.0.5', 'a, ,b'), 1).xffEntries === 2, 'diagnostic: empty entries are not counted');
   ok(describeClientIp(req('10.0.0.5', ['1.1.1.1', '2.2.2.2, 3.3.3.3']), 1).xffEntries === 3, 'diagnostic: a header delivered as an array is counted as one list');
@@ -158,7 +166,7 @@ await withServer(1, async ({ url, lines }) => {
   const marker = 'zz-marker-header-value-zz';
   const res = await get(`${url}/health/client-ip`, '203.0.113.77', { 'x-marker': marker, authorization: `Bearer ${marker}`, cookie: `m=${marker}` });
   const text = await res.text();
-  ok(!text.includes(marker) && Object.keys(JSON.parse(text)).length === 4, '1 hop: the diagnostic echoes no header (a marker sent in x-marker, authorization and cookie is not in the body) and has exactly four keys');
+  ok(!text.includes(marker) && Object.keys(JSON.parse(text)).length === 6, '1 hop: the diagnostic echoes no header (a marker sent in x-marker, authorization and cookie is not in the body) and has exactly six keys');
   await sleep(200);
   const log = lines.join('\n');
   ok(!log.includes(marker) && !log.includes('203.0.113.77') && !log.includes('"clientIp"'), '1 hop: the server log holds neither the response, nor the marker, nor the caller\'s address');
@@ -203,6 +211,42 @@ await withServer(2, async ({ url }) => {
   let globalBlockedAt = -1;
   for (let i = 0; i < 700 && globalBlockedAt < 0; i++) if ((await get(`${url}/health/client-ip`, `192.0.2.${(i % 250) + 1}`)).status === 429) globalBlockedAt = i;
   ok(globalBlockedAt >= 300 && globalBlockedAt <= 600, `2 hops: the same for the global limiter - requests that each claim a different single-entry address share the peer's counter (429 at request ${globalBlockedAt + 1})`);
+});
+
+// --- the chain OBSERVED on Render (Command #22, 20/10/2026) ---------------------------------------------------------------------------------
+// A request with no header of its own reached the server with THREE entries - the client, Cloudflare's edge (response headers `server: cloudflare`, `cf-ray`), and one of Render's own
+// proxies (a 10.x address, different from request to request) - and a request that sent a header of its own had it kept on the LEFT, with the same three appended after it.
+// With TRUSTED_PROXY_HOPS=1 the entry taken is therefore the last of the three: Render's own proxy, shared by every user (the failure this branch exists for). Three hops reach the client.
+// (Entries 2 and 3 from the right are an inference from Cloudflare's and Render's documentation and from the count; the diagnostic's `chain` shows their KIND on the deployed server.)
+{
+  const chain = '198.51.100.20, 172.70.1.1, 10.25.239.2'; // client, Cloudflare edge, Render proxy
+  const req = (forwardedFor) => ({ socket: { remoteAddress: '10.24.0.9' }, headers: { 'x-forwarded-for': forwardedFor } });
+  const spoofs = ['', '203.0.113.7, ', '203.0.113.7, 198.51.100.9, ', '203.0.113.7, 10.9.9.9, 172.70.9.9, '];
+  for (const spoof of spoofs) {
+    const header = spoof + chain;
+    const one = describeClientIp(req(header), 1);
+    const three = describeClientIp(req(header), 3);
+    ok(one.clientIp === '10.25.239.2' && one.clientIsPrivate === true, `Render chain, ${spoof ? `${spoof.split(',').length - 1} spoofed entr${spoof.split(',').length - 1 === 1 ? 'y' : 'ies'} in front` : 'no spoof'}, 1 hop: the answer is Render's own proxy - private, the same for every user (clientIsPrivate says so)`);
+    ok(three.clientIp === '198.51.100.20' && three.clientIsPrivate === false && three.xffEntries === 3 + (spoof ? spoof.split(',').length - 1 : 0), `Render chain, ${spoof ? 'spoofed' : 'no spoof'}, 3 hops: the answer is the client, whatever the client wrote in front`);
+    ok(derivedClientIp(req(header), 3) === '198.51.100.20' && !['203.0.113.7', '198.51.100.9', '10.9.9.9', '172.70.9.9'].includes(derivedClientIp(req(header), 3)), `Render chain, ${spoof ? 'spoofed' : 'no spoof'}, 3 hops: the key the limiters use is the client, never one of the entries the client wrote`);
+  }
+  const shown = describeClientIp(req(`203.0.113.7, ${chain}`), 3);
+  ok(shown.chain.join() === 'public,public,public,private' && shown.hops === 3, 'Render chain: the diagnostic reads [public, public, public, private] for a spoofed request and [public, public, private] without (the last three are the platform\'s)');
+  ok(describeClientIp(req(chain), 3).chain.join() === 'public,public,private', 'Render chain: with no spoof the chain is [public, public, private]');
+  // too many hops: fewer entries than hops falls back to the TCP peer (private) - clientIsPrivate shows it
+  const tooMany = describeClientIp(req('198.51.100.20, 10.25.239.2'), 3);
+  ok(tooMany.clientIp === '10.24.0.9' && tooMany.clientIsPrivate === true, 'a hop count that is too HIGH falls back to the TCP peer, which is private: clientIsPrivate is true there too');
+}
+await withServer(3, async ({ url }) => {
+  const client = '198.51.100.20';
+  const chain = (extra = '') => `${extra}${client}, 172.70.1.1, 10.25.239.2`;
+  const mine = await (await get(`${url}/health/client-ip`, chain())).json();
+  ok(mine.clientIp === client && mine.xffEntries === 3 && mine.hops === 3 && mine.clientIsPrivate === false && mine.chain.join() === 'public,public,private', `3 hops, a real server: the client is entry 3 from the right (${JSON.stringify(mine)})`);
+  const spoof = await (await get(`${url}/health/client-ip`, chain('203.0.113.7, 198.51.100.9, '))).json();
+  ok(spoof.clientIp === client && spoof.xffEntries === 5, '3 hops: two spoofed entries in front change the count but not the client');
+  ok((await loginTimes(url, chain(), 20)) !== 429 && (await login(url, chain())).status === 429, '3 hops: the 21st login attempt of ONE client is a 429');
+  ok((await login(url, `198.51.100.21, 172.70.1.1, 10.25.239.2`)).status !== 429, '3 hops: a second client behind the same Cloudflare edge and the same Render proxy is NOT blocked');
+  ok((await login(url, chain('9.9.9.9, 8.8.8.8, '))).status === 429, '3 hops: spoofed entries in front of a blocked client do not buy a fresh counter');
 });
 
 // --- 0 hops: the header is never read ----------------------------------------------------------------------------------------------------

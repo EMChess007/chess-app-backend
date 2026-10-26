@@ -5,6 +5,8 @@ import express, { type ErrorRequestHandler } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import helmet from 'helmet';
 import { Server as SocketIOServer } from 'socket.io';
+import { registerBughouseHandlers } from './game/bughouseHandlers.js';
+import { resolveBughouseTestSeed, seededBughouseDeps } from './game/bughouseTestSwitches.js';
 import { registerFourPlayerHandlers } from './game/fourPlayerHandlers.js';
 import { FourStartSnapshots, createFourTestSetupRouter, resolveFourTestSeed, resolveFourTestSetup, seededFourDeps } from './game/fourTestSwitches.js';
 import { registerSocketHandlers } from './game/socketHandlers.js';
@@ -95,6 +97,8 @@ const io = new SocketIOServer(httpServer, { cors: { origin: '*' } });
 registerSocketHandlers(io);
 // 4 Player Chess Online: its own `four_*` events on its own connection listener - no code or state shared with the 2-player handlers above.
 registerFourPlayerHandlers(io, { ...seededFourDeps(fourTestSeed), ...(fourTestSetup ? { startSnapshotFor: (variant) => fourStartSnapshots.take(variant) } : {}) });
+// Bughouse Online: its own `bug_*` events on its own connection listener, its own matchmaker and room manager (BUGHOUSE_SPEC.md W2). With the seed switch unset (production, and every normal run; src/game/bughouseTestSwitches.ts) nothing is seeded.
+registerBughouseHandlers(io, seededBughouseDeps(resolveBughouseTestSeed()));
 
 // Listening on 0.0.0.0 (not just localhost) so devices on the same LAN — e.g. a phone
 // running Expo Go — can reach this server via the computer's local network IP.

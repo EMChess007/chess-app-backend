@@ -1013,9 +1013,47 @@ console.log('\n=== 18. Survivors of the first mutation run, killed (a late flag,
   disposeAll();
 }
 {
+  // W3a audit: the clamp in armClockTimers CAN act. The funnel reads the instant once, but the re-arm reads the clock again AFTER the broadcast; a broadcast that takes longer than a
+  // running clock's remaining time (many sockets, a slow host) leaves that deadline behind the second read. Node 24 then prints a TimeoutNegativeWarning for a negative delay
+  // (and treats it as 1 ms, as it treats 0), so the clamp is not dead code: every delay handed to the timers must stay >= 0.
+  const clock = manualTimers();
+  const io = stubIo();
+  const slowTo = io.to;
+  io.to = (id) => {
+    const target = slowTo(id);
+    return { emit: (event, payload) => { target.emit(event, payload); if (event === 'bug_state') clock.jump(70_000); } };
+  };
+  const g = newGame({ tc: TC1, clock, io });
+  const before = clock.armed.length;
+  const ack = g.mv(0, 'A', 'e2', 'e4');
+  const rearmed = clock.armed.slice(before);
+  check(ack.ok === true && rearmed.length >= 2 && rearmed.every((ms) => ms >= 0) && rearmed.includes(0), `a broadcast slower than the remaining time re-arms the clock timers with 0, never a negative delay (armed: ${rearmed.join(', ')})`);
+  disposeAll();
+}
+{
+  // W3a audit: the "no legal action" report of playBotTurn IS reachable by a white-box state (a verdict that says "playing" over a position with no move and no drop); the real engine
+  // never produces one, but the report is the safety net for exactly that, so it must be an ERROR line (a mutant that only debug-logs it was labelled equivalent).
+  const g = newGame({ kinds: ['human', 'bot', 'human', 'human'], chooseBotAction: () => null });
+  const room = g.room();
+  room.match = {
+    ...room.match,
+    boards: { ...room.match.boards, A: { ...room.match.boards.A, fen: '7k/5Q2/6K1/8/8/8/8/8 b - - 0 1' } },
+    verdicts: { ...room.match.verdicts, A: { status: 'playing', turn: 'b', inCheck: false, stuck: null } },
+  };
+  g.mgr.scheduleBots(room);
+  const bot = room.botTimers.A;
+  const errors = [];
+  const original = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  g.clock.fire(bot.handle);
+  console.error = original;
+  check(errors.length === 2 && /returned no action/.test(errors[0]) && /seat 1 of room .* is on move with no legal action/.test(errors[1]), 'a bot seat with no action and no legal action is reported twice, as errors: the bot answered nothing, then nothing is legal');
+  disposeAll();
+}
+{
   // the proofs behind the equivalent mutants
   const clocks = allArmedDelays();
-  check(clocks.length > 100 && clocks.every((ms) => Number.isInteger(ms) && ms >= 0), `across every scenario of this script (${clocks.length} timers) no timer was ever armed with a negative delay: the clamp in armClockTimers never acts`);
+  check(clocks.length > 100 && clocks.every((ms) => Number.isInteger(ms) && ms >= 0), `across every scenario of this script (${clocks.length} timers) no timer was ever armed with a negative delay (the clamp in armClockTimers acts only under a broadcast slower than a clock's remaining time: pinned in the block above)`);
   const live = E.createMatch({ timeControl: TC3, roomNumber: 0, startMs: 0 });
   const voided = E.voidMatch(live, 5);
   check(voided !== null && voided.result?.voided === true && E.voidMatch(voided, 6) === null && E.voidMatch(live, -1) === null, 'voidMatch answers null only for a finished match or an instant before the last one, and always sets a result otherwise');

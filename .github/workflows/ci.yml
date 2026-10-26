@@ -134,6 +134,8 @@ jobs:
         # depends on the grace. (Set on the step, not the job: the server inherits it from this shell.)
         # FOUR_FILL_MS (Chaturaji W3) shortens the 4 Player fill wait (30 s) to 8 s for the same reason: the e2e scenario where bots fill the table waits for it. The one
         # scenario that must see the REAL 30 s runs against the second server below, concurrently with the rest, so the production default stays guarded for free.
+        # Bughouse (W2) reads these same two variables (bughouseConfig.ts) - it adds none of its own to any workflow, per CHECKLIST.md section 7 - so the Bughouse real-socket test below
+        # watches a takeover after 1.5 s and fills a lobby after 8 s on this server too.
         env:
           FOUR_GRACE_MS: '1500'
           FOUR_FILL_MS: '8000'
@@ -230,6 +232,30 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:bughouse
 
+      - name: Run the Bughouse room manager tests (one funnel, capture then partner drop, flag ordering with late and early timers, stuck, takeover, void, retention - an injected clock)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseRooms
+
+      - name: Run the Bughouse team chat and quick message tests (every socket's events recorded; only the partner receives; the limits to the millisecond)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseMessages
+
+      - name: Run the Bughouse matchmaker tests (the fill wait, the six time controls, a group that is never split)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseMatchmaking
+
+      - name: Run the Bughouse handler tests (the eleven events, the boundary with the network, queues that never mix with the 4-seat variants)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseHandlers
+
+      - name: Run the Bughouse test-only seed switch tests (default unchanged, ignored in production - also on a real production-mode process -, honoured outside it, no secret or value logged, set nowhere in a workflow)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseTestSwitches
+
+      - name: Run the Bughouse bot tests (the generated copy is legal, makes the app bot's choice, ends whole matches, stays under the decision budget at every tier)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseBot
+
       - name: Run 4 Player engine parity (app engine vs the generated server copy, seeded full games in lockstep)
         working-directory: chess-app/backend
         run: npm run test:fourplayer
@@ -272,6 +298,11 @@ jobs:
         env:
           FOUR_E2E_REAL_FILL_URL: http://localhost:3002
         run: npm run test:fourplayerOnline
+
+      # Bughouse over real sockets (W2): the same dev server (which is why it needs FOUR_GRACE_MS / FOUR_FILL_MS). A new script, so the 4 Player one above keeps its own total.
+      - name: Run the Bughouse Online e2e test (real server, socket.io-client; fill, a whole match, takeover and rejoin, team chat and quick messages on every socket, a match decided on board B)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseOnline
 
       # The app now remembers the online game it is in, so a reload / app kill can rejoin the seat: a REAL new process rejoins with only the saved record
       # (2 players: Classic + Crazyhouse / Duck / Spell / Fog of War state; 4 Player, 4 Player Giveaway and Chaturaji). Needs the same FOUR_GRACE_MS dev server.

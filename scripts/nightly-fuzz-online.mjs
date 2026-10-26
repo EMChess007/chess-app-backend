@@ -42,8 +42,9 @@
  *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
  *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
  *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames]
- * (the others default to the same count as fogGames; fourPlayerGiveawayGames and chaturajiGames default to fourPlayerGames.) BACKEND_URL env var overrides the
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames] [bughouseGames]
+ * (the others default to the same count as fogGames; fourPlayerGiveawayGames, chaturajiGames and bughouseGames default to fourPlayerGames. The Bughouse section is described in
+ * nightly-fuzz-bughouse.mjs and uses the same FOUR_GRACE_MS above.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
  */
 import { writeFileSync } from 'node:fs';
@@ -62,6 +63,7 @@ import { legalMoves, promotionOf, pseudoMoves } from '../../src/logic/fourPlayer
 import { piecesLeft } from '../../src/logic/fourPlayer/giveaway.ts';
 const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf, pseudoMoves, piecesLeft, GIVEAWAY_RULES, CHATURAJI_RULES, geometryOf, PAWN, typeOf };
 import { HORDE_START_FEN, getHordeMoves, getHordeWinnerFromFen } from '../../src/logic/horde.ts';
+import { playBughouseGame } from './nightly-fuzz-bughouse.mjs';
 import { getCrazyhouseMoves, initialCrazyhouseState, RESERVE_PIECE_TYPES } from '../../src/logic/crazyhouse.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
@@ -78,6 +80,8 @@ const CRAZYHOUSE_GAMES = Number(process.argv[10] ?? GAMES);
 const REPETITION_GAMES = Number(process.argv[11] ?? 3);
 // Chaturaji over four real sockets (playFourPlayerGame with variant 'chaturaji'). Last on the command line so the positions of the older arguments never move.
 const CHATURAJI_GAMES = Number(process.argv[12] ?? FOUR_GAMES);
+// Bughouse over four real sockets and a spectator (nightly-fuzz-bughouse.mjs). Last on the command line again.
+const BUGHOUSE_GAMES = Number(process.argv[13] ?? FOUR_GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -1446,6 +1450,30 @@ async function main() {
   }
   allIssues.push(...cjStats.issues.map((i) => ({ ...i, variant: 'chaturaji' })));
 
+  // --- Bughouse ---
+  const bhStats = { games: 0, plies: 0, probes: 0, finished: 0, natural: 0, rejoins: 0, takeovers: 0, resigns: 0, chats: 0, quicks: 0, drops: 0, issues: [] };
+  for (let g = 0; g < BUGHOUSE_GAMES; g++) {
+    try {
+      const { stats, issues } = await playBughouseGame(g, { connect, emitAck, waitFor, until, sleep, randInt, maxPlies: MAX_PLIES });
+      bhStats.games++;
+      bhStats.plies += stats.plies;
+      bhStats.probes += stats.illegalProbes;
+      if (stats.finished) bhStats.finished++;
+      if (stats.naturalEnd) bhStats.natural++;
+      bhStats.rejoins += stats.rejoins;
+      bhStats.takeovers += stats.takeovers;
+      bhStats.resigns += stats.resigns;
+      bhStats.chats += stats.chats;
+      bhStats.quicks += stats.quicks;
+      bhStats.drops += stats.drops;
+      bhStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${BUGHOUSE_GAMES} Bughouse games played`);
+    } catch (err) {
+      bhStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...bhStats.issues.map((i) => ({ ...i, variant: 'bughouse' })));
+
   // --- Horde ---
   const hordeStats = { games: 0, plies: 0, probes: 0, finished: 0, blackWins: 0, issues: [] };
   for (let g = 0; g < HORDE_GAMES; g++) {
@@ -1511,13 +1539,14 @@ async function main() {
   console.log(`4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games, ${fourStats.plies} plies, ${fourStats.probes} illegal/out-of-turn moves correctly refused, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself).`);
   console.log(`4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games, ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal/out-of-turn/quiet-while-capture-mandatory moves correctly refused, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself).`);
   console.log(`Chaturaji: ${cjStats.games}/${CHATURAJI_GAMES} games, ${cjStats.plies} plies, ${cjStats.probes} illegal/out-of-turn/double-step moves correctly refused, ${cjStats.rejoins} disconnect/rejoin cycles (${cjStats.takeovers} bot takeovers observed), ${cjStats.resigns} resignations, ${cjStats.finished} games ended (${cjStats.natural} by the engine itself).`);
+  console.log(`Bughouse: ${bhStats.games}/${BUGHOUSE_GAMES} games, ${bhStats.plies} plies (${bhStats.drops} drops), ${bhStats.probes} illegal/wrong-board/out-of-turn/bad-drop requests correctly refused, ${bhStats.chats} team chat lines and ${bhStats.quicks} quick messages (recipients checked on five sockets), ${bhStats.rejoins} disconnect/rejoin cycles (${bhStats.takeovers} bot takeovers observed), ${bhStats.resigns} resignations, ${bhStats.finished} matches ended (${bhStats.natural} by the engine itself).`);
   console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
   console.log(`Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused, ${czStats.finished} games ended.`);
   console.log(`Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes (${REPETITION_GAMES} each), every one a draw by 'repetition' at exactly the predicted ply.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
 
   const reportLines = [
-    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess + 4 Player Giveaway + Chaturaji + Horde + Crazyhouse)',
+    '# Nightly online fuzz report (Fog of War + Giveaway + Atomic + Duck Chess + 4 Player Chess + 4 Player Giveaway + Chaturaji + Bughouse + Horde + Crazyhouse)',
     '',
     `Run at: ${new Date().toISOString()}`,
     `Server: ${SERVER_URL}`,
@@ -1533,6 +1562,7 @@ async function main() {
     `- 4 Player Chess: ${fourStats.games}/${FOUR_GAMES} games (four real sockets each), ${fourStats.plies} plies, ${fourStats.probes} illegal / out-of-turn moves correctly refused by the server, ${fourStats.rejoins} disconnect/rejoin cycles (${fourStats.takeovers} bot takeovers observed), ${fourStats.resigns} resignations, ${fourStats.finished} games ended (${fourStats.natural} by the engine itself); every seq checked for byte-identical snapshots across all four sockets`,
     `- 4 Player Giveaway: ${fourGaStats.games}/${FOUR_GIVEAWAY_GAMES} games (four real sockets each), ${fourGaStats.plies} plies, ${fourGaStats.probes} illegal / out-of-turn / quiet-while-a-capture-is-mandatory moves correctly refused by the server, ${fourGaStats.rejoins} disconnect/rejoin cycles (${fourGaStats.takeovers} bot takeovers observed), ${fourGaStats.resigns} resignations, ${fourGaStats.finished} games ended (${fourGaStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, pieces-left scores) checked against the app engine`,
     `- Chaturaji: ${cjStats.games}/${CHATURAJI_GAMES} games (four real sockets each, 8 x 8 board), ${cjStats.plies} plies, ${cjStats.probes} illegal / out-of-turn / pawn-double-step moves correctly refused by the server, ${cjStats.rejoins} disconnect/rejoin cycles (${cjStats.takeovers} bot takeovers observed), ${cjStats.resigns} resignations, ${cjStats.finished} games ended (${cjStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, points) checked against the app engine`,
+    `- Bughouse: ${bhStats.games}/${BUGHOUSE_GAMES} games (four real sockets and a spectator each), ${bhStats.plies} plies (${bhStats.drops} drops), ${bhStats.probes} illegal / wrong-board / out-of-turn / bad-drop requests correctly refused by the server, ${bhStats.chats} team chat lines and ${bhStats.quicks} quick messages (the recipients checked on all five sockets), ${bhStats.rejoins} disconnect/rejoin cycles (${bhStats.takeovers} bot takeovers observed), ${bhStats.resigns} resignations, ${bhStats.finished} matches ended (${bhStats.natural} by the engine itself); every seq checked for byte-identical snapshots across the sockets, the conservation invariant on every snapshot, and the game-over checked against the app engine`,
     `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
     `- Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused by the server, ${czStats.finished} games ended`,
     `- Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes, each ended by 'repetition' at exactly the predicted ply on both sockets (Nf3 Nf6 Ng1 Ng8 shuffle)`,

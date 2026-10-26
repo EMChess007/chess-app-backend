@@ -12,3 +12,5 @@ export * from './settle.js';
 export * from './invariants.js';
 export * from './snapshot.js';
 export * from './premove.js';
+export * from './bot.js';
+export * from './wire.js';

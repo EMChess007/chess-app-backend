@@ -74,7 +74,7 @@ const hasExactKeys = (value: Record<string, unknown>, keys: string[]): boolean =
   return own.length === keys.length && keys.every((key) => own.includes(key));
 };
 const SQUARE = /^[a-h][1-8]$/;
-const REASONS: ResultReason[] = ['checkmate', 'flag', 'resign', 'disconnect'];
+const REASONS: ResultReason[] = ['checkmate', 'flag', 'resign'];
 const POCKET_LIMIT = 64;
 
 function parseReserve(value: unknown): Reserve | null {

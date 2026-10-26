@@ -165,7 +165,6 @@ function wellFormed(action: BughouseAction): boolean {
   if (typeof action !== 'object' || action === null) return false;
   switch (action.kind) {
     case 'resign':
-    case 'disconnect':
       return true;
     case 'move':
       return BOARD_IDS.includes(action.board) && typeof action.from === 'string' && SQUARE.test(action.from) && typeof action.to === 'string' && SQUARE.test(action.to) && (action.promotion === undefined || (action.promotion.length === 1 && 'qrbn'.includes(action.promotion)));
@@ -201,8 +200,8 @@ export function applyAction(match: BughouseMatch, seat: BughouseSeat, action: Bu
   if (runningClocks(match).some((clock) => clock.deadline <= nowMs)) return reject('flagDue');
   const place = seatPlace(seat);
 
-  if (action.kind === 'resign' || action.kind === 'disconnect') {
-    const result: MatchResult = { winnerTeam: otherTeam(place.team), reason: action.kind === 'resign' ? 'resign' : 'disconnect', board: place.board, loserSeat: seat };
+  if (action.kind === 'resign') {
+    const result: MatchResult = { winnerTeam: otherTeam(place.team), reason: 'resign', board: place.board, loserSeat: seat };
     const next = finishMatch(match, result, nowMs, nowMs);
     return { ok: true, match: next, events: [{ kind: 'result', seq: next.seq, result }] };
   }

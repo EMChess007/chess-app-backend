@@ -48,13 +48,13 @@ export interface BoardVerdict {
   stuck: StuckReason | null;
 }
 
-export type ResultReason = 'checkmate' | 'flag' | 'resign' | 'disconnect';
+export type ResultReason = 'checkmate' | 'flag' | 'resign';
 
 /** The match was won: the team, how, on which board and by whose loss. */
 export interface DecidedResult {
   winnerTeam: BughouseTeam;
   reason: ResultReason;
-  /** The deciding board: where the mate happened, or the loser's board for a flag, a resignation or a disconnect. */
+  /** The deciding board: where the mate happened, or the loser's board for a flag or a resignation. */
   board: BoardId;
   loserSeat: BughouseSeat;
 }
@@ -76,14 +76,13 @@ export type PromotionPiece = 'q' | 'r' | 'b' | 'n';
 
 /**
  * What a seat can ask for. A move and a drop NAME THEIR BOARD (HP9: every wire field says which board it belongs to); the engine refuses one whose board is not the seat's own.
- * `disconnect` is issued by the server, never by a client: it ends the match like a resignation, with its own reason. (Spec rule 23 has no disconnect loss - the 4-seat model
- * hands a gone seat to a bot - so whether W2 ever issues it is W2's decision; the engine only knows how to record it.)
+ * There is NO disconnect action and no disconnect result (B19, W2): a seat whose human is gone is handed to a bot after the grace and the human can take it back; the only
+ * non-winning end is `voided` (no human left).
  */
 export type BughouseAction =
   | { kind: 'move'; board: BoardId; from: string; to: string; promotion?: PromotionPiece }
   | { kind: 'drop'; board: BoardId; piece: ReservePieceType; square: string }
-  | { kind: 'resign' }
-  | { kind: 'disconnect' };
+  | { kind: 'resign' };
 
 /** One input to the funnel: a seat's action. A timer firing is `null` (it is just a chance to settle flags, HP2). */
 export interface BughouseInput {

@@ -10,8 +10,21 @@ import { SQUARE8, expectedPieceLabel } from './truth.mjs';
 export const PHONE_SMALL = { width: 360, height: 640 };
 export const PHONE_LARGE = { width: 412, height: 915 };
 
+/**
+ * The options `launchBrowser` hands to Playwright, from the environment (a pure function so scripts/test-e2e-browser-options.mjs can pin it).
+ *  - `E2E_BROWSER_PATH`: the executable to run - what a machine without Chrome installed uses (the Linux cloud VM: /opt/pw-browsers/chromium).
+ *    It wins over the channel. An empty value counts as unset.
+ *  - otherwise `E2E_BROWSER_CHANNEL`, default `chrome` (the system Chrome, as on the Windows development machine).
+ *  - `E2E_HEADED=1` shows the window.
+ */
+export function browserLaunchOptions(env = process.env) {
+  const headless = env.E2E_HEADED !== '1';
+  if (env.E2E_BROWSER_PATH) return { executablePath: env.E2E_BROWSER_PATH, headless };
+  return { channel: env.E2E_BROWSER_CHANNEL || 'chrome', headless };
+}
+
 export async function launchBrowser() {
-  return chromium.launch({ channel: process.env.E2E_BROWSER_CHANNEL || 'chrome', headless: process.env.E2E_HEADED !== '1' });
+  return chromium.launch(browserLaunchOptions());
 }
 
 /** A user: a context (own storage), a page, and helpers bound to them. */

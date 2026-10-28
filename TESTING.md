@@ -5,6 +5,15 @@ several places, because some of this backend's own test scripts import the front
 directly (see "Why some backend tests import frontend code" below). This document covers what
 exists in **this repo**; see the frontend's own `TESTING.md` for its half of the picture.
 
+## Cloud sessions (a Linux VM)
+
+All work runs in Claude Code cloud sessions. The setup (`scripts/cloud-setup.sh` in the app repo: Node 20, this repo at `<app>/backend`, PostgreSQL 16 with the `docker-compose.yml` role and database, a test-only `.env`, `npm ci`, Prisma) and the full list of gates with their numbers are in the app's `TESTING.md`, section "Cloud sessions". What belongs to this repo:
+
+- **The browser end-to-end has no system Chrome there.** `E2E_BROWSER_PATH` (an executable; the cloud shell profile sets `/opt/pw-browsers/chromium`) is read by `scripts/e2e-browser/app.mjs` (`browserLaunchOptions`, a pure function), wins over `E2E_BROWSER_CHANNEL` (default `chrome`, the Windows machine's browser) and over nothing else; `npm run test:e2eBrowserOptions` (11 checks, in CI) pins the default, the precedence and the headed flag. It is a knob of the test harness only: it is read by no server or app code, so CHECKLIST.md section 7 has nothing to guard.
+- **A browser that cannot start no longer leaks the stack.** `run.mjs` launched the browser outside its `try`, so a failed launch left the harness's backend running on :3191; it is now inside, and a run with a bad `E2E_BROWSER_PATH` leaves nothing listening on :3191 or :8087.
+- **Docker Hub answers HTTP 429 from the cloud**, so `docker compose up` cannot pull `postgres:16-alpine`; the setup uses the VM's own PostgreSQL 16 (the same major). The dev servers and every real-socket suite run against it exactly as in CI (ports 3000 and 3002).
+- The browser end-to-end passed 11 / 11 with no retry in 346 s on the VM; no other backend suite needed a change.
+
 ## 4 Player Giveaway — roll-up (read this first for the whole feature)
 
 **What it is.** 4-seat Antichess served by the SAME 4 Player machinery as Free-for-All: `FourRoomManager`, the matchmaker and the nine socket handlers. A room carries a `variant` (`'ffa'` | `'giveaway'`); the matchmaker's lobby key is `timeControl|variant`, so the two never mix; the engine mirror

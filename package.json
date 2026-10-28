@@ -21,6 +21,7 @@
     "test:rejoinPersist": "tsx scripts/test-rejoin-persist.mjs",
     "test:userCleanup": "node scripts/test-user-cleanup.mjs",
     "test:e2eBrowser": "tsx scripts/e2e-browser/run.mjs",
+    "test:e2eBrowserOptions": "tsx scripts/test-e2e-browser-options.mjs",
     "test:authRateLimit": "tsx scripts/test-auth-rate-limit.mjs",
     "test:fourTestSwitches": "tsx scripts/test-four-test-switches.mjs",
     "test:attemptLimiter": "tsx scripts/test-attempt-limiter.mjs",

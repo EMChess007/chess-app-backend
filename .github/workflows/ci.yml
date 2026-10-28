@@ -336,6 +336,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:trustProxy
 
+      - name: Run the browser end-to-end launch-option tests (E2E_BROWSER_PATH, the Chrome channel default, headed; no browser is started)
+        working-directory: chess-app/backend
+        run: npm run test:e2eBrowserOptions
+
       - name: Production-style install and build (NODE_ENV=production skips devDependencies - the build must not need one)
         working-directory: chess-app/backend
         run: npm run check:productionInstall

@@ -13,3 +13,9 @@ Use the Edit / Write tools for every file change. If a change really needs a pro
 - A check whose count depends on what an unseeded server did is `checkConditional`, not `check`: the printed total of `test:fourplayerOnline` is the same on every run.
 - The e2e and browser suites never touch :3000 / :8081 / :8082 or the deployed backend, use the local database only, delete the accounts they register, and kill only processes they started (prove the PID and the command line first). Playwright's `routeWebSocket` must be installed BEFORE the page's first load.
 - `src/game/fourPlayer/*` is GENERATED from the app source (`npm run sync:fourplayer`): never edit it here.
+
+# Cloud sessions (a Linux VM; the app repo's TESTING.md, "Cloud sessions")
+
+- Work runs in Claude Code cloud sessions: this repo lives at `<app>/backend` (the layout the test scripts import through); start a session with `bash scripts/cloud-setup.sh` from the app repo (idempotent; it also starts the local PostgreSQL).
+- The laptop-only rules above (never :3000 / :8081 / :8082) still apply when a session runs on the laptop; in the cloud use any free port, but never the deployed backend, Neon or Render.
+- Never commit the VM's `.env` (test-only values, git-ignored); a real `.env` is never asked for, read or printed. The browser end-to-end there runs with `E2E_BROWSER_PATH` (Playwright's Chromium; no system Chrome).

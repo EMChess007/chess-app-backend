@@ -490,9 +490,11 @@ const SCENARIOS = {
 
 async function main() {
   const stack = await startStack({ webDir: process.env.E2E_WEBDIR, log });
-  const browser = await launchBrowser();
+  let browser = null;
   let failed = false;
   try {
+    // Inside the try: a browser that cannot start must still stop the backend and the web server this run started (they used to be left running).
+    browser = await launchBrowser();
     for (const [key, scenario] of Object.entries(SCENARIOS)) {
       if (only.length && !only.some((o) => key === o || key.startsWith(o))) continue;
       console.log(`\n=== ${key}. ${scenario.name} ===`);
@@ -533,7 +535,7 @@ async function main() {
       }
     }
   } finally {
-    await browser.close().catch(() => {});
+    await browser?.close().catch(() => {});
     const cleanup = await stack.tracker.cleanup();
     await stack.stop();
     console.log(`\naccounts deleted: ${cleanup.deleted} (left: ${cleanup.remaining})`);

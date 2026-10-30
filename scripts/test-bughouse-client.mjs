@@ -198,6 +198,8 @@ async function main() {
         const view = viewOf(p);
         if (!view || isOver(view) || p.session.state.connection !== 'connected' || view.pending !== null || view.resyncing) continue;
         if (view.match.seq <= p.sentAtSeq) continue; // the position this client last acted on has not moved on yet
+        // a person is not faster than the server's rate limit (10 actions a second per seat): when the two clients are OPPONENTS on one board they would otherwise answer each other every 20 ms
+        if (Date.now() - (p.sentAt ?? 0) < 150) continue;
         if (p.actions >= MAX_ACTIONS_EACH) {
           if (resignedBy === null && p === players[1]) {
             resignedBy = p.name;
@@ -208,6 +210,7 @@ async function main() {
         const action = pickAction(view.match, view.mySeat);
         if (action === null) continue;
         p.sentAtSeq = view.match.seq;
+        p.sentAt = Date.now();
         p.actions++;
         p.session.sendAction(action);
       }
@@ -233,7 +236,7 @@ async function main() {
     checkConditional(['checkmate', 'flag', 'resign'].includes(result.reason), `the game ended by ${result.reason} (board ${result.board}, team ${result.winnerTeam} wins)`);
     checkConditional(players.every((p) => p.actions > 0), `both clients played (${players.map((p) => `${p.name} ${p.actions} actions`).join(', ')})`);
     const refused = players.flatMap((p) => p.lines.filter((l) => /refused/.test(l)));
-    checkConditional(refused.length === 0 || refused.every((l) => /notYourTurn|time|over/.test(l)), `refusals, if any, were only races with the clock or the turn (${refused.length})`);
+    checkConditional(refused.length === 0 || refused.every((l) => /notYourTurn|time|over/.test(l)), `refusals, if any, were only races with the clock or the turn (${refused.length}: ${[...new Set(refused)].join(' | ')})`);
     const parsed = deserializeMatch(lastWatched.state);
     check(parsed.ok && parsed.match.result !== null, 'the last snapshot parses and carries the result');
     console.log(`\n${passed} checks passed (${conditional} conditional, counted apart)`);

@@ -28,6 +28,7 @@ import { emitWithin } from '../../src/api/socketAck.ts';
 import { validateBugJoinQueue } from '../../src/logic/bughouse/wire.ts';
 import { BughouseOnlineSession } from '../../src/logic/bughouseOnlineSession.ts';
 import { isOver, resultOf } from '../../src/logic/bughouseOnline.ts';
+import { partnerOf } from '../../src/logic/bughouse/types.ts';
 
 const BACKEND = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.BUGHOUSE_CLIENT_TEST_PORT ?? 3193);
@@ -170,6 +171,39 @@ async function main() {
     const viewOf = (p) => p.session.state.view;
     check(players.every((p) => viewOf(p) !== null && viewOf(p).mySeat === p.match.seat && p.session.state.connection === 'connected'), 'each session starts on its own seat, connected, from the match_found snapshot');
 
+    // --- W4b: a spectator SESSION (the app's class, no seat) and the team messages -------------------------------------------------------
+    const spectatorSocket = await connect('S2');
+    sockets.push(spectatorSocket);
+    const heard = { chat: 0, quick: 0 };
+    spectatorSocket.on('bug_chat_from', () => heard.chat++);
+    spectatorSocket.on('bug_quick_from', () => heard.quick++);
+    spectator.on('bug_chat_from', () => heard.chat++);
+    spectator.on('bug_quick_from', () => heard.quick++);
+    const watching = new BughouseOnlineSession(spectatorSocket, { spectate: { roomId } }, { now: () => Date.now(), moveSound: () => undefined, gameEnded: () => undefined, log: () => undefined });
+    watching.start();
+    await until('the spectator session to hold the room', () => watching.state.view !== null && watching.state.connection === 'connected');
+    check(watching.state.view.spectator === true && watching.state.view.roomId === roomId, 'a spectator SESSION reads the room through bug_spectate_game and holds no seat');
+    watching.sendAction({ kind: 'move', board: 'A', from: 'e2', to: 'e4' });
+    const refusedChat = await new Promise((resolve) => watching.sendChat('hello', resolve));
+    check(refusedChat === 'The game is over.', 'a spectator session sends no chat line (nothing leaves the client)');
+    const [x, y] = players;
+    const partnersAreHuman = partnerOf(x.match.seat) === y.match.seat;
+    const quickOutcome = await new Promise((resolve) => x.session.sendQuick(3, resolve));
+    const chatOutcome = await new Promise((resolve) => x.session.sendChat('  take the knight  ', resolve));
+    if (partnersAreHuman) {
+      checkConditional(quickOutcome === null && chatOutcome === null, 'X and Y are partners: the quick message and the chat line are accepted');
+      await until('Y to receive both', () => y.session.state.quick !== null && y.session.state.chat.length === 1);
+      checkConditional(y.session.state.quick.text ==='Need a queen' && y.session.state.quick.seat === x.match.seat, "Y's toast says what X sent, from X's seat");
+      checkConditional(y.session.state.chat[0].text ==='take the knight' && y.session.state.chat[0].mine === false, 'Y reads the line, trimmed, as not mine');
+      checkConditional(x.session.state.chat.length === 1 && x.session.state.chat[0].mine === true && x.session.state.quick === null, "X sees the echo of the chat line as mine and no quick message of its own");
+    } else {
+      checkConditional(quickOutcome === 'Your partner is a bot.' && chatOutcome === 'Your partner is a bot.', "X's partner is a bot: both are refused in words, nothing is delivered");
+      checkConditional(y.session.state.quick === null && y.session.state.chat.length === 0, 'Y (an opponent) receives nothing');
+    }
+    await sleep(300);
+    check(heard.chat === 0 && heard.quick === 0, 'neither spectator socket was sent a chat line or a quick message');
+    check(watching.state.chat.length === 0 && watching.state.quick === null, 'the spectator session shows none');
+
     // --- play -------------------------------------------------------------------------------------------------------------------------
     let dropped = false;
     let rejoinChecked = false;
@@ -224,6 +258,9 @@ async function main() {
     const finals = players.map((p) => serializeMatch(viewOf(p).match));
     const lastWatched = watched.states[watched.states.length - 1];
     check(finals[0] === finals[1], 'both clients hold the very same final match, byte for byte');
+    await until('the spectator session to hold the result', () => isOver(watching.state.view), 10_000);
+    check(serializeMatch(watching.state.view.match) === finals[0] || resultOf(watching.state.view) !== null, 'the spectator SESSION followed the game to its result');
+    check(resultOf(watching.state.view) !== null && JSON.stringify(resultOf(watching.state.view)) === JSON.stringify(resultOf(viewOf(players[0]))), 'and shows the same result as the players');
     check(lastWatched !== undefined && finals[0] === lastWatched.state, "and it is the last snapshot the spectator was sent (the server's own)");
     const result = resultOf(viewOf(players[0]));
     check(result !== null && JSON.stringify(result) === JSON.stringify(resultOf(viewOf(players[1]))), 'both clients show the same result');

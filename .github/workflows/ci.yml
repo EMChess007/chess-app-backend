@@ -296,6 +296,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:e2eBrowserOptions
 
+      - name: Run the security-audit guard tests (the workflow stays a bare npm audit, weekly, Dependabot grouped, the fixed versions in the lock; the audit itself is the security-audit job)
+        working-directory: chess-app/backend
+        run: npm run test:securityAudit
+
       - name: Production-style install and build (NODE_ENV=production skips devDependencies - the build must not need one)
         working-directory: chess-app/backend
         run: npm run check:productionInstall

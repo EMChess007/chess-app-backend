@@ -59,3 +59,16 @@ was called "done" — don't repeat that on anything else.
   tests for: the default unchanged, ignored in production, honoured outside it, no secret read or logged.
 - **Auth rate-limit override absent/ignored in production**: `AUTH_RATE_LIMIT_TEST_OVERRIDE`
   (`src/lib/authRateLimit.ts`); `npm run test:authRateLimit` pins all of the above (CI runs it).
+
+## 8. Zero known vulnerabilities in the dependencies (command #31): "done" means `security-audit` is green
+- **No report may say "done", "ready" or "green" unless the `security-audit` check (`.github/workflows/security-audit.yml`, here and in the app repo) is green on the FINAL commit** of the branch, with the
+  run's link in the report. It runs `npm ci` and a bare `npm audit`: every severity (low included), production AND development dependencies, no `--omit`, no `--audit-level`, no `continue-on-error`. It also
+  runs every Monday, because a new advisory against a package we already ship needs no commit of ours.
+- "Accepted risk" does not exist. A red run is fixed, in this order: (a) upgrade the direct dependency to a fixed version; (b) an npm `overrides` pin of the transitive package, after the suites pass with
+  it; (c) remove the dependency, or replace it with a maintained one that does the same job; (d) a minimal reviewed patch (`patch-package`) or a vendored copy, with a test that proves the vulnerable
+  path is closed. If none of them works without breaking the server, STOP and report that one item with the concrete options. Never `npm audit fix --force` (a test scans for it).
+- `npm run test:securityAudit` pins the guard's shape (the job, its bare audit, the weekly schedule, the grouped Dependabot config, the fixed versions in the lock; CI runs it), so it cannot be weakened
+  quietly. Dependabot SECURITY updates are grouped into one pull request (`.github/dependabot.yml`); version updates stay off.
+- Install scripts are decided, not ignored: npm 11 skips a dependency's install script unless `allowScripts` in `package.json` says so, and warns about every package it has no entry for. A new package
+  with an install script gets a reviewed entry (`npm install-scripts approve <pkg>` or `deny`), and `npm ci` must print no "install scripts not yet covered" warning.
+- A secret that ever reached git is rotated by the owner, not "removed": the history is scanned (gitleaks) and a finding is reported by file and rule, never by value.

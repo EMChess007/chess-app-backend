@@ -61,6 +61,7 @@
     "test:fourplayerChaturaji": "tsx scripts/test-fourplayer-chaturaji.mjs",
     "duck-opponent": "tsx scripts/duck-opponent.mjs",
     "spell-opponent": "tsx scripts/spell-opponent.mjs",
+    "test:securityAudit": "node scripts/test-security-audit.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },

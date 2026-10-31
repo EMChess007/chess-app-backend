@@ -1080,6 +1080,9 @@ async function testChaturajiBotsFillTheTable() {
   check(botMoves >= 6, 'the bots played at least 6 moves between the humans\' moves');
   check(humanMoves >= 1, 'the humans moved when it was their turn (every one of those moves was accepted: see the conditional checks above)');
   console.log(`      (${humanMoves} human moves, ${botMoves} bot moves in this run)`);
+  // The last bot move is broadcast to the two humans' sockets one after the other: comparing their latest snapshots the instant the first one holds it read a stale one on a slow runner
+  // (command #31: red on the push run, green on the pull-request run of the same commit). The wait ends on the condition (both hold the same seq); its bound only turns a hang into a failure.
+  await until('both humans hold the same latest state', () => new Set(humanSeats.map((s) => latestOf(mine(s)).seq)).size === 1, 8000);
   check(new Set(humanSeats.map((s) => latestOf(mine(s)).text)).size === 1, 'both humans hold the identical snapshot');
 
   // both humans resign: the bots finish the game on their own, fast-forwarded, and the humans are told how it ended

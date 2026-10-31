@@ -1,0 +1,25 @@
+# Dependabot SECURITY updates, grouped (command #31, CHECKLIST.md section 8).
+# - Version updates are OFF (open-pull-requests-limit: 0): the server's dependencies move when a change needs them, with the whole suite behind it.
+# - Security updates stay ON for the repo (Settings > Code security > Dependabot security updates) and all the fixes of one run are ONE pull request (the group below), not one per package.
+# - GitHub Actions are covered the same way.
+# A Dependabot pull request still has to pass the whole CI and `security-audit`; nothing here merges by itself.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    groups:
+      npm-security:
+        applies-to: security-updates
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    groups:
+      actions-security:
+        applies-to: security-updates
+        patterns: ['*']

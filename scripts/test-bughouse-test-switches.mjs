@@ -121,7 +121,8 @@ ok(resolveBugRoomTtlMs({ NODE_ENV: 'test', BUGHOUSE_ROOM_TTL_TEST_MS: '1000' }) 
   const config = read('src/game/bughouseConfig.ts');
   const configReads = [...new Set([...config.matchAll(/envMsOverride\(env, '([A-Z_]+)'/g)].map((m) => m[1]))].sort();
   ok(JSON.stringify(configReads) === JSON.stringify(['FOUR_FILL_MS', 'FOUR_GRACE_MS']) && !/BUGHOUSE_(FILL|GRACE)_MS/.test(config.replace(/\/\*[\s\S]*?\*\//g, '')), '(d) bughouseConfig.ts reads only the 4-seat games\' two existing overrides: Bughouse adds no timing variable');
-  const allowed = new Set(['src/game/bughouseTestSwitches.ts', 'scripts/test-bughouse-test-switches.mjs', 'TESTING.md', 'CHECKLIST.md', 'AGENTS.md']);
+  // (W8, command #34: the browser suite's stack sets the seed on ITS OWN backend child process - stack.mjs - and the suite's header names it; no workflow, `.env.example` or deployment config may)
+  const allowed = new Set(['src/game/bughouseTestSwitches.ts', 'scripts/test-bughouse-test-switches.mjs', 'scripts/e2e-browser/stack.mjs', 'scripts/e2e-browser/bughouse-w8.mjs', 'TESTING.md', 'CHECKLIST.md', 'AGENTS.md']);
   const hits = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {

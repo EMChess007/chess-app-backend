@@ -131,6 +131,17 @@ jobs:
         run: npm run test:e2eBrowser
         continue-on-error: true
 
+      # Bughouse browser end-to-end (W4 + W8, command #34): the REAL app in Chrome against a private copy of this server. W4 is one game of two humans; W8 is the rest of the flow (FOUR humans on four
+      # pages with every position compared on all of them, orientation, quick messages and team chat that only the partner gets, a reload, a bot takeover and the hand-back, a spectator page,
+      # the friend flow on two pages). Seeded (the suite seeds its own server process; nothing is set here), about 6 minutes; each scenario may repeat once.
+      - name: Browser end-to-end (Bughouse W4 + W8)
+        id: bughouse_browser
+        working-directory: chess-app/backend
+        run: |
+          npm run test:e2eBrowserBughouse
+          npm run test:e2eBrowserBughouseW8
+        continue-on-error: true
+
       - name: Upload fuzz reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -142,7 +153,7 @@ jobs:
           retention-days: 90
 
       - name: Fail the job if either fuzz run or the browser end-to-end failed
-        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.bughouse_sockets.outcome == 'failure' || steps.browser_e2e.outcome == 'failure'
+        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.bughouse_sockets.outcome == 'failure' || steps.browser_e2e.outcome == 'failure' || steps.bughouse_browser.outcome == 'failure'
         run: exit 1
 
       - name: Open/update a tracking issue on failure

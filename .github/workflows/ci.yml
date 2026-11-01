@@ -104,6 +104,11 @@ jobs:
         working-directory: chess-app/backend
         run: npm ci
 
+      # Command #33: BEFORE any manual generate. A bare `npm ci` must leave a working Prisma client (the owner's laptop once got "@prisma/client did not initialize yet") and a server that starts.
+      - name: A bare npm ci leaves a working Prisma client and a server that starts (no manual prisma generate)
+        working-directory: chess-app/backend
+        run: npm run check:cleanInstall
+
       - name: Generate Prisma client and apply migrations
         working-directory: chess-app/backend
         run: |

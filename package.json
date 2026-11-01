@@ -66,6 +66,8 @@
     "spell-opponent": "tsx scripts/spell-opponent.mjs",
     "test:securityAudit": "node scripts/test-security-audit.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
+    "check:cleanInstall": "node scripts/check-clean-install.mjs",
+    "postinstall": "node scripts/prisma-generate.mjs",
     "prepare": "node scripts/install-hooks.mjs"
   },
   "dependencies": {

@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { io } from 'socket.io-client';
-import { BUGHOUSE_TEST_SEED_MAX, mulberry32, resolveBughouseTestSeed, seededBughouseDeps } from '../src/game/bughouseTestSwitches.ts';
+import { BUGHOUSE_ROOM_TTL_MAX_MS, BUGHOUSE_ROOM_TTL_MIN_MS, BUGHOUSE_ROOM_TTL_VAR, BUGHOUSE_TEST_SEED_MAX, mulberry32, resolveBughouseTestSeed, resolveBugRoomTtlMs, seededBughouseDeps } from '../src/game/bughouseTestSwitches.ts';
 import { killTree, portIsFree, sleep } from './e2e-browser/stack.mjs';
 
 let passed = 0;
@@ -83,12 +83,38 @@ ok(resolveBughouseTestSeed({ NODE_ENV: 'test', BUGHOUSE_TEST_SEED: '1' }) === 1 
   ok(shuffleDraw !== botDraw, '(c) the bot and shuffle streams of one seed start differently (seed + 1, seed + 2)');
 }
 
+// --- W6: the room-life override (BUGHOUSE_ROOM_TTL_TEST_MS) -----------------------------------------------------------------------------
+ok(BUGHOUSE_ROOM_TTL_MIN_MS === 1000 && BUGHOUSE_ROOM_TTL_MAX_MS === 600000 && BUGHOUSE_ROOM_TTL_VAR === 'BUGHOUSE_ROOM_TTL_TEST_MS', 'pinned: the room life override is 1000..600000 ms and named BUGHOUSE_ROOM_TTL_TEST_MS');
+{
+  const w = warnings();
+  ok(resolveBugRoomTtlMs({}, w.warn) === 600000 && w.list.length === 0, '(a) no variable: the production life (10 minutes), no warning');
+}
+{
+  const w = warnings();
+  ok(resolveBugRoomTtlMs({ NODE_ENV: 'production', BUGHOUSE_ROOM_TTL_TEST_MS: '4321' }, w.warn) === 600000, '(b) NODE_ENV=production + the override set: ignored');
+  ok(w.list.length === 1 && w.list[0].includes('BUGHOUSE_ROOM_TTL_TEST_MS') && w.list[0].includes('production') && !w.list[0].includes('4321'), '(b) exactly one warning that names the variable and production and does not print the value');
+}
+for (const nodeEnv of ['test', 'development', undefined]) {
+  const w = warnings();
+  ok(resolveBugRoomTtlMs({ NODE_ENV: nodeEnv, BUGHOUSE_ROOM_TTL_TEST_MS: '4321' }, w.warn) === 4321 && w.list.length === 0, `(c) NODE_ENV=${nodeEnv}: the override is honoured, no warning`);
+}
+ok(resolveBugRoomTtlMs({ NODE_ENV: 'test', BUGHOUSE_ROOM_TTL_TEST_MS: '1000' }) === 1000 && resolveBugRoomTtlMs({ NODE_ENV: 'test', BUGHOUSE_ROOM_TTL_TEST_MS: '600000' }) === 600000, '(c) the bounds 1000 and 600000 are accepted');
+{
+  const reference = warnings();
+  resolveBugRoomTtlMs({ NODE_ENV: 'test', BUGHOUSE_ROOM_TTL_TEST_MS: 'reference-value' }, reference.warn);
+  ok(reference.list.length === 1 && reference.list[0].includes('BUGHOUSE_ROOM_TTL_TEST_MS') && !reference.list[0].includes('reference-value'), '(c) a bad value gets one warning that names the variable and not the value');
+  for (const bad of ['', ' 5000', '5e3', '0x10', '-5000', '0', '999', '600001', '1.5', '99999999999', 'abc', 'Infinity']) {
+    const w = warnings();
+    ok(resolveBugRoomTtlMs({ NODE_ENV: 'test', BUGHOUSE_ROOM_TTL_TEST_MS: bad }, w.warn) === 600000 && w.list.length === 1 && w.list[0] === reference.list[0], `(c) "${bad}" is no life: ignored (it can shorten the life, never lengthen it or switch expiry off), one fixed warning`);
+  }
+}
+
 // --- (d) the module and where the variable may appear ------------------------------------------------------------------------------------
 {
   const source = read('src/game/bughouseTestSwitches.ts');
   const code = source.split('\n').filter((l) => !l.trim().startsWith('*') && !l.trim().startsWith('/**') && !l.trim().startsWith('//')).join('\n');
   const reads = [...new Set([...code.matchAll(/\benv\.([A-Za-z_]+)/g)].map((m) => m[1]))].sort();
-  ok(JSON.stringify(reads) === JSON.stringify(['BUGHOUSE_TEST_SEED', 'NODE_ENV']), `(d) the module reads exactly two variables: ${reads.join(', ')}`);
+  ok(JSON.stringify(reads) === JSON.stringify(['BUGHOUSE_ROOM_TTL_TEST_MS', 'BUGHOUSE_TEST_SEED', 'NODE_ENV']), `(d) the module reads exactly three variables (the seed, W6's room-life override, NODE_ENV): ${reads.join(', ')}`);
   ok(!/process\.env\b(?!\))/.test(code.replace(/env: Env = process\.env/g, '')) && !/JWT|SECRET|DATABASE|PASSWORD|TOKEN/i.test(code), '(d) process.env only as default parameters; no secret-like name');
   const index = read('src/index.ts');
   ok(/registerBughouseHandlers\(io, seededBughouseDeps\(resolveBughouseTestSeed\(\)\)\);/.test(index), 'the wiring: index.ts takes the deps from seededBughouseDeps(resolveBughouseTestSeed()) and adds nothing else');
@@ -110,6 +136,22 @@ ok(resolveBughouseTestSeed({ NODE_ENV: 'test', BUGHOUSE_TEST_SEED: '1' }) === 1 
   walk('');
   const stray = hits.filter((rel) => !allowed.has(rel));
   ok(stray.length === 0, `(d) BUGHOUSE_TEST_SEED appears nowhere but the module, its test and the docs (stray: ${stray.join(', ') || 'none'})`);
+  // W6: the same for the room-life override (the friend-room tests name it too: they set it on the child process they start)
+  const ttlAllowed = new Set([...allowed, 'scripts/test-bughouse-friend-rooms.mjs', 'scripts/test-bughouse-friend-online.mjs']);
+  const ttlHits = [];
+  const walkTtl = (dir) => {
+    for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist') continue;
+      const rel = dir ? `${dir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walkTtl(rel);
+      else if (/\.(ts|mjs|js|cjs|json|ya?ml|md|env|example|toml|sh|txt)$/.test(entry.name) || entry.name.startsWith('.env')) {
+        if (fs.readFileSync(path.join(root, rel), 'utf8').includes('BUGHOUSE_ROOM_TTL_TEST_MS')) ttlHits.push(rel);
+      }
+    }
+  };
+  walkTtl('');
+  const strayTtl = ttlHits.filter((rel) => !ttlAllowed.has(rel));
+  ok(strayTtl.length === 0, `(d) BUGHOUSE_ROOM_TTL_TEST_MS appears nowhere but the module, the tests and the docs - in no workflow, .env.example or deployment config (stray: ${strayTtl.join(', ') || 'none'})`);
   for (const wf of ['ci.yml', 'nightly.yml']) ok(!/BUGHOUSE_TEST_|BUGHOUSE_FILL|BUGHOUSE_GRACE/.test(read(`.github/workflows/${wf}`)), `.github/workflows/${wf} sets no Bughouse variable`);
   ok(!/BUGHOUSE_/.test(read('.env.example')), '.env.example does not mention them');
 }
@@ -121,7 +163,7 @@ async function boot(extraEnv) {
   const lines = [];
   const env = { ...process.env, PORT: String(port), ...extraEnv };
   for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
-  for (const key of ['BUGHOUSE_TEST_SEED', 'FOUR_TEST_SEED', 'FOUR_TEST_SETUP_ENDPOINT', 'AUTH_RATE_LIMIT_TEST_OVERRIDE', 'FOUR_FILL_MS', 'FOUR_GRACE_MS']) if (!(key in extraEnv)) delete env[key];
+  for (const key of ['BUGHOUSE_TEST_SEED', 'BUGHOUSE_ROOM_TTL_TEST_MS', 'FOUR_TEST_SEED', 'FOUR_TEST_SETUP_ENDPOINT', 'AUTH_RATE_LIMIT_TEST_OVERRIDE', 'FOUR_FILL_MS', 'FOUR_GRACE_MS']) if (!(key in extraEnv)) delete env[key];
   const child = spawn(process.execPath, [path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'src/index.ts'], {
     cwd: root,
     env,
@@ -161,8 +203,10 @@ async function pairSeats(port) {
 }
 
 {
-  const prod = await boot({ NODE_ENV: 'production', BUGHOUSE_TEST_SEED: '31337' });
+  const prod = await boot({ NODE_ENV: 'production', BUGHOUSE_TEST_SEED: '31337', BUGHOUSE_ROOM_TTL_TEST_MS: '4321' });
   try {
+    const ttl = prod.lines.filter((l) => l.includes('BUGHOUSE_ROOM_TTL_TEST_MS'));
+    ok(ttl.length === 1 && ttl[0].includes('production') && !prod.lines.some((l) => l.includes('4321')), '(b) a REAL production-mode server logged exactly one warning for the room-life override and never its value');
     const mine = prod.lines.filter((l) => l.includes('BUGHOUSE_TEST_SEED'));
     ok(mine.length === 1 && mine[0].includes('production'), `(b) a REAL server started with NODE_ENV=production and the variable set logged exactly one warning at startup: ${mine[0]?.slice(0, 60)}`);
     ok(!prod.lines.some((l) => l.includes('31337')), '(b) ...and no line printed the value');

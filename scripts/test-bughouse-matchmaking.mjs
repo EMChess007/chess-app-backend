@@ -254,7 +254,7 @@ console.log('\n=== 6. The seam for friend pairs (HP11, W6): a group is never spl
   check(matchmaker.isQueued('P4') && matchmaker.isQueued('P5') && matchmaker.size() === 2, '...the pair stays queued together');
   check(updates.at(-1).queued === 2 && updates.at(-1).fillInMs === 30_000, '...with a fresh countdown (two humans)');
   matchmaker.leave('P4');
-  check(matchmaker.isQueued('P5') && matchmaker.size() === 1 && clock.live.size === 0, 'one member of a pair leaving leaves the other queued alone (W6 decides what a broken pair means); the countdown stops');
+  check(!matchmaker.isQueued('P5') && !matchmaker.isQueued('P4') && matchmaker.size() === 0 && clock.live.size === 0, 'W6: one member of a pair leaving cancels the WHOLE pair entry (a pair is never split); the countdown stops');
 }
 {
   const { matchmaker } = setup();
@@ -343,10 +343,8 @@ console.log('\n=== 8. Survivors of the first mutation run, killed ===');
   const e = (n) => ({ socketId: `P${n}`, userId: null, name: `P${n}`, timeControl: TC });
   matchmaker.joinGroup([e(4), e(5)]);
   matchmaker.leave('P4');
-  const lobby = [...matchmaker.lobbies.values()][0];
-  check(lobby.groups.length === 1 && lobby.groups[0].members.length === 1, 'one member of a pair leaving leaves a group of one');
-  matchmaker.leave('P5');
-  check(matchmaker.lobbies.size === 0, '...and the last member leaving removes the lobby (an empty group is not kept)');
+  check(matchmaker.lobbies.size === 0 && matchmaker.socketToKey.size === 0, 'W6: one member of a pair leaving removes the pair, and the empty lobby with it (no group of one is left behind)');
+  check(matchmaker.leave('P5') === false, '...and the other friend is no longer queued, so their own leave is a no-op');
 }
 {
   // a fill callback of a lobby that is no longer THE lobby of its key starts nothing, however many humans it still lists
@@ -386,6 +384,109 @@ console.log('\n=== 8. Survivors of the first mutation run, killed ===');
   const told = updates.filter((u) => u.at === clock.now());
   check(told.length === 2 && told.every((u) => u.queued === 2 && u.fillInMs === 30_000), 'at the moment the start failed both humans were told again (queued 2, a fresh 30 s countdown)');
   void state;
+}
+
+console.log('\n=== 7. W6: groups in the matchmaker - team-aware seats, every shuffle enumerated, a broken pair ===');
+{
+  /** A scripted random source: returns the given numbers in order (then 0), so each outcome of a placement can be forced and enumerated. */
+  const scripted = (values) => {
+    const queue = [...values];
+    return () => (queue.length > 0 ? queue.shift() : 0);
+  };
+  const e = (n) => ({ socketId: `P${n}`, userId: `u${n}`, name: `P${n}`, timeControl: TC });
+  const names = (start) => start.seats.map((s) => (s.kind === 'human' ? s.socketId : 'bot'));
+
+  // 7a. a pair and nothing else: after the fill wait the pair takes seats 0 + 3 and the bots 1 + 2; the coin decides WHICH friend is on which seat
+  for (const [coin, expected] of [[0, 'P1,bot,bot,P2'], [1, 'P2,bot,bot,P1']]) {
+    const { matchmaker, starts, clock } = setup({ randomInt: scripted([coin]) });
+    matchmaker.joinGroup([e(1), e(2)]);
+    check(clock.live.size === 1, 'a pair alone starts the fill clock AT ONCE (it counts as two humans)');
+    clock.advance(30_000);
+    check(starts.length === 1 && names(starts[0]).join() === expected, `pair + 2 bots, coin ${coin}: seats ${expected} (the friends are teammates 0 + 3, never partnered with a bot)`);
+  }
+
+  // 7b. pair + one solo + a bot: the other team (1, 2) is the solo and the bot in either order
+  for (const [coin, shuffle, expected] of [[0, 0, 'P1,bot,P3,P2'], [0, 1, 'P1,P3,bot,P2'], [1, 0, 'P2,bot,P3,P1'], [1, 1, 'P2,P3,bot,P1']]) {
+    const { matchmaker, starts, clock } = setup({ randomInt: scripted([coin, shuffle]) });
+    matchmaker.joinGroup([e(1), e(2)]);
+    matchmaker.join(e(3));
+    clock.advance(30_000);
+    check(starts.length === 1 && names(starts[0]).join() === expected, `pair + solo + bot, coin ${coin}, shuffle ${shuffle}: seats ${expected}`);
+  }
+
+  // 7c. pair + two solos: four humans start AT ONCE; the solos take 1 + 2 in either order
+  for (const [coin, shuffle, expected] of [[0, 0, 'P1,P4,P3,P2'], [0, 1, 'P1,P3,P4,P2'], [1, 1, 'P2,P3,P4,P1']]) {
+    const { matchmaker, starts, clock } = setup({ randomInt: scripted([coin, shuffle]) });
+    matchmaker.join(e(3));
+    matchmaker.joinGroup([e(1), e(2)]);
+    matchmaker.join(e(4));
+    check(starts.length === 1 && starts[0].at === clock.now() && names(starts[0]).join() === expected, `solo, pair, solo, coin ${coin}, shuffle ${shuffle}: started at once, seats ${expected} (the pair is 0 + 3 whatever the arrival order)`);
+  }
+
+  // 7d. pair + pair: the pair that WAITED LONGER takes 0 + 3, the second 1 + 2
+  for (const [coins, expected] of [[[0, 0], 'P1,P3,P4,P2'], [[1, 0], 'P2,P3,P4,P1'], [[0, 1], 'P1,P4,P3,P2'], [[1, 1], 'P2,P4,P3,P1']]) {
+    const { matchmaker, starts, clock } = setup({ randomInt: scripted(coins) });
+    matchmaker.joinGroup([e(1), e(2)]);
+    clock.advance(10_000);
+    matchmaker.joinGroup([e(3), e(4)]);
+    check(starts.length === 1 && names(starts[0]).join() === expected, `pair + pair, coins ${coins.join('')}: the earlier pair is 0 + 3 (${expected})`);
+  }
+  {
+    const { matchmaker, starts } = setup({ randomInt: scripted([0, 0]) });
+    matchmaker.joinGroup([e(3), e(4)]);
+    matchmaker.joinGroup([e(1), e(2)]);
+    check(names(starts[0]).join() === 'P3,P1,P2,P4', 'the pair that queued first takes 0 + 3 even though its ids sort later');
+  }
+
+  // 7e. no pair: the plain shuffle is unchanged (every human and bot seat is reachable) - section 5 above enumerates it; one spot check here
+  {
+    const { matchmaker, starts } = setup({ randomInt: scripted([0, 0, 0]) });
+    for (const n of [1, 2, 3, 4]) matchmaker.join(e(n));
+    check(starts.length === 1 && starts[0].seats.filter((s) => s.kind === 'human').length === 4, 'four solos still start at once and are shuffled as before');
+  }
+
+  // 7f. placeGroups directly: a pair is never split across teams for ANY random source
+  {
+    let teamsOk = true;
+    for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let c = 0; c < 2; c++) {
+      const seq = [a, b, c];
+      const seats = placeGroups(
+        [{ members: [e(1), e(2)].map((m) => ({ ...m, joinedAt: 0 })) }, { members: [{ ...e(3), joinedAt: 0 }] }],
+        scripted(seq)
+      );
+      const at = (id) => seats.findIndex((s) => s.socketId === id);
+      const mates = (x, y) => at(x) + at(y) === 3;
+      if (!mates('P1', 'P2') || at('P3') < 1 || at('P3') > 2) teamsOk = false;
+    }
+    check(teamsOk, 'for every random source the two friends are on seats 0 + 3 and the solo is on the other team');
+  }
+
+  // 7g. a broken pair: the whole entry is cancelled and the matchmaker says who
+  {
+    const clock = manualTimers();
+    const cancelled = [];
+    const updates = [];
+    const matchmaker = new BughouseMatchmaker({ startGame: () => {}, notify: (id, u) => updates.push({ id, ...u }), fillWaitMs: FILL, timers: clock.timers, onGroupCancelled: (leaver, others) => cancelled.push([leaver, others]) });
+    matchmaker.join(e(9));
+    matchmaker.joinGroup([e(1), e(2)]);
+    updates.length = 0;
+    check(matchmaker.leave('P2') === true, 'a member of a queued pair leaves');
+    check(JSON.stringify(cancelled) === '[["P2",["P1"]]]', '...the matchmaker names the leaver and the friend who is no longer queued');
+    check(!matchmaker.isQueued('P1') && !matchmaker.isQueued('P2') && matchmaker.isQueued('P9') && matchmaker.size() === 1, '...the pair is gone, the solo behind it is untouched');
+    check(updates.length === 1 && updates[0].id === 'P9' && updates[0].queued === 1 && updates[0].fillInMs === null, '...the lobby is told (a lone human again: no countdown)');
+    matchmaker.leave('P9');
+    check(cancelled.length === 1, 'a solo leaving never reports a cancelled group');
+    matchmaker.joinGroup([e(5), e(6)]);
+    matchmaker.leave('P5');
+    check(cancelled.length === 2 && cancelled[1][0] === 'P5', 'the first or the second friend: either leaving cancels the pair');
+    matchmaker.joinGroup([e(7), e(8)]);
+    const throwing = new BughouseMatchmaker({ startGame: () => {}, notify: () => {}, fillWaitMs: FILL, timers: clock.timers, onGroupCancelled: () => { throw new Error('boom'); } });
+    const original = console.error;
+    console.error = () => {};
+    throwing.joinGroup([e(1), e(2)]);
+    check(throwing.leave('P1') === true && throwing.size() === 0, 'a callback that throws cannot break the queue');
+    console.error = original;
+  }
 }
 
 console.log(`\nALL ${passed} CHECKS PASSED`);

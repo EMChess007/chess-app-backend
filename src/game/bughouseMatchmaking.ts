@@ -46,6 +46,11 @@ export interface BugMatchmakerDeps {
   randomInt?: (maxExclusive: number) => number;
   /** The clock and timers (default: the real ones); the room manager's own type, so one fake serves both. */
   timers?: BugTimers;
+  /**
+   * W6: a member of a PAIR left the queue (a cancel, a disconnect) so the whole pair entry was cancelled - a pair is never split and never plays on with one friend. Told which socket left and
+   * who else was in the group (they are no longer queued); the friend-room manager returns the room to its screen. Not called for a group of one. Must not throw.
+   */
+  onGroupCancelled?: (leaverSocketId: string, otherSocketIds: string[]) => void;
 }
 
 /** Humans who queued together and are never split: one human today, a friend pair in W6. */
@@ -74,14 +79,39 @@ export function shuffled<T>(items: readonly T[], randomInt: (maxExclusive: numbe
   return out;
 }
 
+const humanSeat = (m: BugQueueEntry): BugSeatSetup => ({ kind: 'human', socketId: m.socketId, name: m.name });
+const botSeat = (): BugSeatSetup => ({ kind: 'bot', socketId: null, name: BUG_BOT_NAME, elo: BUG_BOT_ELO, botReason: 'fill' });
+
 /**
- * THE ONE PLACE seats are assigned. Today (solo queue, B20): the humans and the bots that fill the rest are shuffled uniformly over the four seats. W6 changes this body only: a pair of
- * friends takes seats 0 + 3 (one team), a second pair seats 1 + 2, solos fill the free team, bots after the fill wait.
+ * THE ONE PLACE seats are assigned (W6 made it team-aware; the seat map is rule 2: seats 0 + 3 are one team, 1 + 2 the other).
+ *  - NO pair queued (the solo queue, B20): the humans and the bots that fill the rest are shuffled uniformly over the four seats.
+ *  - A PAIR of friends is one team and is never split or partnered with a bot: the pair that WAITED LONGER (the first group, the queue is first come first served) takes seats 0 + 3, a second
+ *    pair seats 1 + 2. Which friend sits on which of their two seats is a coin flip (the colour and the board are not decided by who made the room).
+ *  - A pair and fewer than two other humans: the OTHER team (seats 1 + 2) is the solos, shuffled, and bots for what is missing - a pair + 1 solo + 1 bot, a pair + 2 solos, a pair + 2 bots.
+ * Every random choice goes through `randomInt`, so a test can enumerate each outcome.
  */
 export function placeGroups(groups: readonly QueueGroup[], randomInt: (maxExclusive: number) => number): BugSeatSetups {
-  const humans: BugSeatSetup[] = groups.flatMap((group) => group.members.map((m): BugSeatSetup => ({ kind: 'human', socketId: m.socketId, name: m.name })));
-  const bots: BugSeatSetup[] = Array.from({ length: 4 - humans.length }, () => ({ kind: 'bot', socketId: null, name: BUG_BOT_NAME, elo: BUG_BOT_ELO, botReason: 'fill' }));
-  return shuffled([...humans, ...bots], randomInt) as BugSeatSetups;
+  const pairs = groups.filter((group) => group.members.length === 2);
+  if (pairs.length === 0) {
+    const humans: BugSeatSetup[] = groups.flatMap((group) => group.members.map(humanSeat));
+    const bots: BugSeatSetup[] = Array.from({ length: 4 - humans.length }, botSeat);
+    return shuffled([...humans, ...bots], randomInt) as BugSeatSetups;
+  }
+  const order = (group: QueueGroup): [BugQueueEntry, BugQueueEntry] => (randomInt(2) === 0 ? [group.members[0], group.members[1]] : [group.members[1], group.members[0]]);
+  const [first, second] = pairs;
+  const [a, d] = order(first);
+  let b: BugSeatSetup;
+  let c: BugSeatSetup;
+  if (second !== undefined) {
+    const [x, y] = order(second);
+    b = humanSeat(x);
+    c = humanSeat(y);
+  } else {
+    const solos = groups.filter((group) => group.members.length === 1).map((group) => humanSeat(group.members[0]));
+    const team = shuffled([...solos, ...Array.from({ length: 2 - solos.length }, botSeat)], randomInt);
+    [b, c] = team;
+  }
+  return [humanSeat(a), b, c, humanSeat(d)] as BugSeatSetups;
 }
 
 const sizeOf = (lobby: Lobby): number => lobby.groups.reduce((n, group) => n + group.members.length, 0);
@@ -133,18 +163,33 @@ export class BughouseMatchmaker {
     return { ok: true };
   }
 
-  /** Removes a socket from its lobby (a no-op if it is not queued); a group it belonged to leaves with it only as far as that member (W6 decides what a broken pair does). Safe to call on every disconnect. */
+  /**
+   * Removes a socket from its lobby (a no-op if it is not queued). A PAIR is never split (W6, HP11): when one of the two leaves - a cancel, a disconnect - the WHOLE pair entry is cancelled, the
+   * other friend is no longer queued either, and `onGroupCancelled` tells who (the friend-room manager puts them back on the room screen with the slot free). Safe to call on every disconnect.
+   */
   leave(socketId: string): boolean {
     const key = this.socketToKey.get(socketId);
     if (key === undefined) return false;
     this.socketToKey.delete(socketId);
     const lobby = this.lobbies.get(key);
     if (!lobby) return true;
+    const broken = lobby.groups.find((group) => group.members.length > 1 && group.members.some((m) => m.socketId === socketId));
+    const others = broken ? broken.members.filter((m) => m.socketId !== socketId).map((m) => m.socketId) : [];
     for (const group of lobby.groups) group.members = group.members.filter((m) => m.socketId !== socketId);
+    // (the other friend of a broken pair leaves with it)
+    for (const id of others) this.socketToKey.delete(id);
+    if (broken) broken.members = [];
     lobby.groups = lobby.groups.filter((group) => group.members.length > 0);
     this.rearmTimer(lobby);
     if (lobby.groups.length === 0) this.lobbies.delete(key);
     else this.notifyLobby(lobby);
+    if (broken) {
+      try {
+        this.deps.onGroupCancelled?.(socketId, others);
+      } catch (err) {
+        console.error('[bughouseMatchmaker] onGroupCancelled threw:', err);
+      }
+    }
     return true;
   }
 

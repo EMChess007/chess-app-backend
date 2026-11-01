@@ -93,7 +93,11 @@ console.log('\n=== 1. Exactly the eleven events are wired ===');
 {
   const { connect } = boot();
   const s = connect('A');
-  check([...s.listeners.keys()].filter((k) => k !== 'disconnect').sort().join() === [...BUG_CLIENT_EVENT_NAMES].sort().join() && BUG_CLIENT_EVENT_NAMES.length === 11, 'a connected socket listens to exactly the eleven bug_* client events of the wire contract (and disconnect)');
+  const ROOM_EVENTS = ['bug_room_create', 'bug_room_join', 'bug_room_leave', 'bug_room_start'];
+  check(
+    [...s.listeners.keys()].filter((k) => k !== 'disconnect').sort().join() === [...BUG_CLIENT_EVENT_NAMES, ...ROOM_EVENTS].sort().join() && BUG_CLIENT_EVENT_NAMES.length === 11,
+    'a connected socket listens to exactly the eleven bug_* client events of the wire contract plus the four friend-room events of W6 (roomWire.ts) (and disconnect)'
+  );
   check([...s.listeners.keys()].every((k) => k === 'disconnect' || k.startsWith('bug_')), '...no event outside the bug_* namespace (the 2-player and four_* events cannot collide)');
   const names = new Set([...BUG_CLIENT_EVENT_NAMES, ...BUG_SERVER_EVENT_NAMES]);
   check([...FOUR_CLIENT_EVENT_NAMES, ...FOUR_SERVER_EVENT_NAMES].every((n) => !names.has(n)) && BUG_SERVER_EVENT_NAMES.length === 7, 'the two protocols share no event name');

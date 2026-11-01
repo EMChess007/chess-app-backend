@@ -32,6 +32,31 @@ export function resolveBughouseTestSeed(env: Env = process.env, warn: (message: 
   return seed;
 }
 
+/**
+ * W6, the second Bughouse test-only switch: `BUGHOUSE_ROOM_TTL_TEST_MS=<ms>` SHORTENS the life of a friend-room code (10 minutes) so a browser or phone run can watch an expiry in seconds. Same
+ * rule (CHECKLIST.md section 7): ignored when NODE_ENV is "production" (one warning, the value is not printed), only a plain decimal whole number inside 1000..600000 (it can shorten the life,
+ * never lengthen it past the production 10 minutes and never switch expiry off), set only by the test stack's own child process. Unset: the production life, exactly as before.
+ */
+export const BUGHOUSE_ROOM_TTL_VAR = 'BUGHOUSE_ROOM_TTL_TEST_MS';
+export const BUGHOUSE_ROOM_TTL_MIN_MS = 1000;
+export const BUGHOUSE_ROOM_TTL_MAX_MS = 600_000;
+
+/** The room life in force for `env`: BUG_ROOM_TTL_MS (10 minutes) unless the override is honoured. */
+export function resolveBugRoomTtlMs(env: Env = process.env, warn: (message: string) => void = console.warn): number {
+  const raw = env.BUGHOUSE_ROOM_TTL_TEST_MS;
+  if (raw === undefined) return BUGHOUSE_ROOM_TTL_MAX_MS;
+  if (env.NODE_ENV === 'production') {
+    warn('[bughouse] BUGHOUSE_ROOM_TTL_TEST_MS is set but NODE_ENV is "production": ignoring it, friend-room codes live 10 minutes.');
+    return BUGHOUSE_ROOM_TTL_MAX_MS;
+  }
+  const ms = /^\d+$/.test(raw) ? Number(raw) : 0;
+  if (ms < BUGHOUSE_ROOM_TTL_MIN_MS || ms > BUGHOUSE_ROOM_TTL_MAX_MS) {
+    warn(`[bughouse] BUGHOUSE_ROOM_TTL_TEST_MS is not a whole number of milliseconds in ${BUGHOUSE_ROOM_TTL_MIN_MS}..${BUGHOUSE_ROOM_TTL_MAX_MS}: ignoring it, friend-room codes live 10 minutes.`);
+    return BUGHOUSE_ROOM_TTL_MAX_MS;
+  }
+  return ms;
+}
+
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {

@@ -14,9 +14,13 @@
 import type { Server, Socket } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { verifyToken } from '../lib/jwt.js';
-import { bugRefusal, validateBugJoinQueue, type BugQueueUpdatePayload } from './bughouse/index.js';
-import { BughouseMatchmaker, type BugMatchmakerDeps } from './bughouseMatchmaking.js';
+import { clientIpOf, resolveTrustedHops } from '../lib/clientIp.js';
+import { bugRefusal, validateBugJoinQueue, validateBugRoomCreate, validateBugRoomJoin, validateBugRoomStart, type BugFriendRoomView, type BugQueueUpdatePayload, type BugRoomClosedReason } from './bughouse/index.js';
+import { BughouseFriendRooms, type FriendRoomDeps, type FriendRoomMember } from './bughouseFriendRooms.js';
+import { BUG_ROOM_SWEEP_MS } from './bughouseRoomLimiter.js';
+import { BughouseMatchmaker, placeGroups, type BugMatchmakerDeps } from './bughouseMatchmaking.js';
 import { BughouseRoomManager } from './bughouseRooms.js';
+import { resolveBugRoomTtlMs } from './bughouseTestSwitches.js';
 
 export interface BugHandlerDeps {
   /** A user's display name; default: the username from the database. A rejection falls back to "Player". */
@@ -27,6 +31,10 @@ export interface BugHandlerDeps {
   roomOptions?: ConstructorParameters<typeof BughouseRoomManager>[1];
   /** Options for the matchmaker (fill wait, random source) - tests and the dev override. */
   matchmakerOptions?: Pick<BugMatchmakerDeps, 'fillWaitMs' | 'randomInt'>;
+  /** Options for the friend rooms (room life, cap, code randomness, limiter) - tests; the room life otherwise comes from the guarded test-only override (bughouseTestSwitches.ts). */
+  friendRoomOptions?: Partial<Pick<FriendRoomDeps, 'ttlMs' | 'capacity' | 'randomInt' | 'limiter'>>;
+  /** How many trusted proxies sit in front (lib/clientIp.ts); default TRUSTED_PROXY_HOPS or the production rule. */
+  trustedProxyHops?: number;
 }
 
 type Reply = (response: unknown) => void;
@@ -77,10 +85,14 @@ function listen(socket: Socket, event: string, handler: (payload: unknown, reply
   });
 }
 
-export function registerBughouseHandlers(io: Server, deps: BugHandlerDeps = {}): { rooms: BughouseRoomManager; matchmaker: BughouseMatchmaker } {
+export function registerBughouseHandlers(io: Server, deps: BugHandlerDeps = {}): { rooms: BughouseRoomManager; matchmaker: BughouseMatchmaker; friendRooms: BughouseFriendRooms } {
   const rooms = new BughouseRoomManager(io, deps.roomOptions);
   const userIdOf = deps.userIdOf ?? userIdFromHandshake;
   const resolveName = deps.resolveName ?? usernameFromDatabase;
+  const trustedProxyHops = deps.trustedProxyHops ?? resolveTrustedHops();
+  const randomInt = deps.matchmakerOptions?.randomInt ?? ((n: number) => Math.floor(Math.random() * n));
+  // (assigned below; the matchmaker and the friend rooms point at each other)
+  let friendRooms: BughouseFriendRooms;
 
   const matchmaker = new BughouseMatchmaker({
     ...deps.matchmakerOptions,
@@ -88,7 +100,10 @@ export function registerBughouseHandlers(io: Server, deps: BugHandlerDeps = {}):
     startGame: (seats, timeControl, timeControlLabel) => {
       const created = rooms.createRoom({ seats, timeControl, timeControlLabel });
       console.log(`[bughouseSocket] match_found room=${created.roomId} humans=${seats.filter((s) => s.kind === 'human').length} bots=${seats.filter((s) => s.kind === 'bot').length} ${timeControlLabel}`);
+      // a queued friend pair's code is consumed when its match starts
+      friendRooms.matchStarted(seats.flatMap((s) => (s.kind === 'human' && s.socketId ? [s.socketId] : [])));
     },
+    onGroupCancelled: (leaver, others) => friendRooms.pairCancelled(leaver, others),
     notify: (socketId, update: BugQueueUpdatePayload) => {
       try {
         io.to(socketId).emit('bug_queue_update', update);
@@ -98,14 +113,85 @@ export function registerBughouseHandlers(io: Server, deps: BugHandlerDeps = {}):
     },
   });
 
+  // --- friend rooms (W6) ---
+  friendRooms = new BughouseFriendRooms({
+    timers: deps.roomOptions?.timers,
+    ttlMs: resolveBugRoomTtlMs(),
+    ...deps.friendRoomOptions,
+    notifyRoom: (socketId, view: BugFriendRoomView) => {
+      try {
+        io.to(socketId).emit('bug_room_update', view);
+      } catch (err) {
+        console.error('[bughouseSocket] failed to send bug_room_update:', err);
+      }
+    },
+    notifyClosed: (socketId, reason: BugRoomClosedReason) => {
+      try {
+        io.to(socketId).emit('bug_room_closed', { reason });
+      } catch (err) {
+        console.error('[bughouseSocket] failed to send bug_room_closed:', err);
+      }
+    },
+    startWithBots: (members, timeControl, timeControlLabel) => {
+      const now = Date.now();
+      const entries = members.map((m: FriendRoomMember) => ({ socketId: m.socketId, userId: m.userId, name: m.name, timeControl, joinedAt: now }));
+      const seats = placeGroups([{ members: entries }], randomInt);
+      const created = rooms.createRoom({ seats, timeControl, timeControlLabel });
+      console.log(`[bughouseSocket] match_found room=${created.roomId} humans=2 bots=2 friends ${timeControlLabel}`);
+    },
+    enqueue: (members, timeControl) => matchmaker.joinGroup(members.map((m) => ({ socketId: m.socketId, userId: m.userId, name: m.name, timeControl }))),
+    cancelQueue: (socketId) => void matchmaker.leave(socketId),
+    isBusy: (socketId) => rooms.isSeated(socketId) || matchmaker.isQueued(socketId),
+  });
+  setInterval(() => friendRooms.sweep(), BUG_ROOM_SWEEP_MS).unref();
+
   io.on('connection', (socket) => {
     const userId = userIdOf(socket);
+    const callerOf = async (): Promise<FriendRoomMember & { ip: string }> => {
+      let name = 'Player';
+      if (userId) {
+        try {
+          name = await resolveName(userId);
+        } catch (err) {
+          console.error('[bughouseSocket] username lookup failed, using "Player":', err);
+        }
+      }
+      const ip = clientIpOf({ peer: socket.handshake?.address ?? '', forwardedFor: socket.handshake?.headers?.['x-forwarded-for'] }, trustedProxyHops);
+      return { socketId: socket.id, userId, name, ip };
+    };
+
+    listen(socket, 'bug_room_create', async (payload, reply) => {
+      const parsed = validateBugRoomCreate(payload);
+      if (!parsed.ok) return reply(parsed);
+      const caller = await callerOf();
+      if (!socket.connected) return;
+      reply(friendRooms.create(caller, parsed.value.timeControl));
+    });
+    listen(socket, 'bug_room_join', async (payload, reply) => {
+      // a malformed code is a failed guess like a wrong one: it goes through the limiter too (with the one sentence), so the answer is no oracle
+      const parsed = validateBugRoomJoin(payload);
+      const caller = await callerOf();
+      if (!socket.connected) return;
+      reply(friendRooms.join(caller, parsed.ok ? parsed.value.code : null));
+    });
+    listen(socket, 'bug_room_leave', (_payload, reply) => reply(friendRooms.leave(socket.id)));
+    listen(socket, 'bug_room_start', (payload, reply) => {
+      const parsed = validateBugRoomStart(payload);
+      if (!parsed.ok) return reply(parsed);
+      reply(friendRooms.start(socket.id, parsed.value.mode));
+    });
 
     listen(socket, 'bug_join_queue', async (payload, reply) => {
       const parsed = validateBugJoinQueue(payload);
       if (!parsed.ok) return reply(parsed);
       const refusal = () =>
-        rooms.isSeated(socket.id) ? bugRefusal('noGame', 'You are already in a game.') : matchmaker.isQueued(socket.id) ? bugRefusal('invalidRequest', 'You are already in a queue.') : null;
+        rooms.isSeated(socket.id)
+          ? bugRefusal('noGame', 'You are already in a game.')
+          : matchmaker.isQueued(socket.id)
+            ? bugRefusal('invalidRequest', 'You are already in a queue.')
+            : friendRooms.viewFor(socket.id) !== null
+              ? bugRefusal('invalidRequest', 'Leave your friend room first, or start from it.')
+              : null;
       const early = refusal();
       if (early) return reply(early);
 
@@ -144,6 +230,11 @@ export function registerBughouseHandlers(io: Server, deps: BugHandlerDeps = {}):
 
     socket.on('disconnect', () => {
       try {
+        friendRooms.disconnect(socket.id); // first: it settles the room (and a queued pair) before the plain queue leave below
+      } catch (err) {
+        console.error('[bughouseSocket] leaving the friend room on disconnect failed:', err);
+      }
+      try {
         matchmaker.leave(socket.id);
       } catch (err) {
         console.error('[bughouseSocket] leaving the queue on disconnect failed:', err);
@@ -156,5 +247,5 @@ export function registerBughouseHandlers(io: Server, deps: BugHandlerDeps = {}):
     });
   });
 
-  return { rooms, matchmaker };
+  return { rooms, matchmaker, friendRooms };
 }

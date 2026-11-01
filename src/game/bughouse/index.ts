@@ -14,3 +14,4 @@ export * from './snapshot.js';
 export * from './premove.js';
 export * from './bot.js';
 export * from './wire.js';
+export * from './roomWire.js';

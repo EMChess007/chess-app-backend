@@ -44,6 +44,8 @@
     "test:bughouseMessages": "tsx scripts/test-bughouse-messages.mjs",
     "test:bughouseMatchmaking": "tsx scripts/test-bughouse-matchmaking.mjs",
     "test:bughouseHandlers": "tsx scripts/test-bughouse-handlers.mjs",
+    "test:bughouseFriendRooms": "tsx scripts/test-bughouse-friend-rooms.mjs",
+    "test:bughouseFriendOnline": "tsx scripts/test-bughouse-friend-online.mjs",
     "test:bughouseBot": "tsx scripts/test-bughouse-bot.mjs",
     "test:bughouseOnline": "tsx scripts/test-bughouse-online.mjs",
     "test:bughouseClient": "tsx scripts/test-bughouse-client.mjs",

@@ -112,6 +112,15 @@ jobs:
         run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40 40
         continue-on-error: true
 
+      # Bughouse W7: the scripted real-socket scenarios (a resignation from each seat, capture and drop across the boards, a flag on each board with a late mate, a takeover and hand-back on each seat with a
+      # NEW process as the restarted app, a late spectator, every other 4-seat queue at the same time, a whole natural game). About 3 minutes; the same dev server (without FOUR_FILL_MS the lobby
+      # scenario simply waits for the production 30 s fill, inside the test's own bound).
+      - name: Bughouse real-socket scenarios (W7)
+        id: bughouse_sockets
+        working-directory: chess-app/backend
+        run: npm run test:bughouseSockets
+        continue-on-error: true
+
       - name: Browser end-to-end (Chaturaji - the REAL app in Chrome against a private copy of this server)
         id: browser_e2e
         working-directory: chess-app/backend
@@ -133,7 +142,7 @@ jobs:
           retention-days: 90
 
       - name: Fail the job if either fuzz run or the browser end-to-end failed
-        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.browser_e2e.outcome == 'failure'
+        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.bughouse_sockets.outcome == 'failure' || steps.browser_e2e.outcome == 'failure'
         run: exit 1
 
       - name: Open/update a tracking issue on failure

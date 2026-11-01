@@ -313,6 +313,12 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:bughouseOnline
 
+      # Bughouse W7: the scripted real-socket scenarios on the same dev server: a resignation from each seat, a capture and a drop across the boards, a flag on each board (two 1 minute matches, about
+      # 65 s of real time) with a mating move sent after it, a takeover and hand-back on each seat with a NEW process as the restarted app, a late spectator, the 4 queues at once, a whole natural game.
+      - name: Run the Bughouse W7 real-socket scenarios (a fixed total of checks; conditional ones counted apart)
+        working-directory: chess-app/backend
+        run: npm run test:bughouseSockets
+
       # The APP's online Bughouse client (W4: BughouseOnlineSession, the class the screen drives) against a private copy of the real server on its own port: two clients, two bots, one cut
       # connection and its rejoin, a spectator, a whole game to a result. Starts its own backend (it needs nothing from the dev server above).
       - name: Run the Bughouse client integration test (the app's session class, real sockets, its own server)

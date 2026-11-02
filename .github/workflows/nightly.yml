@@ -15,6 +15,10 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch: {} # lets a maintainer trigger it manually from the Actions tab too.
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest

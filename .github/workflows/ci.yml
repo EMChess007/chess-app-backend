@@ -257,6 +257,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:bughouseHandlers
 
+      - name: Run the 4-seat friend-room tests (command #35; the generalised manager with four members, then the four_room_* events over real sockets: 4 Player Chess, Giveaway, Chaturaji with friends + bots)
+        working-directory: chess-app/backend
+        run: npm run test:fourFriendRooms
+
       - name: Run the every-time-control real-socket case (command #35; its own server: 2-player Quick Match + Challenge, 4 Player Chess / Giveaway / Chaturaji, Crazy Bughouse - all 21 controls each)
         working-directory: chess-app/backend
         run: npm run test:timeControlsSockets

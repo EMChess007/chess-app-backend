@@ -21,9 +21,40 @@
 import type { Server, Socket } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import { verifyToken } from '../lib/jwt.js';
-import { FourPlayerMatchmaker, type FourMatchmakerDeps } from './fourPlayerMatchmaking.js';
-import { FourRoomManager } from './fourPlayerRooms.js';
-import { validateFourJoinQueue, type FourQueueUpdatePayload, type FourVariant } from './fourPlayerWire.js';
+import { clientIpOf, resolveTrustedHops } from '../lib/clientIp.js';
+import { FOUR_BOT_ELO, FOUR_BOT_NAME } from './fourPlayerConfig.js';
+import { FriendRooms, type FriendRoomMember, type FriendRoomMessages } from './friendRooms.js';
+import { FourPlayerMatchmaker, shuffled, type FourMatchmakerDeps } from './fourPlayerMatchmaking.js';
+import { FourRoomManager, type FourSeatSetup, type FourSeatSetups } from './fourPlayerRooms.js';
+import {
+  FOUR_ROOM_BUSY_MESSAGE,
+  FOUR_ROOM_CAP_MESSAGE,
+  FOUR_ROOM_HAVE_ROOM_MESSAGE,
+  FOUR_ROOM_LOGIN_MESSAGE,
+  FOUR_ROOM_MAX_MEMBERS,
+  FOUR_ROOM_NOT_FOUND_MESSAGE,
+  FOUR_ROOM_NOT_HOST_MESSAGE,
+  FOUR_ROOM_NOT_IN_ROOM_MESSAGE,
+  FOUR_ROOM_NO_FRIEND_MESSAGE,
+  FOUR_ROOM_OWN_MESSAGE,
+  fourControlLabel,
+  validateFourRoomCreate,
+  validateFourRoomJoin,
+  type FourFriendRoomView,
+} from './fourPlayerRoomWire.js';
+import { validateFourJoinQueue, type FourQueueUpdatePayload, type FourTimeControl, type FourVariant } from './fourPlayerWire.js';
+
+const FOUR_ROOM_MESSAGES: FriendRoomMessages = {
+  login: FOUR_ROOM_LOGIN_MESSAGE,
+  haveRoom: FOUR_ROOM_HAVE_ROOM_MESSAGE,
+  busy: FOUR_ROOM_BUSY_MESSAGE,
+  cap: FOUR_ROOM_CAP_MESSAGE,
+  own: FOUR_ROOM_OWN_MESSAGE,
+  noFriend: FOUR_ROOM_NO_FRIEND_MESSAGE,
+  notHost: FOUR_ROOM_NOT_HOST_MESSAGE,
+  notInRoom: FOUR_ROOM_NOT_IN_ROOM_MESSAGE,
+  notFound: FOUR_ROOM_NOT_FOUND_MESSAGE,
+};
 
 export interface FourHandlerDeps {
   /** A user's display name; default: the username from the database. A rejection falls back to "Player". */
@@ -36,6 +67,10 @@ export interface FourHandlerDeps {
   matchmakerOptions?: Pick<FourMatchmakerDeps, 'fillWaitMs' | 'randomInt'>;
   /** TEST ONLY (src/game/fourTestSwitches.ts): a start snapshot armed for the next room of this variant, or undefined. Absent in production. */
   startSnapshotFor?: (variant: FourVariant) => string | undefined;
+  /** Hops of trusted proxies in front of the server (the join limiter's client address); default resolveTrustedHops(). */
+  trustedProxyHops?: number;
+  /** Options for the friend rooms (the clock, the limiter, the code source, the life) - tests. */
+  friendRoomOptions?: Partial<Pick<ConstructorParameters<typeof FriendRooms<FourTimeControl, FourVariant, FourFriendRoomView>>[0], 'timers' | 'randomInt' | 'ttlMs' | 'capacity' | 'limiter'>>;
 }
 
 type Reply = (response: unknown) => void;
@@ -88,10 +123,15 @@ function listen(socket: Socket, event: string, handler: (payload: unknown, reply
   });
 }
 
-export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {}): { rooms: FourRoomManager; matchmaker: FourPlayerMatchmaker } {
+export function registerFourPlayerHandlers(
+  io: Server,
+  deps: FourHandlerDeps = {}
+): { rooms: FourRoomManager; matchmaker: FourPlayerMatchmaker; friendRooms: FriendRooms<FourTimeControl, FourVariant, FourFriendRoomView> } {
   const rooms = new FourRoomManager(io, deps.roomOptions);
   const userIdOf = deps.userIdOf ?? userIdFromHandshake;
   const resolveName = deps.resolveName ?? usernameFromDatabase;
+  const trustedProxyHops = deps.trustedProxyHops ?? resolveTrustedHops();
+  const randomInt = deps.matchmakerOptions?.randomInt ?? ((n: number) => Math.floor(Math.random() * n));
 
   const matchmaker = new FourPlayerMatchmaker({
     ...deps.matchmakerOptions,
@@ -109,14 +149,101 @@ export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {
     },
   });
 
+  // --- friend rooms (command #35): the ONE friend-room manager of friendRooms.ts, here for the 4-seat games (up to four friends, bots fill the empty seats) ---
+  const friendRooms = new FriendRooms<FourTimeControl, FourVariant, FourFriendRoomView>({
+    maxMembers: FOUR_ROOM_MAX_MEMBERS,
+    messages: FOUR_ROOM_MESSAGES,
+    ...deps.friendRoomOptions,
+    labelOf: fourControlLabel,
+    makeView: (room, youAre, expiresInMs) => ({
+      code: room.code,
+      variant: room.extra,
+      timeControl: room.timeControl,
+      timeControlLabel: room.label,
+      youAre,
+      hostName: room.host.name,
+      members: [room.host.name, ...room.friends.map((f) => f.name)],
+      maxMembers: FOUR_ROOM_MAX_MEMBERS,
+      phase: 'open',
+      expiresInMs,
+    }),
+    notifyRoom: (socketId, view) => {
+      try {
+        io.to(socketId).emit('four_room_update', view);
+      } catch (err) {
+        console.error('[fourSocket] failed to send four_room_update:', err);
+      }
+    },
+    notifyClosed: (socketId, reason) => {
+      try {
+        io.to(socketId).emit('four_room_closed', { reason });
+      } catch (err) {
+        console.error('[fourSocket] failed to send four_room_closed:', err);
+      }
+    },
+    startWithBots: (members: FriendRoomMember[], timeControl, timeControlLabel, variant) => {
+      const humans: FourSeatSetup[] = members.map((m) => ({ kind: 'human', socketId: m.socketId, name: m.name }));
+      const bots: FourSeatSetup[] = Array.from({ length: 4 - humans.length }, () => ({ kind: 'bot', socketId: null, name: FOUR_BOT_NAME, elo: FOUR_BOT_ELO, botReason: 'fill' }));
+      const seats = shuffled([...humans, ...bots], randomInt) as FourSeatSetups;
+      const startSnapshot = deps.startSnapshotFor?.(variant);
+      const created = rooms.createRoom({ seats, timeControl, timeControlLabel, variant, ...(startSnapshot === undefined ? {} : { startSnapshot }) });
+      console.log(`[fourSocket] match_found room=${created.roomId} variant=${variant} humans=${humans.length} bots=${bots.length} friends ${timeControlLabel}`);
+    },
+    isBusy: (socketId) => rooms.isSeated(socketId) || matchmaker.isQueued(socketId),
+  });
+  setInterval(() => friendRooms.sweep(), 5 * 60 * 1000).unref();
+
   io.on('connection', (socket) => {
     const userId = userIdOf(socket);
+    const callerOf = async (): Promise<FriendRoomMember & { ip: string }> => {
+      let name = 'Player';
+      if (userId) {
+        try {
+          name = await resolveName(userId);
+        } catch (err) {
+          console.error('[fourSocket] username lookup failed, using "Player":', err);
+        }
+      }
+      const ip = clientIpOf({ peer: socket.handshake?.address ?? '', forwardedFor: socket.handshake?.headers?.['x-forwarded-for'] }, trustedProxyHops);
+      return { socketId: socket.id, userId, name, ip };
+    };
+
+    listen(socket, 'four_room_create', async (payload, reply) => {
+      const parsed = validateFourRoomCreate(payload);
+      if (!parsed.ok) return reply(parsed);
+      const caller = await callerOf();
+      if (!socket.connected) return;
+      const created = friendRooms.create(caller, parsed.value.timeControl, parsed.value.variant);
+      reply(created.ok ? created : { ok: false, error: created.error });
+    });
+    listen(socket, 'four_room_join', async (payload, reply) => {
+      // a malformed code is a failed guess like a wrong one: it goes through the limiter too (with the one sentence), so the answer is no oracle
+      const parsed = validateFourRoomJoin(payload);
+      const caller = await callerOf();
+      if (!socket.connected) return;
+      const joined = friendRooms.join(caller, parsed.ok ? parsed.value.code : null);
+      reply(joined.ok ? joined : { ok: false, error: joined.error });
+    });
+    listen(socket, 'four_room_leave', (_payload, reply) => {
+      const left = friendRooms.leave(socket.id);
+      reply(left.ok ? left : { ok: false, error: left.error });
+    });
+    listen(socket, 'four_room_start', (_payload, reply) => {
+      const started = friendRooms.start(socket.id, 'bots');
+      reply(started.ok ? { ok: true, outcome: 'started' } : { ok: false, error: started.error });
+    });
 
     listen(socket, 'four_join_queue', async (payload, reply) => {
       const parsed = validateFourJoinQueue(payload);
       if (!parsed.ok) return reply(parsed);
       const refusal = (): { ok: false; error: string } | null =>
-        rooms.isSeated(socket.id) ? { ok: false, error: 'You are already in a game.' } : matchmaker.isQueued(socket.id) ? { ok: false, error: 'You are already in a queue.' } : null;
+        rooms.isSeated(socket.id)
+          ? { ok: false, error: 'You are already in a game.' }
+          : matchmaker.isQueued(socket.id)
+            ? { ok: false, error: 'You are already in a queue.' }
+            : friendRooms.viewFor(socket.id) !== null
+              ? { ok: false, error: 'Leave your friend room first, or start from it.' }
+              : null;
       const early = refusal();
       if (early) return reply(early);
 
@@ -153,6 +280,11 @@ export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {
 
     socket.on('disconnect', () => {
       try {
+        friendRooms.disconnect(socket.id); // first: it settles the room before the plain queue leave below
+      } catch (err) {
+        console.error('[fourSocket] leaving the friend room on disconnect failed:', err);
+      }
+      try {
         matchmaker.leave(socket.id);
       } catch (err) {
         console.error('[fourSocket] leaving the queue on disconnect failed:', err);
@@ -165,5 +297,5 @@ export function registerFourPlayerHandlers(io: Server, deps: FourHandlerDeps = {
     });
   });
 
-  return { rooms, matchmaker };
+  return { rooms, matchmaker, friendRooms };
 }

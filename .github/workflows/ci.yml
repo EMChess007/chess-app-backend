@@ -375,6 +375,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:e2eBrowserOptions
 
+      - name: Run the guards of the scripted premove opponent of the Android end-to-end run (a local backend only, a closed code alphabet, bounded delays; no socket is opened)
+        working-directory: chess-app/backend
+        run: npm run test:premoveOpponent
+
       - name: Run the security-audit guard tests (the workflow stays a bare npm audit, weekly, Dependabot grouped, the fixed versions in the lock; the audit itself is the security-audit job)
         working-directory: chess-app/backend
         run: npm run test:securityAudit

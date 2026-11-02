@@ -98,11 +98,11 @@ export class User {
     await this.press(this.text(label).last());
   }
 
-  /** Logs in through the Log In screen: Play -> Chaturaji online -> "Log in" in the dialog -> the form. */
+  /** Logs in through the Log In screen: Play -> Quick Match -> "Log in" in the dialog -> the form (command #35: Quick Match is the Online card's button; the old per-game Online buttons are gone). */
   async login(account) {
     this.account = account;
     await this.tapText('Play');
-    await this.press(this.page.getByLabel('Chaturaji online'));
+    await this.tapText('Quick Match');
     await this.tapText('Log in / Sign up');
     await this.page.getByPlaceholder('Email').fill(account.email);
     await this.page.getByPlaceholder('Password').fill(account.password);
@@ -110,16 +110,12 @@ export class User {
     await this.page.getByText('Log In', { exact: true }).first().waitFor({ state: 'detached', timeout: 20_000 });
   }
 
-  /** From the main menu: Play -> the variant's Online button -> a time control (by its label, e.g. "10 min"). */
+  /** From the main menu: Play -> Quick Match -> the game's chip ("4 Player Chess", "4 Player Giveaway", "Chaturaji", "Crazy Bughouse") -> a time control (by its label, e.g. "10 min"). */
   async queue(variantLabel, timeControl) {
     await this.tapText('Play');
-    const online = { chaturaji: 'Chaturaji online' }[variantLabel];
-    if (online) await this.press(this.page.getByLabel(online));
-    else {
-      // the 4 Player cards have no aria-label on their Online buttons: the nearest ancestor of the card's title that holds an "Online" button is the card itself
-      const card = this.page.locator(`xpath=//*[normalize-space(text())="${variantLabel}"]/ancestor::div[.//*[normalize-space(text())="Online"]][1]`).first();
-      await this.press(card.getByText('Online', { exact: true }));
-    }
+    await this.tapText('Quick Match');
+    const chip = variantLabel === 'chaturaji' ? 'Chaturaji' : variantLabel;
+    await this.press(this.page.getByLabel(chip, { exact: true }).first());
     await this.tapText(timeControl);
   }
 
@@ -237,7 +233,7 @@ export class User {
 
   /** From the Play menu: the "Return to your game ›" link that appears under the card of the game that was left. */
   async returnToGame() {
-    await this.page.getByText(/Return to your game/).first().click();
+    await this.page.getByText(/Return to your .* game/).first().click();
   }
 
   /** Resigns through the Resign button and its confirmation dialog. */

@@ -54,6 +54,7 @@
     "test:bughouseClient": "tsx scripts/test-bughouse-client.mjs",
     "bughouseBuddy": "tsx scripts/bughouse-buddy.mjs",
     "bughouseFriendBuddy": "tsx scripts/bughouse-friend-buddy.mjs",
+    "fourFriendBuddy": "tsx scripts/four-friend-buddy.mjs",
     "test:e2eBrowserBughouse": "tsx scripts/e2e-browser/bughouse-online.mjs",
     "test:e2eBrowserBughouseW8": "tsx scripts/e2e-browser/bughouse-w8.mjs",
     "test:bughouseTestSwitches": "tsx scripts/test-bughouse-test-switches.mjs",

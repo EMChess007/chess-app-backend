@@ -62,7 +62,7 @@ export function codeFromInviteText(text: string): string | null {
 
 /** The ONE answer to a join that fails for any reason about the code itself (unknown, expired, full, closed, started, or not a code at all). */
 export const BUG_ROOM_NOT_FOUND_MESSAGE = 'That code was not found or has expired.';
-export const BUG_ROOM_LOGIN_MESSAGE = 'Sign in to play Bughouse with a friend.';
+export const BUG_ROOM_LOGIN_MESSAGE = 'Sign in to play Crazy Bughouse with a friend.';
 export const BUG_ROOM_HAVE_ROOM_MESSAGE = 'You already have an open room. Leave it first.';
 export const BUG_ROOM_BUSY_MESSAGE = 'Finish or leave your current game or queue first.';
 export const BUG_ROOM_CAP_MESSAGE = 'There are too many open rooms right now. Try again in a few minutes.';

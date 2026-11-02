@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { io } from 'socket.io-client';
 import { startStack, sleep } from './stack.mjs';
 import { User, launchBrowser, PHONE_LARGE } from './app.mjs';
+import { queueBughouse } from './bughouse-kit.mjs';
 // (the app's engine, file by file: a namespace import of its index exposes nothing under tsx, as in truth.mjs)
 import { legalActions } from '../../../src/logic/bughouse/match.ts';
 import { deserializeMatch } from '../../../src/logic/bughouse/snapshot.ts';
@@ -174,25 +175,22 @@ async function main() {
 
     console.log('\n=== 1. the Play menu, the searching screen and Cancel ===');
     await a.tapText('Play');
-    ok((await a.page.getByLabel('Bughouse online').count()) === 1, 'the Bughouse card has an Online entry');
-    await a.press(a.page.getByLabel('Bughouse online'));
-    const labels = await a.page.locator('text=/^(1 min|2 \\| 1|3 min|3 \\| 2|5 min|5 \\| 2)$/').allInnerTexts();
-    ok(new Set(labels).size === 6, `the time-control screen offers exactly the six controls (${[...new Set(labels)].join(', ')})`);
+    ok((await a.page.getByText('Quick Match', { exact: true }).count()) === 1 && (await a.page.getByLabel('Bughouse online').count()) === 0, 'the Online card has Quick Match and the old Bughouse Online button is gone');
+    await a.tapText('Quick Match');
+    await a.press(a.page.getByLabel('Crazy Bughouse', { exact: true }).first());
+    const controls = await a.page.locator('[aria-label]').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')).filter((label) => /^(Bullet|Blitz|Rapid|Daily|No time limit) /.test(label ?? '')));
+    ok(new Set(controls).size === 21, `the time-control screen offers all 21 controls of the list (${new Set(controls).size})`);
     await a.tapText('1 min');
     await a.page.locator('[data-testid="bughouse-queue"]').waitFor({ timeout: 20_000 });
     await a.page.locator('[data-testid="bughouse-queue-title"]').filter({ hasText: /1 player waiting|Looking for a game/ }).waitFor({ timeout: 20_000 });
     ok((await a.page.locator('[data-testid="bughouse-queue-cancel"]').count()) === 1, 'the searching screen shows how many are waiting and has a Cancel button');
     await shot(a, 'queue');
     await a.press(a.page.locator('[data-testid="bughouse-queue-cancel"]'));
-    await a.page.getByLabel('Bughouse online').waitFor({ timeout: 20_000 });
+    await a.page.getByText('Quick Match', { exact: true }).waitFor({ timeout: 20_000 });
     ok(true, 'Cancel goes back to the Play menu');
 
     console.log('\n=== 2. queue together, match found ===');
-    for (const u of users) {
-      await u.tapText('Play');
-      await u.press(u.page.getByLabel('Bughouse online'));
-      await u.tapText('1 min');
-    }
+    for (const u of users) await queueBughouse(u, '1 min');
     for (const u of users) await u.page.locator('[data-testid="bughouse-online"]').waitFor({ timeout: 90_000 });
     watched = await watchRoom(stack.apiUrl, users.map((u) => u.account.username));
     const places = [];

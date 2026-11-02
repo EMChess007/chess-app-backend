@@ -226,7 +226,7 @@ async function scenarioA(ctx) {
     await spectator.login(await stack.createAccount('bwspec'));
     await spectator.tapText('Play');
     await spectator.page.getByText(/Spectate a live game/).click();
-    await spectator.page.getByText('Bughouse', { exact: true }).first().waitFor({ timeout: 30_000 });
+    await spectator.page.getByText('Crazy Bughouse', { exact: true }).first().waitFor({ timeout: 30_000 });
     await spectator.page.getByText(new RegExp(users[0].account.username)).first().click();
     await spectator.page.locator('[data-testid="bughouse-spectator"]').waitFor({ timeout: 30_000 });
     await converge(watched, [spectator], 'the spectator\'s page');
@@ -280,8 +280,11 @@ async function scenarioB(ctx) {
     }
     const [host, guest] = users;
     console.log('\n=== B1. the host creates a room and reads its code ===');
+    // (command #35: the friend room is Challenge a Friend > Create Challenge > the Crazy Bughouse chip > a control)
     await host.tapText('Play');
-    await host.press(host.page.getByLabel('Bughouse play with a friend'));
+    await host.tapText('Challenge Friend');
+    await host.tapText('Create Challenge');
+    await host.press(host.page.getByLabel('Crazy Bughouse', { exact: true }).first());
     await host.tapText('3 min');
     await host.page.locator('[data-testid="bughouse-room-code"]').waitFor({ timeout: 30_000 });
     const label = (await host.page.locator('[data-testid="bughouse-room-code"]').getAttribute('aria-label')) ?? '';
@@ -290,10 +293,12 @@ async function scenarioB(ctx) {
     ok(await host.page.locator('[data-testid="bughouse-room-bots"]').count() === 1, 'the host sees "Start with bots"');
 
     console.log('\n=== B2. the friend joins with the code ===');
+    // (Challenge a Friend > Join by Code: ONE code field for every game; the code is tried as a challenge, a Crazy Bughouse room, a 4-seat room)
     await guest.tapText('Play');
-    await guest.press(guest.page.getByLabel('Bughouse join with a code'));
-    await guest.page.locator('[data-testid="join-code-input"]').fill(code);
-    await guest.press(guest.page.locator('[data-testid="join-code-submit"]'));
+    await guest.tapText('Challenge Friend');
+    await guest.tapText('Join by Code');
+    await guest.page.getByPlaceholder('ABC123').fill(code);
+    await guest.press(guest.page.getByText('Join', { exact: true }).last());
     await guest.page.locator('[data-testid="bughouse-room"]').waitFor({ timeout: 30_000 });
     await waitUntil('the host\'s friend slot to name the guest', async () => (await host.page.locator('[data-testid="bughouse-room-slot-2"]').innerText()).includes(guest.account.username), 30_000);
     ok(true, 'the host\'s room shows the friend\'s name in the second slot');

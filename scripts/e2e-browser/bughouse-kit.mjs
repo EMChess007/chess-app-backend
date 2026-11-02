@@ -148,11 +148,12 @@ export async function seatOnScreen(user) {
 }
 
 /**
- * The Play menu > Bughouse > Online > a time control, for `user`. The Bughouse card's Online button carries the label "Bughouse online".
+ * The Play menu > Quick Match > the "Crazy Bughouse" chip > a time control, for `user` (command #35: Quick Match is the Online card's button and its chip row names the game; the old Bughouse card is gone).
  */
 export async function queueBughouse(user, timeControl = '1 min') {
   await user.tapText('Play');
-  await user.press(user.page.getByLabel('Bughouse online'));
+  await user.tapText('Quick Match');
+  await user.press(user.page.getByLabel('Crazy Bughouse', { exact: true }).first());
   await user.tapText(timeControl);
 }
 

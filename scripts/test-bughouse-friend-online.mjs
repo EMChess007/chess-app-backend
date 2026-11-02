@@ -123,7 +123,7 @@ try {
     allCodes.add(created.room.code);
     ok(created.ok && /^[A-HJKMNP-Z2-9]{6}$/.test(created.room.code) && created.room.youAre === 'host' && created.room.friendName === null && created.room.expiresInMs > 590000, 'a logged-in host opens a room: a 6-character code, the friend slot free, about 10 minutes');
     ok((await host.ask('bug_room_create', { timeControl: TC })).ok === false, 'a second room for the same user is refused');
-    ok((await guest.ask('bug_room_join', { code: created.room.code })).error === 'Sign in to play Bughouse with a friend.', 'a guest cannot join either');
+    ok((await guest.ask('bug_room_join', { code: created.room.code })).error === 'Sign in to play Crazy Bughouse with a friend.', 'a guest cannot join either');
     const friend = await client(main, accounts[1]);
     const joined = await friend.ask('bug_room_join', { code: created.room.code.toLowerCase() });
     ok(joined.ok && joined.room.youAre === 'friend' && joined.room.hostName === accounts[0].name, 'the friend joins (the code in lower case works): they see the host');

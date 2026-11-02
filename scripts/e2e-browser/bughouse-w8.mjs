@@ -8,6 +8,9 @@
  *      never get them), a RELOAD in the middle of the game, a TAKEOVER by a bot when a human's page closes and the HAND-BACK when it returns, a SPECTATOR page opened from the Spectate
  *      list (both boards equal to the server, no Resign), then a resignation and the game-over card on every page;
  *   B  the friend flow on two real pages: create a room, read the code, join with it, start with bots; the table and both screens agree with the server.
+ *   C  (command #35b) a DROP PREMOVE cancelled by the opponent's move on four pages: a captured pawn reaches the partner's pocket, the partner queues a drop on e4, the opponent plays e2-e4,
+ *      the page shows the engine's sentence for an occupied square, nothing was sent to the server, the sentence goes with the next move.
+ *   D  (command #35b) a FLAG: four humans queue for 1 minute and nobody moves; the server ends the match by a flag and all four pages show the card of the other team.
  *
  *   npm run test:e2eBrowserBughouseW8             (all)         E2E_ONLY=A or B  (one)
  *   E2E_WEBDIR=<an exported dev build> ...        (reuse a build instead of exporting one)
@@ -30,6 +33,7 @@ import { actByTaps, connectSocket, converge, emitAck, mulberry32, queueBughouse,
 // (the app's engine, file by file: a namespace import of its index exposes nothing under tsx, as in truth.mjs)
 import { legalActions } from '../../../src/logic/bughouse/match.ts';
 import { pocketChips } from '../../../src/logic/bughouseView.ts';
+import { PREMOVE_NOTICE } from '../../../src/logic/bughousePremoveInput.ts';
 
 const only = (process.env.E2E_ONLY ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
 const shotsDir = process.env.E2E_SHOTS ?? '';
@@ -322,11 +326,124 @@ async function scenarioB(ctx) {
   }
 }
 
+// --- C: a premove drop cancelled by the opponent's move ----------------------------------------------------------------------------------------------------------------
+
+async function openFourHumans(ctx, prefix, timeControl) {
+  const { browser, stack } = ctx;
+  const users = [];
+  for (let i = 0; i < 4; i++) {
+    const user = await User.open(browser, stack.webUrl, `${prefix}${i + 1}`, PHONE_LARGE);
+    await user.login(await stack.createAccount(`${prefix.toLowerCase()}${i + 1}`));
+    users.push(user);
+  }
+  for (const u of users) await queueBughouse(u, timeControl);
+  for (const u of users) await u.page.locator('[data-testid="bughouse-online"]').waitFor({ timeout: 90_000 });
+  const watched = await watchRoom(stack.apiUrl, users.map((u) => u.account.username));
+  const places = [];
+  for (const u of users) places.push(await seatOnScreen(u));
+  return { users, watched, places, at: (seat) => users[places.findIndex((p) => p.seat === seat)] };
+}
+
+/**
+ * C (command #35b): a DROP PREMOVE cancelled by the opponent's move, on four real pages. Seat 0 (A, White) wins a pawn (1. e4 d5 2. exd5) - it goes to its partner, seat 3 (B, Black), who,
+ * while seat 2 (B, White) has not moved yet, picks the pawn chip and taps e4 (a drop premove, queued on its page only). Seat 2 then plays e2-e4 onto that very square: when the snapshot gives
+ * seat 3 the turn the premove is judged against THAT position and dropped with the sentence of the engine ("The square is occupied."), nothing is sent to the server, the pawn stays in the
+ * pocket, and the sentence goes with the next move.
+ */
+async function scenarioC(ctx) {
+  let seen = null;
+  try {
+    seen = await openFourHumans(ctx, 'PD', '5 min');
+    const { users, watched, places, at } = seen;
+    console.log('\n=== C1. a pawn is captured on board A: it lands in the partner\'s pocket on board B ===');
+    const act = async (seat, from, to) => {
+      const board = seat < 2 ? 'A' : 'B';
+      const before = watched.seq;
+      await tap(at(seat), `${board}-${from}`);
+      await tap(at(seat), `${board}-${to}`);
+      await waitUntil(`the server to answer seat ${seat} (${from}-${to})`, () => watched.seq > before, 15_000, 25);
+    };
+    await act(0, 'e2', 'e4');
+    await act(1, 'd7', 'd5');
+    await act(0, 'e4', 'd5');
+    await waitUntil('the pawn in seat 3\'s pocket', () => watched.match.pockets[3].p === 1, 15_000, 25);
+    ok(watched.match.pockets[3].p === 1, 'the server put the captured pawn into the pocket of the partner (seat 3, board B Black)');
+    await converge(watched, users, 'after the capture');
+
+    console.log('\n=== C2. the partner queues a drop premove on e4 while White has not moved on board B ===');
+    const dropper = at(3);
+    ok(watched.match.verdicts.B.turn === 'w', 'board B is still on White\'s first move: seat 3 is waiting');
+    await tap(dropper, 'pocket-B-black-p');
+    await tap(dropper, 'B-e4');
+    await waitUntil('the premove marks on e4', async () => ((await dropper.page.locator('[data-testid="B-e4"]').getAttribute('aria-label')) ?? '').includes('premove to'), 10_000, 50);
+    ok(await present(dropper, 'bughouse-premove-cancel'), 'the dropper\'s page shows the queued premove with a Cancel control');
+    ok(!watched.events.some((e) => e.kind === 'drop'), 'nothing was sent to the server: a premove is client-only until the turn is mine');
+    for (const u of users) if (u !== dropper) must(!(await present(u, 'bughouse-premove-bar')), `${u.name} shows no premove bar`);
+    ok(true, 'only the dropper\'s page shows a queued premove');
+
+    console.log('\n=== C3. the opponent moves onto e4: the premove is dropped with the engine\'s sentence ===');
+    await act(2, 'e2', 'e4');
+    const notice = dropper.page.locator('[data-testid="bughouse-premove-notice"]');
+    await notice.waitFor({ timeout: 15_000 });
+    const sentence = (await notice.innerText()).trim();
+    ok(sentence === PREMOVE_NOTICE.squareOccupied, `the dropper's page says "${sentence}" (the engine's sentence for an occupied square)`);
+    ok(!watched.events.some((e) => e.kind === 'drop'), 'still no drop on the server: the cancelled premove was never sent');
+    ok(watched.match.pockets[3].p === 1, 'the pawn is still in the pocket');
+    ok((await dropper.page.locator('[data-testid="bughouse-premove-cancel"]').count()) === 0, 'the queued premove is gone from the page');
+    for (const [i, u] of users.entries()) if (u !== dropper) must((await u.page.locator('[data-testid="bughouse-premove-notice"]').count()) === 0, `${u.name} (seat ${places[i].seat}) shows no premove sentence`);
+    ok(true, 'only the dropper\'s page shows the sentence');
+    await converge(watched, users, 'after the cancelled premove');
+    await shot(dropper, 'C-premove-cancelled');
+
+    console.log('\n=== C4. the sentence goes with the next move ===');
+    await act(3, 'e7', 'e5');
+    await waitUntil('the sentence to go', async () => (await notice.count()) === 0, 4_000, 50);
+    ok(true, 'the sentence is gone after the next move (well before its 5 s)');
+    for (const u of users) if (u.pageErrors?.length) console.log(`    note  ${u.name} page errors: ${u.pageErrors.slice(0, 2).join(' | ')}`);
+  } finally {
+    seen?.watched?.close?.();
+    for (const u of seen?.users ?? []) await u.close().catch(() => {});
+  }
+}
+
+// --- D: a flag ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * D (command #35b): a FLAG in the browser. Four humans queue for a 1 minute game and nobody moves: a clock runs out, the server ends the match with the reason "flag", and all four pages
+ * show a game-over card whose winner is the OTHER team than the one of the seat that flagged. Nothing in this scenario waits for a number of seconds: it waits for the card.
+ */
+async function scenarioD(ctx) {
+  let seen = null;
+  try {
+    seen = await openFourHumans(ctx, 'FL', '1 min');
+    const { users, watched, places } = seen;
+    console.log('\n=== D1. nobody moves: a clock runs out ===');
+    for (const u of users) await u.page.locator('[data-testid="game-over"]').waitFor({ timeout: 150_000 });
+    await waitUntil('the server\'s game over', () => watched.over !== null, 15_000);
+    ok(watched.over.result.reason === 'flag', `the server ended the match by a flag (${watched.over.result.reason})`);
+    const winner = watched.over.result.winnerTeam;
+    const loserTeam = places.find((p) => p.seat === watched.over.result.loserSeat)?.team;
+    ok(loserTeam !== undefined && loserTeam !== winner, `the seat that flagged (${watched.over.result.loserSeat}) is on team ${loserTeam}, the winner is team ${winner}`);
+    for (const u of users) {
+      const headline = await u.page.locator('[data-testid="game-over-headline"]').innerText();
+      must(headline === `Team ${winner} wins`, `${u.name}'s card says "${headline}" but the server says team ${winner}`);
+    }
+    ok(true, `all four game-over cards say "Team ${winner} wins", as the server does`);
+    await converge(watched, users, 'the final position');
+    ok(true, 'both boards of all four screens equal the final server position');
+  } finally {
+    seen?.watched?.close?.();
+    for (const u of seen?.users ?? []) await u.close().catch(() => {});
+  }
+}
+
 // --- main -----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const SCENARIOS = [
   ['A', 'four humans: orientation, ten rounds compared on four screens, messages, reload, takeover, spectator, resign', scenarioA],
   ['B', 'the friend flow on two pages', scenarioB],
+  ['C', 'a drop premove cancelled by the opponent\'s move on four pages', scenarioC],
+  ['D', 'a flag: four humans, one clock runs out, four game-over cards', scenarioD],
 ];
 
 async function main() {

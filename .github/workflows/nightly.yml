@@ -46,10 +46,26 @@ jobs:
       PORT: 3000
 
     steps:
+      # (command #35b: the same rule as ci.yml - a paired/X branch of this repo runs against the EM-Chess branch of the same name, so a manual run on paired/bughouse tests the unmerged app)
+      - name: Pick the frontend ref — an EM-Chess branch only when this branch is paired/X and EM-Chess has paired/X, else its default branch
+        id: frontend_ref
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          ref=""
+          case "$BRANCH" in
+            paired/?*)
+              if git ls-remote --exit-code --heads https://github.com/EMChess007/EM-Chess.git "refs/heads/$BRANCH" > /dev/null 2>&1; then ref="$BRANCH"; fi
+              ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Frontend ref::EM-Chess ref '${ref:-default branch}' for '$BRANCH'"
+
       - name: Checkout frontend (EM-Chess) — the logic fuzz imports its chess engine directly
         uses: actions/checkout@v4
         with:
           repository: EMChess007/EM-Chess
+          ref: ${{ steps.frontend_ref.outputs.ref }}
           path: chess-app
 
       - name: Checkout backend (this repo) into chess-app/backend — matches local dev layout

@@ -127,6 +127,45 @@ console.log('\n=== 1. The manager with four members ===');
   check(blocked.ok === false && /Too many wrong codes\. Try again in 5 minutes\./.test(blocked.error), 'five failed guesses from one socket: the sixth gets the cooldown message (the Bughouse rooms\' limiter, one class)');
 }
 
+{
+  // MUTATION SURVIVORS PINNED (friend-rooms-generic.config.cjs). (1) A room that is QUEUED refuses a join even with a free slot: with Bughouse's two members a queued room is always full, so the phase test is
+  // only observable in a family with a pair queue and room to spare - here three members and a queue.
+  const clock = manualTimers(1000);
+  const rooms = new FriendRooms({
+    maxMembers: 3,
+    messages: FOUR_MESSAGES,
+    timers: clock.timers,
+    randomInt: (() => { let n = 0; return () => n++ % 31; })(), // (a fixed 0 would give every room the same code: `newCode` would never find a free one)
+    labelOf: fourControlLabel,
+    makeView: (room) => ({ code: room.code, phase: room.phase }),
+    notifyRoom: () => {},
+    notifyClosed: () => {},
+    startWithBots: () => {},
+    enqueue: () => ({ ok: true }),
+    cancelQueue: () => {},
+    isBusy: () => false,
+  });
+  const member = (n) => ({ socketId: `Q${n}`, userId: `V${n}`, name: `Q${n}` });
+  const created = rooms.create(member(1), { initialSeconds: 300, incrementSeconds: 0 }, 'ffa');
+  rooms.join({ ...member(2), ip: '3.3.3.3' }, created.room.code);
+  check(rooms.start('Q1', 'queue').outcome === 'queued' && rooms.viewFor('Q1').phase === 'queued', 'a room with a pair queue: the host starts the queue, the room is queued');
+  const late = rooms.join({ ...member(3), ip: '3.3.3.3' }, created.room.code);
+  check(late.ok === false && late.error === W.FOUR_ROOM_NOT_FOUND_MESSAGE, 'a QUEUED room refuses a third member although it has a free slot (the phase, not only the size, closes a room)');
+  // (2) EQUIVALENT: the "own room" guard is a second line of defence. A member's own socket and user are already mapped to the room, so the earlier "you already have an open room" answer is what a host
+  // joining their own code really gets; no input reaches the `own` sentence. Pinned: both the same-socket and the same-user case answer the earlier sentence.
+  const mine = rooms.create(member(9), { initialSeconds: 300, incrementSeconds: 0 }, 'ffa');
+  check(rooms.join({ ...member(9), ip: '3.3.3.4' }, mine.room.code).error === W.FOUR_ROOM_HAVE_ROOM_MESSAGE, 'a host joining their own code from the same socket gets "you already have an open room"');
+  check(rooms.join({ socketId: 'Q99', userId: 'V9', name: 'x', ip: '3.3.3.4' }, mine.room.code).error === W.FOUR_ROOM_HAVE_ROOM_MESSAGE, '...and from another socket of the same user too: the "own room" guard behind it is unreachable (an equivalent mutant)');
+}
+
+{
+  // MUTATION SURVIVORS PINNED: a room holds 2 to 4 members, whole numbers only (a room of one is no friend room, five seats do not exist)
+  const deps = (maxMembers) => ({ maxMembers, labelOf: fourControlLabel, makeView: () => ({}), notifyRoom: () => {}, notifyClosed: () => {}, startWithBots: () => {}, isBusy: () => false });
+  for (const bad of [1, 0, 5, 2.5, NaN, '4', undefined]) assert.throws(() => new FriendRooms(deps(bad)), RangeError, `maxMembers ${String(bad)}`);
+  for (const good of [2, 3, 4]) assert.doesNotThrow(() => new FriendRooms(deps(good)), `maxMembers ${good}`);
+  check(true, 'a manager is built for 2, 3 or 4 members and refused for 0, 1, 5, 2.5, NaN and text');
+}
+
 console.log('\n=== 1b. The wire ===');
 {
   check(validateFourRoomCreate({ variant: 'chaturaji', timeControl: { initialSeconds: 86400, incrementSeconds: 0 } }).ok && validateFourRoomCreate({ variant: 'ffa', timeControl: { initialSeconds: 0, incrementSeconds: 0 } }).ok, 'a create takes a variant and any control of the list (Daily and No time limit too)');
@@ -142,6 +181,9 @@ registerFourPlayerHandlers(server, {
   // a logged-in user is whoever the handshake says (no JWT here: the test supplies identities, the handler's shape is the same)
   userIdOf: (socket) => (typeof socket.handshake.auth.user === 'string' ? socket.handshake.auth.user : null),
   resolveName: async (userId) => userId,
+  // a fixed random source: Fisher-Yates with "always index 0" turns [host, friend, bot, bot] into [friend, bot, bot, host] - so the host sits in seat 3 and the friend in seat 0, and a room that
+  // forgot to shuffle (host first) is seen (mutation: friend-rooms-generic "the seats are not shuffled")
+  matchmakerOptions: { randomInt: () => 0 },
 });
 await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
 const URL = `http://127.0.0.1:${httpServer.address().port}`;
@@ -209,6 +251,7 @@ for (const [variant, friends, bots] of [['ffa', 1, 2], ['giveaway', 2, 1], ['cha
   check(started.ok && started.outcome === 'started', `${variant}: the host starts`);
   const first = matches[0];
   check(matches.every((m) => m.roomId === first.roomId && m.variant === variant) && new Set(matches.map((m) => m.seat)).size === humans, `${variant}: ${humans} humans, one room, each with their OWN seat`);
+  if (variant === 'ffa') check(matches[0].seat === 3 && matches[1].seat === 0, 'ffa: the seats are SHUFFLED (with the fixed source the host sits in seat 3 and the friend in seat 0)');
   check(first.seats.filter((s) => s.kind === 'human').length === humans && first.seats.filter((s) => s.kind === 'bot' && s.botReason === 'fill').length === bots, `${variant}: ${bots} bot${bots === 1 ? '' : 's'} fill the empty seat${bots === 1 ? '' : 's'}`);
   check(matches.every((m, i) => typeof m.playerToken === 'string' && matches.filter((o) => o.playerToken === m.playerToken).length === 1), `${variant}: every friend has their own token`);
   const leaked = everyone.some((s, i) => s.inbox.some((e) => e.event !== 'four_match_found' && JSON.stringify(e.payload ?? '').includes(matches[(i + 1) % humans].playerToken)));

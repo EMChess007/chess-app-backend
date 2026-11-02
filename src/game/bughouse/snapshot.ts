@@ -131,7 +131,7 @@ export function deserializeMatch(text: string): DeserializeOutcome {
   if (!isObject(raw) || !hasExactKeys(raw, ['v', 'timeControl', 'roomNumber', 'seq', 'nowMs', 'boards', 'pockets', 'clocks', 'verdicts', 'result'])) return fail('not a Bughouse snapshot');
   if (raw.v !== SNAPSHOT_VERSION) return fail('unknown version');
   const tc = raw.timeControl;
-  if (!isObject(tc) || !hasExactKeys(tc, ['initialMs', 'incrementMs']) || !isWholeMs(tc.initialMs) || tc.initialMs <= 0 || !isWholeMs(tc.incrementMs)) return fail('bad time control');
+  if (!isObject(tc) || !hasExactKeys(tc, ['initialMs', 'incrementMs']) || !isWholeMs(tc.initialMs) || !isWholeMs(tc.incrementMs) || (tc.initialMs === 0 && tc.incrementMs !== 0)) return fail('bad time control');
   const { roomNumber, seq, nowMs } = raw;
   if (!isWholeMs(roomNumber) || !isWholeMs(seq) || !isWholeMs(nowMs)) return fail('bad room number, seq or time');
 

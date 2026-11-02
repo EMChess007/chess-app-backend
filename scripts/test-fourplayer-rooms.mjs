@@ -64,6 +64,33 @@ console.log('\n=== 0b. Timers: one per active room, none after the game ===');
   check(liveTimeouts.size === base + 1 && b.mgr.rooms.has(b.id), "ending one game cancels only ITS timer: the other game's is still pending");
 }
 
+console.log('\n=== 0c. Every control of the app\'s list (command #35): No time limit has NO clock and no timer, Daily has a clock of days ===');
+{
+  const base = liveTimeouts.size;
+  const u = newGame({ tc: { initialSeconds: 0, incrementSeconds: 0 } });
+  check(liveTimeouts.size === base, '"No time limit" arms no clock timer at all');
+  check(JSON.stringify(eventsOf(u.io, 'four_match_found')[0].payload.timeControl) === '{"initialSeconds":0,"incrementSeconds":0}', '...and the match payload says 0 | 0');
+  mock.timers.tick(10 * 86_400_000);
+  check(u.mgr.rooms.has(u.id) && u.room().state.result === null, 'ten days pass: nobody flags, the game is still on');
+  for (let i = 0; i < 8; i++) u.playFirst();
+  check(liveTimeouts.size === base && u.room().clock.enabled === false, '...eight moves later still no timer and the clock is disabled');
+  u.resign(0);
+  u.resign(1);
+  u.resign(2);
+  check(u.mgr.rooms.has(u.id) === false && liveTimeouts.size === base, 'three resignations end it and nothing is left pending');
+
+  const d = newGame({ tc: { initialSeconds: 86_400, incrementSeconds: 0 } });
+  check(liveTimeouts.size === base + 1 && JSON.stringify(eventsOf(d.io, 'four_match_found')[0].payload.clocksMs) === '[86400000,86400000,86400000,86400000]', 'a one-day game: one timer, four clocks of 86 400 000 ms');
+  mock.timers.tick(86_399_000);
+  check(d.mgr.rooms.has(d.id) && d.room().state.result === null, '...one second before the day is over nobody has flagged');
+  mock.timers.tick(1_000);
+  check(d.room() === undefined || d.room().state.status[0] !== 'active', '...at the day the seat on move is out of time (a Daily clock flags like any other)');
+  const fortnight = newGame({ tc: { initialSeconds: 14 * 86_400, incrementSeconds: 0 } });
+  check(liveTimeouts.size >= base + 1 && fortnight.mgr.rooms.has(fortnight.id), 'a 14-day game (1 209 600 000 ms, inside the 2^31 - 1 ms a timer can wait) is accepted and does not fire at once');
+  mock.timers.tick(1000);
+  check(fortnight.mgr.rooms.has(fortnight.id) && fortnight.room().state.result === null, '...and a second later it is still on (an over-long timeout would have fired immediately)');
+}
+
 console.log('\n=== 1. Creating a room: who learns what ===');
 {
   const g = newGame({ names: ['Ann', 'Ben', 'Cy', 'Di'], label: '10 min' });
@@ -101,7 +128,7 @@ console.log('\n=== 1. Creating a room: who learns what ===');
     console.log(`  ok  ${message}`);
   };
   throwsMsg(() => mgr.createRoom({ seats: [human('a'), human('b'), human('c'), human('d')], timeControl: { initialSeconds: 59, incrementSeconds: 0 } }), /createRoom/, 'a time control below the live range is refused');
-  throwsMsg(() => mgr.createRoom({ seats: [human('a'), human('b'), human('c'), human('d')], timeControl: { initialSeconds: 0, incrementSeconds: 0 } }), /createRoom/, '"No time limit" is refused (the clock is the only idle guard)');
+  throwsMsg(() => mgr.createRoom({ seats: [human('a'), human('b'), human('c'), human('d')], timeControl: { initialSeconds: 0, incrementSeconds: 2 } }), /createRoom/, '"No time limit" with an increment is refused (command #35: No time limit itself is accepted - see the section on it)');
   throwsMsg(() => mgr.createRoom({ seats: [human('a'), human('b'), human('c')], timeControl: TC }), /four seats/, 'three seats are refused');
   throwsMsg(() => mgr.createRoom({ seats: [bot, bot, bot, bot], timeControl: TC }), /human/, 'a room with no human is refused');
   throwsMsg(() => mgr.createRoom({ seats: [human('a'), human('a'), bot, bot], timeControl: TC }), /own socket/, 'one socket in two seats is refused');

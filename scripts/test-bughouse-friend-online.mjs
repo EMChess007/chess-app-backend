@@ -118,7 +118,7 @@ try {
     const guest = await client(main, null);
     const refused = await guest.ask('bug_room_create', { timeControl: TC });
     ok(refused.ok === false && /Sign in/.test(refused.error), 'a guest cannot open a room (login is required)');
-    ok((await host.ask('bug_room_create', { timeControl: { initialMs: 7, incrementMs: 0 } })).ok === false, 'a time control outside the six is refused');
+    ok((await host.ask('bug_room_create', { timeControl: { initialMs: 7, incrementMs: 0 } })).ok === false, 'a time control outside the app\'s list is refused');
     const created = await host.ask('bug_room_create', { timeControl: TC });
     allCodes.add(created.room.code);
     ok(created.ok && /^[A-HJKMNP-Z2-9]{6}$/.test(created.room.code) && created.room.youAre === 'host' && created.room.friendName === null && created.room.expiresInMs > 590000, 'a logged-in host opens a room: a 6-character code, the friend slot free, about 10 minutes');

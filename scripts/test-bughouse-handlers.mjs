@@ -114,7 +114,7 @@ console.log('\n=== 2. Joining the queue ===');
   check(update.length === 1 && update[0].payload.queued === 1 && update[0].payload.fillInMs === null, '...and it receives bug_queue_update { queued: 1, fillInMs: null }');
   const again = await a.call('bug_join_queue', { timeControl: TC });
   check(again.length === 1 && again[0].ok === false && /already in a queue/.test(again[0].error) && matchmaker.size() === 1, 'joining again is refused ("already in a queue") and changes nothing');
-  const bad = [undefined, null, 5, 'x', [], {}, { timeControl: { initialMs: 0, incrementMs: 0 } }, { timeControl: { initialMs: 600000, incrementMs: 0 } }, { timeControl: { initialSeconds: 180, incrementSeconds: 0 } }, { timeControl: { initialMs: 180000, incrementMs: 1 } }];
+  const bad = [undefined, null, 5, 'x', [], {}, { timeControl: { initialMs: 0, incrementMs: 5000 } }, { timeControl: { initialMs: 420000, incrementMs: 0 } }, { timeControl: { initialSeconds: 180, incrementSeconds: 0 } }, { timeControl: { initialMs: 180000, incrementMs: 1 } }];
   const b = connect('B');
   for (const payload of bad) {
     const r = await b.call('bug_join_queue', payload);

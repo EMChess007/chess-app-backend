@@ -103,7 +103,8 @@ console.log('\n=== 1. Codes: reading what a person typed ===');
   check(filterBugRoomCodeInput('ab0-c1o 2lI34x5y6z') === 'ABC234', 'the join field keeps only the 31 allowed characters, upper-cased, at most 6');
   check(codeFromInviteText('https://app.example/bughouse/join/abc234') === 'ABC234' && codeFromInviteText('Join me: http://x.y/bughouse/join/K7M2PQ?ref=1 ok') === 'K7M2PQ' && codeFromInviteText('k7m2pq') === 'K7M2PQ' && codeFromInviteText('hello') === null, 'a pasted invite link or a bare code gives the code');
   check(validateBugRoomJoin({ code: 'abc234' }).ok && !validateBugRoomJoin({ code: 5 }).ok && !validateBugRoomJoin(null).ok && validateBugRoomJoin({ code: 'x' }).error === BUG_ROOM_NOT_FOUND_MESSAGE, 'a join payload with anything but a code is refused with the one sentence');
-  check(validateBugRoomCreate({ timeControl: TC }).ok && !validateBugRoomCreate({ timeControl: { initialMs: 1, incrementMs: 0 } }).ok && !validateBugRoomCreate(undefined).ok, 'a create takes one of the six time controls');
+  check(validateBugRoomCreate({ timeControl: TC }).ok && !validateBugRoomCreate({ timeControl: { initialMs: 1, incrementMs: 0 } }).ok && !validateBugRoomCreate(undefined).ok, 'a create takes one of the app\'s time controls (and "No time limit" and Daily are among them)');
+  check(validateBugRoomCreate({ timeControl: { initialMs: 0, incrementMs: 0 } }).ok && validateBugRoomCreate({ timeControl: { initialMs: 86_400_000, incrementMs: 0 } }).ok && !validateBugRoomCreate({ timeControl: { initialMs: 0, incrementMs: 1000 } }).ok, 'a room can be opened for No time limit and for a Daily control, not for an increment on No time limit');
   check(validateBugRoomStart({ mode: 'bots' }).ok && validateBugRoomStart({ mode: 'queue' }).ok && !validateBugRoomStart({ mode: 'solo' }).ok && !validateBugRoomStart('bots').ok, 'a start takes mode bots or queue');
 }
 

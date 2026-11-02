@@ -12,19 +12,58 @@
 import type { ReservePieceType } from '../crazyhouse.js';
 import type { BoardId, BughouseColor, BughouseSeat, BughouseTeam } from './types.js';
 
-/** A time control: integer milliseconds. The spec's six (rule 26): 1 min, 2 | 1, 3 min, 3 | 2, 5 min, 5 | 2. */
+/**
+ * A time control: integer milliseconds. `initialMs: 0` is "No time limit" (command #35): no clock ever runs, nothing can flag (`runningClocks` is empty). Daily is a clock of whole days
+ * (86 400 000 ms a day, 14 days at most = 1 209 600 000 ms, inside the 2^31 - 1 ms a timer can wait).
+ */
 export interface BughouseTimeControl {
   initialMs: number;
   incrementMs: number;
 }
 
+/** "No time limit": the engine's reading of `initialMs === 0`. */
+export const isUnlimitedBughouse = (timeControl: BughouseTimeControl): boolean => timeControl.initialMs === 0;
+
+const MS_PER_DAY = 86_400_000;
+
+/** The label the pickers, the queue and the lists show: "No time limit", "3 min", "3 | 2", "1 day", "7 days" - the very labels of the app's list (`bughouseTimeControls.test.ts` compares them). */
+export function bughouseControlLabel(control: BughouseTimeControl): string {
+  if (control.initialMs === 0) return 'No time limit';
+  if (control.initialMs >= MS_PER_DAY) {
+    const days = control.initialMs / MS_PER_DAY;
+    return days === 1 ? '1 day' : `${days} days`;
+  }
+  const minutes = control.initialMs / 60000;
+  return control.incrementMs === 0 ? `${minutes} min` : `${minutes} | ${control.incrementMs / 1000}`;
+}
+
+/**
+ * Every control the app offers (the app's ONE list, logic/timeControls.ts `TIME_CONTROLS`, in milliseconds): the six of spec rule 26 were all that Bughouse had before command #35.
+ * This module is MIRRORED to the server and must not import the app's list, so the 21 are literals here and `bughouseTimeControls.test.ts` proves they equal `TIME_CONTROLS` converted.
+ */
 export const BUGHOUSE_TIME_CONTROLS: readonly BughouseTimeControl[] = [
+  // the spec's six first (rule 26, in their old order: the tests and the persisted records index them), then the rest of the app's list
   { initialMs: 60000, incrementMs: 0 },
   { initialMs: 120000, incrementMs: 1000 },
   { initialMs: 180000, incrementMs: 0 },
   { initialMs: 180000, incrementMs: 2000 },
   { initialMs: 300000, incrementMs: 0 },
   { initialMs: 300000, incrementMs: 2000 },
+  { initialMs: 0, incrementMs: 0 },
+  { initialMs: 60000, incrementMs: 1000 },
+  { initialMs: 300000, incrementMs: 5000 },
+  { initialMs: 600000, incrementMs: 0 },
+  { initialMs: 900000, incrementMs: 10000 },
+  { initialMs: 1800000, incrementMs: 0 },
+  { initialMs: 600000, incrementMs: 5000 },
+  { initialMs: 1200000, incrementMs: 0 },
+  { initialMs: 3600000, incrementMs: 0 },
+  { initialMs: 86400000, incrementMs: 0 },
+  { initialMs: 172800000, incrementMs: 0 },
+  { initialMs: 259200000, incrementMs: 0 },
+  { initialMs: 432000000, incrementMs: 0 },
+  { initialMs: 604800000, incrementMs: 0 },
+  { initialMs: 1209600000, incrementMs: 0 },
 ];
 
 /**

@@ -48,7 +48,7 @@ const botsOf = (start) => start.seats.filter((s) => s.kind === 'bot');
 console.log('\n=== 0. The numbers ===');
 {
   check(BUG_MIN_HUMANS === 2 && BUG_FILL_WAIT_MS === 30_000 && BUG_BOT_ELO === 1200 && BUG_BOT_NAME === 'Bot (Amateur)', 'two humans minimum, a 30 s fill wait, Amateur (1200) bots named "Bot (Amateur)"');
-  check(BUGHOUSE_TIME_CONTROLS.length === 6, 'the spec\'s six time controls (B11)');
+  check(BUGHOUSE_TIME_CONTROLS.length === 21, 'the app\'s 21 time controls (command #35: the spec\'s six plus the rest of the one list)');
 }
 
 console.log('\n=== 1. The lobby rules ===');
@@ -118,9 +118,10 @@ console.log('\n=== 2. Time controls: only the six, and they never mix ===');
 {
   const { matchmaker, join, entry } = setup();
   const refused = [
-    { initialMs: 600000, incrementMs: 0 },
+    { initialMs: 420000, incrementMs: 0 },
     { initialMs: 180000, incrementMs: 1000 },
-    { initialMs: 0, incrementMs: 0 },
+    { initialMs: 0, incrementMs: 5000 },
+    { initialMs: 129600000, incrementMs: 0 },
     { initialMs: -1, incrementMs: 0 },
     { initialMs: 180000.5, incrementMs: 0 },
     { initialMs: '180000', incrementMs: 0 },
@@ -136,7 +137,7 @@ console.log('\n=== 2. Time controls: only the six, and they never mix ===');
     assert.ok(ack.ok === false && ack.reason === 'invalidRequest', `time control ${JSON.stringify(tc)} must be refused`);
   }
   passed++;
-  console.log(`  ok  ${refused.length} time controls outside the six (a free-form one, "No time limit", seconds instead of ms, junk) are refused and none queues the socket`);
+  console.log(`  ok  ${refused.length} time controls outside the app's list (a free-form one, an increment on No time limit, a day and a half, seconds instead of ms, junk) are refused and none queues the socket`);
   check(matchmaker.size() === 0, '...the queue is empty');
   for (const [i, tc] of BUGHOUSE_TIME_CONTROLS.entries()) check(join(10 + i, tc).ok === true, `${tc.initialMs / 1000} s + ${tc.incrementMs / 1000} s is accepted`);
 }

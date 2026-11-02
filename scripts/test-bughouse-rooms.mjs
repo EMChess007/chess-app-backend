@@ -100,7 +100,7 @@ console.log('\n=== 1. Creation: what every player receives ===');
       return true;
     }
   };
-  check(refused({ seats: seats(4), timeControl: { initialMs: 600000, incrementMs: 0 } }), 'a time control outside the six is refused (a programming error)');
+  check(refused({ seats: seats(4), timeControl: { initialMs: 420000, incrementMs: 0 } }), 'a time control outside the app\'s list (7 minutes) is refused (a programming error)');
   check(refused({ seats: seats(3), timeControl: TC3 }), 'three seats are refused');
   check(refused({ seats: bots, timeControl: TC3 }), 'a room with no human is refused');
   check(refused({ seats: [{ kind: 'human', socketId: 'X0', name: 'a' }, { kind: 'human', socketId: 'X0', name: 'b' }, bots[2], bots[3]], timeControl: TC3 }), 'two humans on one socket are refused');
@@ -645,7 +645,7 @@ console.log('\n=== 16. Pins for the second lines of defence, the exact refusals 
       return err.message;
     }
   };
-  same(message({ seats: seats(4), timeControl: { initialMs: 600000, incrementMs: 0 } }), 'createRoom: Unknown time control.', 'a time control outside the six: refused as such');
+  same(message({ seats: seats(4), timeControl: { initialMs: 420000, incrementMs: 0 } }), 'createRoom: Unknown time control.', 'a time control outside the app\'s list: refused as such');
   same(message({ seats: seats(3), timeControl: TC3 }), 'createRoom: exactly four seats are required', 'three seats: refused as such');
   same(message({ seats: 'four', timeControl: TC3 }), 'createRoom: exactly four seats are required', 'seats that are not a list: refused as such');
   same(message({ seats: bots, timeControl: TC3 }), 'createRoom: at least one human seat is required', 'no human: refused as such');

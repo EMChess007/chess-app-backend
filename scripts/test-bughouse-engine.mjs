@@ -138,8 +138,33 @@ console.log('\n=== 2. The server copy on its own: the rules that matter most ===
   check(e4.kind === 'applied' && e4.match.seq === 1 && e4.match.clocks[1].runningSince === 1000 && e4.match.clocks[0].remainingMs === 59000, 'a move is committed: seq 1, the mover charged, the opponent\'s clock started');
   const wrong = server.settle(m0, { seat: 0, action: { kind: 'move', board: 'B', from: 'e2', to: 'e4' } }, 1000);
   check(wrong.kind === 'rejected' && wrong.reason === 'wrongBoard' && wrong.match === m0, 'a move naming the other board is refused and changes nothing');
-  check(server.BUGHOUSE_TIME_CONTROLS.length === 6 && server.seatAt('B', 'b') === 3 && server.partnerOf(0) === 3 && server.partnerOf(1) === 2, 'the six time controls and the fixed seat map');
+  check(server.BUGHOUSE_TIME_CONTROLS.length === 21 && server.seatAt('B', 'b') === 3 && server.partnerOf(0) === 3 && server.partnerOf(1) === 2, 'the 21 time controls (command #35) and the fixed seat map');
   check(!/draw/i.test(JSON.stringify(Object.keys(server))), 'no export of the server copy mentions a draw');
+}
+
+console.log('\n=== 3. "No time limit" and Daily (command #35) ===');
+{
+  const DAY = 86_400_000;
+  const un = server.createMatch({ timeControl: { initialMs: 0, incrementMs: 0 }, roomNumber: 0, startMs: 0 });
+  check(server.runningClocks(un).length === 0 && server.isUnlimitedBughouse(un.timeControl), 'No time limit: no running clock at all');
+  const after = server.settle(un, null, 400 * DAY);
+  check(after.kind === 'idle' && after.match.result === null, '...and 400 days later a timer firing settles nothing: nobody flags');
+  const moved = server.settle(un, { seat: 0, action: { kind: 'move', board: 'A', from: 'e2', to: 'e4' } }, 3 * DAY);
+  check(moved.kind === 'applied' && moved.match.clocks.every((clock) => clock.remainingMs === 0), '...a move three days later is accepted, no clock is charged');
+  check(server.deserializeMatch(server.serializeMatch(moved.match)).ok === true, '...and the snapshot of such a match round-trips');
+  check(!server.deserializeMatch(JSON.stringify({ ...JSON.parse(server.serializeMatch(un)), timeControl: { initialMs: 0, incrementMs: 1000 } })).ok, '...but a snapshot that says 0 with an increment is refused');
+  let refusedIncrement = false;
+  try {
+    server.createMatch({ timeControl: { initialMs: 0, incrementMs: 1000 }, roomNumber: 0, startMs: 0 });
+  } catch {
+    refusedIncrement = true;
+  }
+  check(refusedIncrement, 'a match cannot be created for No time limit WITH an increment');
+  const daily = server.createMatch({ timeControl: { initialMs: DAY, incrementMs: 0 }, roomNumber: 0, startMs: 0 });
+  check(server.runningClocks(daily)[0].deadline === DAY, 'a one-day match: the white clock of board A falls due at exactly one day');
+  check(server.settle(daily, null, DAY - 1).kind === 'idle' && server.settle(daily, null, DAY).kind === 'flag', '...nothing before it, a flag at it');
+  const lastLabel = server.BUGHOUSE_TIME_CONTROLS.map(server.bughouseControlLabel);
+  check(lastLabel[6] === 'No time limit' && lastLabel[0] === '1 min' && lastLabel[7] === '1 | 1' && lastLabel[15] === '1 day' && lastLabel[20] === '14 days', 'the labels of the list (the six of the spec first): 1 min ... No time limit at 6, 1 | 1 at 7, 1 day at 15, 14 days at 20');
 }
 
 console.log(`\nAll good — ${passed} checks passed.`);

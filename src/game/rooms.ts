@@ -186,6 +186,12 @@ export function isUnlimitedTimeControl(timeControl: TimeControl): boolean {
   return timeControl.initialSeconds <= 0;
 }
 
+/** A DAILY control: a clock of one day or more (the app's Daily presets are 1, 2, 3, 5, 7 and 14 days). Such a game is never forfeited for a disconnect. */
+export const DAILY_MIN_SECONDS = 86_400;
+export function isDailyTimeControl(timeControl: TimeControl): boolean {
+  return timeControl.initialSeconds >= DAILY_MIN_SECONDS;
+}
+
 function initialClockMs(timeControl: TimeControl): number {
   // A non-positive initialSeconds means "no clock" (matches the mobile app's "No time limit"
   // time control) — represented as a very large remaining time rather than 0, and the timeout
@@ -905,6 +911,10 @@ export class RoomManager {
 
     slot.socketId = null;
     slot.disconnectedAt = Date.now();
+
+    // A DAILY game (command #35) has no abandonment forfeit: a player who closes the app for a night is not beaten for it - the clock of days decides. The room stays in memory until
+    // the clock, a resignation or a result ends it (14 days at most); it does NOT survive a server restart (persistence is the unbuilt part, TESTING.md "Daily games").
+    if (isDailyTimeControl(room.timeControl)) return;
 
     const opponentColor: PieceColor = location.color === 'w' ? 'b' : 'w';
     const opponentSlot = room.players[opponentColor];

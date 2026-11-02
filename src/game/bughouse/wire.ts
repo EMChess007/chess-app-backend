@@ -279,7 +279,7 @@ export function validateBugBoard(value: unknown): BugValidation<BoardId> {
   return value === 'A' || value === 'B' ? { ok: true, value } : invalid('Invalid board.');
 }
 
-/** One of the spec's six time controls, exactly (B11): anything else - a free-form control, "No time limit" - is refused. The wire carries whole milliseconds like the engine. */
+/** One of the app's controls, exactly (`BUGHOUSE_TIME_CONTROLS`: the list of command #35, "No time limit" and Daily included): anything else - a free-form control - is refused. The wire carries whole milliseconds like the engine. */
 export function validateBugTimeControl(value: unknown): BugValidation<BughouseTimeControl> {
   if (!isRecord(value)) return invalid('Invalid time control.');
   const { initialMs, incrementMs } = value;

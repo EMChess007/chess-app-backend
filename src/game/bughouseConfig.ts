@@ -6,6 +6,8 @@
  * NEW constants here: fourPlayerConfig.ts is not touched by Bughouse, so a change to one mode's number can never move the other's.
  */
 
+import { bughouseControlLabel } from './bughouse/rules.js';
+
 /** How long a finished match's RESULT stays available to a late `bug_rejoin` (B22). */
 export const BUG_FINISHED_RETENTION_MS = 5 * 60 * 1000;
 
@@ -81,10 +83,10 @@ export function resolveBugGraceMs(env: Record<string, string | undefined> = proc
 
 /** The pause before a bot's move, by time control (bullet is quicker). */
 export function bugBotThinkMs(initialMs: number): number {
-  return initialMs <= BUG_BULLET_MAX_INITIAL_MS ? BUG_BOT_THINK_BULLET_MS : BUG_BOT_THINK_MS;
+  return initialMs > 0 && initialMs <= BUG_BULLET_MAX_INITIAL_MS ? BUG_BOT_THINK_BULLET_MS : BUG_BOT_THINK_MS;
 }
 
-/** "3 min", "3 | 2" - the label the lists and the queue screen show. */
+/** "3 min", "3 | 2", "1 day", "No time limit" - the label the lists and the queue screen show (the engine's own function, so the app and the server cannot differ). */
 export function bugTimeControlLabel(initialMs: number, incrementMs: number): string {
-  return incrementMs > 0 ? `${initialMs / 60000} | ${incrementMs / 1000}` : `${initialMs / 60000} min`;
+  return bughouseControlLabel({ initialMs, incrementMs });
 }

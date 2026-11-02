@@ -257,6 +257,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:bughouseHandlers
 
+      - name: Run the every-time-control real-socket case (command #35; its own server: 2-player Quick Match + Challenge, 4 Player Chess / Giveaway / Chaturaji, Crazy Bughouse - all 21 controls each)
+        working-directory: chess-app/backend
+        run: npm run test:timeControlsSockets
+
       - name: Run the Bughouse test-only seed switch tests (default unchanged, ignored in production - also on a real production-mode process -, honoured outside it, no secret or value logged, set nowhere in a workflow)
         working-directory: chess-app/backend
         run: npm run test:bughouseTestSwitches

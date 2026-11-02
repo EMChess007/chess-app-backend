@@ -234,11 +234,11 @@ async function testQueueAndMatchFound() {
   for (const name of names) sockets.push(await connect(name));
   const inboxes = sockets.map(record);
 
-  // Unlimited and Daily are refused over the wire (the live-play range is the only idle guard there is).
-  const unlimited = await emitAck(sockets[0], 'four_join_queue', { timeControl: { initialSeconds: 0, incrementSeconds: 0 } });
-  check(unlimited.ok === false && typeof unlimited.error === 'string', 'four_join_queue with "No time limit" (0 s) is refused');
-  const daily = await emitAck(sockets[0], 'four_join_queue', { timeControl: { initialSeconds: 86400, incrementSeconds: 0 } });
-  check(daily.ok === false, 'four_join_queue with a Daily time control is refused');
+  // A control the app does not offer is refused over the wire (command #35: "No time limit" and Daily are accepted now, an increment on either is not).
+  const unlimited = await emitAck(sockets[0], 'four_join_queue', { timeControl: { initialSeconds: 0, incrementSeconds: 4 } });
+  check(unlimited.ok === false && typeof unlimited.error === 'string', 'four_join_queue with "No time limit" and an increment is refused');
+  const daily = await emitAck(sockets[0], 'four_join_queue', { timeControl: { initialSeconds: 86400, incrementSeconds: 4 } });
+  check(daily.ok === false, 'four_join_queue with a Daily time control and an increment is refused');
 
   const found = sockets.map((s) => waitFor(s, 'four_match_found')); // BEFORE the emits - see waitFor's doc comment
   found.forEach((p) => p.catch(() => {}));

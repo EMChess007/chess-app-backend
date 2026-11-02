@@ -102,7 +102,7 @@ export function judgeBoardState(board: BoardId, state: BoardState, white: Reserv
 
 export function createMatch(options: NewMatchOptions): BughouseMatch {
   const { timeControl, roomNumber, startMs } = options;
-  if (!isWholeMs(timeControl.initialMs) || timeControl.initialMs <= 0 || !isWholeMs(timeControl.incrementMs)) throw new RangeError('the time control must be whole milliseconds');
+  if (!isWholeMs(timeControl.initialMs) || !isWholeMs(timeControl.incrementMs) || (timeControl.initialMs === 0 && timeControl.incrementMs !== 0)) throw new RangeError('the time control must be whole milliseconds');
   if (!Number.isSafeInteger(roomNumber) || roomNumber < 0) throw new RangeError('the room number must be a whole number');
   if (!isWholeMs(startMs)) throw new RangeError('the start instant must be whole milliseconds');
   const pockets = BUGHOUSE_SEATS.map(() => emptyReserve());
@@ -118,6 +118,7 @@ export function createMatch(options: NewMatchOptions): BughouseMatch {
 /** Every running clock with the instant its flag falls. Two at most while the match is on (one per board). */
 export function runningClocks(match: BughouseMatch): RunningClock[] {
   const running: RunningClock[] = [];
+  if (match.timeControl.initialMs === 0) return running; // "No time limit": nothing runs, nothing can flag
   for (const seat of BUGHOUSE_SEATS) {
     const deadline = deadlineOf(match.clocks[seat]);
     if (deadline !== null) running.push({ seat, board: seatPlace(seat).board, deadline, startSeq: match.clocks[seat].startSeq });

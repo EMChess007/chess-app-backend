@@ -90,11 +90,11 @@ function boot(extra = {}) {
   return { io, lookups, ...registered, connect: (id, opts) => io.connect(fakeSocket(id, opts)) };
 }
 
-console.log('\n=== 1. Exactly the nine events are wired ===');
+console.log('\n=== 1. Exactly the nine events and the four friend-room events are wired ===');
 {
   const { connect } = boot();
   const s = connect('A');
-  check([...s.listeners.keys()].filter((k) => k !== 'disconnect').sort().join() === [...FOUR_CLIENT_EVENT_NAMES].sort().join(), 'a connected socket listens to exactly the nine four_* client events of the wire contract (and disconnect)');
+  check([...s.listeners.keys()].filter((k) => k !== 'disconnect').sort().join() === [...FOUR_CLIENT_EVENT_NAMES, 'four_room_create', 'four_room_join', 'four_room_leave', 'four_room_start'].sort().join(), 'a connected socket listens to exactly the nine four_* client events of the wire contract and the four friend-room events (and disconnect)');
   check([...s.listeners.keys()].every((k) => k === 'disconnect' || k.startsWith('four_')), '...no event outside the four_* namespace (the 2-player events cannot collide)');
 }
 
@@ -470,7 +470,7 @@ console.log('\n=== 7. The server wiring (source pins) ===');
   const index = read('../src/index.ts');
   const twoPlayer = read('../src/game/socketHandlers.ts');
   const listens = handlers.match(/listen\(socket, '(four_[a-z_]+)'/g) ?? [];
-  check(listens.length === 9 && new Set(listens).size === 9, 'handlers: exactly nine listen() registrations, all distinct');
+  check(listens.length === 13 && new Set(listens).size === 13, 'handlers: exactly thirteen listen() registrations (the nine plus the four friend-room events of command #35), all distinct');
   check((handlers.match(/socket\.on\(/g) ?? []).length === 2, 'handlers: socket.on appears only in listen() and for disconnect (nothing bypasses the safe wrapper)');
   const handlerCode = handlers.split('\n').filter((line) => !/^\s*(\*|\/\*|\/\/)/.test(line)).join('\n'); // code only: the header comment names ack?.() in prose
   check(!/ack\?\.\(/.test(handlerCode), 'handlers: no `ack?.()` (that throws on a non-function ack) anywhere in the code');

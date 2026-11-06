@@ -20,6 +20,7 @@ import {
   type SpellChessState,
 } from './spellChess.js';
 import { HORDE_START_FEN, getHordeWinnerFromFen } from './horde.js';
+import { RACING_KINGS_START_FEN, racingKingsOutcome } from './racingKings.js';
 import { RESERVE_PIECE_TYPES, type CrazyhouseState } from './crazyhouse.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
@@ -92,6 +93,8 @@ interface Room {
   spellChess: boolean;
   /** Horde -- see horde.ts. */
   horde: boolean;
+  /** Racing Kings -- see racingKings.ts. */
+  racingKings: boolean;
   /** Crazyhouse -- see crazyhouse.ts. The reserves/promoted squares live INSIDE room.engine (it updates them on every move/drop);
    * this flag only says whether to expose them. */
   crazyhouse: boolean;
@@ -147,6 +150,8 @@ export interface CreateRoomParams {
   spellChess: boolean;
   /** Horde -- see horde.ts: the room starts from HORDE_START_FEN (36 White pawns, no White king). */
   horde: boolean;
+  /** Racing Kings -- see racingKings.ts: the room starts from RACING_KINGS_START_FEN; a checking move is illegal. */
+  racingKings: boolean;
   /** Crazyhouse -- see crazyhouse.ts: an ordinary start position; a turn is a move OR a drop from the capturer's reserve. */
   crazyhouse: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
@@ -200,8 +205,8 @@ function initialClockMs(timeControl: TimeControl): number {
 }
 
 /** The `[Variant]` tag a finished room's PGN carries (undefined for the standard/Chess960-style modes, which replay as ordinary chess). */
-export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'crazyhouse'>): string | undefined {
-  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.crazyhouse ? 'Crazyhouse' : undefined;
+export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'racingKings' | 'crazyhouse'>): string | undefined {
+  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.racingKings ? 'Racing Kings' : room.crazyhouse ? 'Crazyhouse' : undefined;
 }
 
 /**
@@ -238,7 +243,7 @@ export class RoomManager {
 
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
-    const initialFen = params.initialFen ?? (params.horde ? HORDE_START_FEN : params.chess960 ? generateChess960Position() : START_FEN);
+    const initialFen = params.initialFen ?? (params.racingKings ? RACING_KINGS_START_FEN : params.horde ? HORDE_START_FEN : params.chess960 ? generateChess960Position() : START_FEN);
     const engine = new RoomChessEngine(initialFen, {
       chess960: params.chess960,
       initialFen,
@@ -247,6 +252,7 @@ export class RoomManager {
       duckChess: params.duckChess,
       spellChess: params.spellChess,
       horde: params.horde,
+      racingKings: params.racingKings,
       crazyhouse: params.crazyhouse,
     });
     const ms = initialClockMs(params.timeControl);
@@ -268,6 +274,7 @@ export class RoomManager {
       duckSquare: null,
       spellChess: params.spellChess,
       horde: params.horde,
+      racingKings: params.racingKings,
       crazyhouse: params.crazyhouse,
       spellState: initialSpellChessState(),
       repetitionKeys: [],
@@ -593,6 +600,21 @@ export class RoomManager {
       } else {
         this.scheduleTimeout(room);
       }
+    } else if (room.racingKings) {
+      // Racing Kings: a king on the 8th rank decides the game (racingKingsOutcome: a win, or a DRAW when both kings made it),
+      // checked FIRST -- chess.js knows nothing of the goal. A null winner on 'racingKings' is the both-kings draw. Everything
+      // else (stalemate, fifty-move, insufficient material, repetition) comes from the racing-kings-aware engine.
+      const goal = racingKingsOutcome(room.engine);
+      if (goal) {
+        this.endGame(room, 'racingKings', goal === 'draw' ? null : goal);
+      } else if (repeated) {
+        this.endGame(room, 'repetition', null);
+      } else if (room.engine.isGameOver()) {
+        const status = room.engine.getStatus();
+        this.endGame(room, status === 'stalemate' ? 'stalemate' : 'draw', null);
+      } else {
+        this.scheduleTimeout(room);
+      }
     } else if (room.horde) {
       // Horde: Black wins the instant White has no pieces left -- checked FIRST, because chess.js reports that position as
       // STALEMATE (a draw): White to move, no moves, no check. Everything else is chess.js's own judgement via the horde-aware
@@ -704,6 +726,7 @@ export class RoomManager {
         duckSquare: room.duckChess ? room.duckSquare : undefined,
         isSpellChess: room.spellChess,
         isHorde: room.horde,
+        isRacingKings: room.racingKings,
         isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
@@ -871,6 +894,7 @@ export class RoomManager {
         duckSquare: room.duckChess ? room.duckSquare : undefined,
         isSpellChess: room.spellChess,
         isHorde: room.horde,
+        isRacingKings: room.racingKings,
         isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,

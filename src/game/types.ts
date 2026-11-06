@@ -33,7 +33,8 @@ export type GameOverReason =
   | 'atomic'
   | 'duckChess'
   | 'spellChess'
-  | 'horde';
+  | 'horde'
+  | 'racingKings';
 
 // --- Client -> server payloads ---------------------------------------------
 
@@ -54,6 +55,8 @@ export interface JoinQueuePayload {
   isSpellChess?: boolean;
   /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
   isHorde?: boolean;
+  /** Racing Kings -- see racingKings.ts. Mutually exclusive with every other variant. */
+  isRacingKings?: boolean;
   /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
   isCrazyhouse?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
@@ -123,6 +126,7 @@ export interface MatchFoundPayload {
   isDuckChess: boolean;
   isSpellChess: boolean;
   isHorde: boolean;
+  isRacingKings: boolean;
   isCrazyhouse: boolean;
   fen: string;
   whiteMs: number;
@@ -193,6 +197,7 @@ export interface RejoinStatePayload {
   duckSquare?: string | null;
   isSpellChess: boolean;
   isHorde: boolean;
+  isRacingKings: boolean;
   isCrazyhouse: boolean;
   /** Spell Chess only — charges/cooldowns/pending effects right now. */
   spellState?: SpellChessState;
@@ -260,6 +265,7 @@ export interface CreateChallengePayload {
   isSpellChess?: boolean;
   /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
   isHorde?: boolean;
+  isRacingKings?: boolean;
   /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
   isCrazyhouse?: boolean;
   timeControlLabel?: string;

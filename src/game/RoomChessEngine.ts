@@ -14,6 +14,7 @@ import {
 } from './atomic.js';
 import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './chess960.js';
 import { isCastleBlockedByDuck, isMoveBlockedByDuck } from './duckChess.js';
+import { racingKingsOutcomeFromFen } from './racingKings.js';
 import { HORDE_FIRST_RANK_DOUBLE_STEP_ALLOWS_EN_PASSANT, getHordeWinnerFromFen, hordeFirstRankDoubleStep } from './horde.js';
 import { castlingRookOrigin, getJumpAugmentedCaptures } from './spellChess.js';
 import {
@@ -238,6 +239,14 @@ export interface RoomChessEngineOptions {
    */
   horde?: boolean;
   /**
+   * Racing Kings only -- the server-side twin of the mobile app's identical ChessEngine option (see src/logic/racingKings.ts
+   * there, mirrored in ./racingKings.ts). chess.js stays authoritative; a move that gives CHECK is illegal and is taken back
+   * (its SAN ends in "+" or "#"). getStatus() never says check/checkmate: 'stalemate' when no check-free move exists, 'draw'
+   * on the fifty-move rule or insufficient material. The rank-8 result is RoomManager's (racingKingsOutcome), checked first.
+   * Not combinable with any other variant.
+   */
+  racingKings?: boolean;
+  /**
    * Crazyhouse only -- the server-side twin of the mobile app's identical ChessEngine option (see src/logic/crazyhouse.ts there,
    * mirrored in ./crazyhouse.ts). chess.js stays authoritative for every ordinary move; this adds drop() and keeps the reserve
    * and the promoted-piece set (`crazyhouseState`, passed in because it is NOT part of the FEN, like duckSquare) up to date on
@@ -264,6 +273,7 @@ export class RoomChessEngine {
   private duckSquare: string | null;
   private spellChess: boolean;
   private horde: boolean;
+  private racingKings: boolean;
   private crazyhouse: boolean;
   private crazyhouseState: CrazyhouseState;
   private frozenSquares: string[];
@@ -281,6 +291,7 @@ export class RoomChessEngine {
     this.duckSquare = options?.duckChess ? (options.duckSquare ?? null) : null;
     this.spellChess = options?.spellChess ?? false;
     this.horde = options?.horde ?? false;
+    this.racingKings = options?.racingKings ?? false;
     this.crazyhouse = options?.crazyhouse ?? false;
     this.crazyhouseState = cloneCrazyhouseState(options?.crazyhouse ? (options.crazyhouseState ?? initialCrazyhouseState()) : initialCrazyhouseState());
     this.frozenSquares = options?.spellChess ? (options.frozenSquares ?? []) : [];
@@ -310,6 +321,11 @@ export class RoomChessEngine {
     try {
       const result = this.chess.move({ from, to, promotion });
       if (!result) return null;
+      if (this.racingKings && /[+#]$/.test(result.san)) {
+        // Racing Kings: giving check is illegal -- take the move back (see RoomChessEngineOptions.racingKings).
+        this.chess.undo();
+        return null;
+      }
       // Real promotion only (chess.js only sets `promotion` on the result when the move
       // actually promoted a pawn) — never just echo back whatever the client claimed.
       const actualPromotion = result.promotion as 'n' | 'b' | 'r' | 'q' | undefined;
@@ -342,6 +358,11 @@ export class RoomChessEngine {
       if (this.chess.isDrawByFiftyMoves()) return 'draw';
       return inCheck ? 'check' : 'playing';
     }
+    if (this.racingKings) {
+      // No check, no checkmate (a checking move is illegal); stalemate, fifty-move and insufficient material are draws.
+      if (this.racingKingsMoves().length === 0) return 'stalemate';
+      return this.chess.isDrawByFiftyMoves() || this.chess.isInsufficientMaterial() ? 'draw' : 'playing';
+    }
     if (this.horde) {
       // Never chess.js's isDraw(): its insufficient-material rule misreads Horde (see RoomChessEngineOptions.horde). The
       // fifty-move rule is the only automatic draw besides stalemate; "White has nothing left" is RoomManager's win check.
@@ -367,6 +388,11 @@ export class RoomChessEngine {
     if (this.crazyhouse) {
       const status = this.getStatus();
       return status === 'checkmate' || status === 'stalemate' || status === 'draw';
+    }
+    if (this.racingKings) {
+      if (racingKingsOutcomeFromFen(this.getFen())) return true;
+      const status = this.getStatus();
+      return status === 'stalemate' || status === 'draw';
     }
     if (this.horde) {
       if (getHordeWinnerFromFen(this.getFen())) return true;
@@ -570,6 +596,19 @@ export class RoomChessEngine {
     // every ply (and loadGiveawayFen keeps a promoted second king through that rebuild).
     this.chess = loadGiveawayFen(this.chess.fen({ forceEnpassantSquare: true }));
     return { ...applied, san: applied.san.replace(/[+#]$/, '') };
+  }
+
+  // --- Racing Kings (see racingKings.ts) ---------------------------------
+
+  /** chess.js's legal moves minus every move that gives check (SAN ends in "+" / "#"), optionally only those from `square`. */
+  private racingKingsMoves(square?: string) {
+    const all = square ? this.chess.moves({ square: square as ChessJsSquare, verbose: true }) : this.chess.moves({ verbose: true });
+    return all.filter((move) => !/[+#]$/.test(move.san));
+  }
+
+  /** Destination squares of the legal moves from `square` (Racing Kings only; used for the rank-8 result). */
+  getLegalMoves(square: string): string[] {
+    return this.racingKingsMoves(square).map((move) => move.to as string);
   }
 
   // --- Horde (see horde.ts) ----------------------------------------------

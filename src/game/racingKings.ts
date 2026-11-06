@@ -2,7 +2,7 @@
 // army on ranks 1-2 (see RACING_KINGS_START_FEN), NO check may ever be given (a move that checks either king is illegal),
 // and the first king on the 8th rank wins -- except that White moves first, so when White's king gets there Black gets one
 // reply: if its king reaches rank 8 too the game is a DRAW, otherwise White wins. Stalemate, the fifty-move rule, threefold
-// repetition and insufficient material are draws as in ordinary chess.
+// repetition are draws as in ordinary chess. There is NO insufficient-material draw (bare kings can still race).
 //
 // How little the server needs: chess.js already keeps your own king out of check; the one extra rule (no checking move) is
 // a filter on its verbose moves by the "+" / "#" SAN suffix, implemented in RoomChessEngine (see its `racingKings` option).

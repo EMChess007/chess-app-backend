@@ -242,7 +242,7 @@ export interface RoomChessEngineOptions {
    * Racing Kings only -- the server-side twin of the mobile app's identical ChessEngine option (see src/logic/racingKings.ts
    * there, mirrored in ./racingKings.ts). chess.js stays authoritative; a move that gives CHECK is illegal and is taken back
    * (its SAN ends in "+" or "#"). getStatus() never says check/checkmate: 'stalemate' when no check-free move exists, 'draw'
-   * on the fifty-move rule or insufficient material. The rank-8 result is RoomManager's (racingKingsOutcome), checked first.
+   * on the fifty-move rule (never on insufficient material: bare kings can still race). The rank-8 result is RoomManager's (racingKingsOutcome), checked first.
    * Not combinable with any other variant.
    */
   racingKings?: boolean;
@@ -359,9 +359,10 @@ export class RoomChessEngine {
       return inCheck ? 'check' : 'playing';
     }
     if (this.racingKings) {
-      // No check, no checkmate (a checking move is illegal); stalemate, fifty-move and insufficient material are draws.
+      // No check, no checkmate (a checking move is illegal); stalemate and the fifty-move rule are draws. NO insufficient-
+      // material draw: bare kings can still race to rank 8.
       if (this.racingKingsMoves().length === 0) return 'stalemate';
-      return this.chess.isDrawByFiftyMoves() || this.chess.isInsufficientMaterial() ? 'draw' : 'playing';
+      return this.chess.isDrawByFiftyMoves() ? 'draw' : 'playing';
     }
     if (this.horde) {
       // Never chess.js's isDraw(): its insufficient-material rule misreads Horde (see RoomChessEngineOptions.horde). The

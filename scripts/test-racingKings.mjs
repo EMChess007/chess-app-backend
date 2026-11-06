@@ -140,6 +140,8 @@ function rkRoom(initialFen) {
   check(racingKingsOutcome(e) === 'w', 'racingKingsOutcome: White on rank 8, Black unable to follow -> w');
   const e2 = new RoomChessEngine('K7/6k1/8/8/8/8/8/8 b - - 0 1', { racingKings: true });
   check(racingKingsOutcome(e2) === null, 'racingKingsOutcome: White on rank 8, Black able to follow -> undecided');
+  const bare = new RoomChessEngine('8/8/8/8/8/8/k7/7K w - - 0 1', { racingKings: true });
+  check(bare.getStatus() === 'playing' && !bare.isGameOver(), 'bare kings (K vs K) is NOT a draw: the race goes on');
 }
 
 // --- 3. Parity with the mobile engine ------------------------------------------------------------------

@@ -440,6 +440,7 @@ export function registerSocketHandlers(io: Server): void {
           chess960: Boolean(payload.isChess960),
           kingOfTheHill: Boolean(payload.isKingOfTheHill),
           threeCheck: Boolean(payload.isThreeCheck),
+          racingKings: Boolean(payload.isRacingKings),
         });
         ack?.({ ok: true, code: tournament.code, tournamentId: tournament.id });
       } catch (err) {

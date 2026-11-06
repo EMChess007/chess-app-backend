@@ -199,7 +199,7 @@ await withRouter(async (url, snapshots) => {
   const index = read('src/index.ts');
   ok(/if \(fourTestSetup\) app\.use\('\/test-setup', createFourTestSetupRouter\(fourStartSnapshots\)\);/.test(index), 'the wiring: the router is mounted only inside `if (fourTestSetup)`');
   ok(index.includes('...(fourTestSetup ? { startSnapshotFor:') && index.includes('...seededFourDeps(fourTestSeed)'), 'the wiring: the snapshot hook exists only when the endpoint is enabled; the seed deps come from seededFourDeps');
-  const allowed = new Set(['src/game/fourTestSwitches.ts', 'scripts/test-four-test-switches.mjs', 'scripts/e2e-browser/stack.mjs', 'TESTING.md', 'CHECKLIST.md', 'AGENTS.md']);
+  const allowed = new Set(['src/game/fourTestSwitches.ts', 'scripts/test-four-test-switches.mjs', 'scripts/test-bughouse-test-switches.mjs', 'scripts/e2e-browser/stack.mjs', 'TESTING.md', 'CHECKLIST.md', 'AGENTS.md']);
   const hits = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {

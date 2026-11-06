@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { io } from 'socket.io-client';
 import { serializeActiveGame } from '../../src/logic/activeGame.ts';
 import { CHATURAJI_RULES, GIVEAWAY_RULES, deserialize, geometryOf, legalMoves, promotionOf, BISHOP, KNIGHT, QUEEN, ROOK } from '../src/game/fourPlayer/index.ts';
+import { deserializeMatch as deserializeBugMatch } from '../src/game/bughouse/index.ts';
 
 const SERVER_URL = process.env.BACKEND_URL ?? 'http://localhost:3000';
 let passed = 0;
@@ -36,7 +37,15 @@ function check(condition, message) {
   console.log(`  ✓ ${message}`);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const tmp = mkdtempSync(join(tmpdir(), 'rejoin-persist-'));
+/** Polls until `test()` is truthy; a hang becomes a failure naming what it waited for (the bound is not an assertion about time). */
+async function until(test, what, ms = 8000) {
+  const t0 = Date.now();
+  while (!test()) {
+    if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
+    await sleep(15);
+  }
+}
+const tmp =mkdtempSync(join(tmpdir(), 'rejoin-persist-'));
 process.on('exit', () => rmSync(tmp, { recursive: true, force: true }));
 
 function connect(name) {
@@ -82,11 +91,13 @@ const CHILD = fileURLToPath(new URL('./rejoin-client-process.mjs', import.meta.u
  * made the verdict depend on how quickly the machine boots a process (it takes 1.5-3 s on a busy Windows desktop and the test failed about one run in
  * three on a clean main). Warming the process first removes that race without weakening any check: the restarted app still has only the record file.
  */
-function startApp(record, { make, listen = 2500, during, hold = false } = {}) {
+function startApp(record, { make, makeBug, listen = 2500, during, hold = false } = {}) {
   const file = join(tmp, `record-${Math.random().toString(36).slice(2)}.json`);
-  writeFileSync(file, serializeActiveGame(record));
+  // a Bughouse record is the plain `{ kind: 'bughouse', match: { roomId, playerToken } }` (the app's ActiveOnlineGame has no such kind until the client workstream, W4)
+  writeFileSync(file, record.kind === 'bughouse' ? JSON.stringify(record) : serializeActiveGame(record));
   const args = [TSX_CLI, CHILD, '--record', file, '--url', SERVER_URL, '--listen', String(listen)];
   if (make) args.push('--make', JSON.stringify(make));
+  if (makeBug) args.push('--make-bug', JSON.stringify(makeBug));
   if (hold) args.push('--hold');
   const child = spawn(process.execPath, args, { stdio: [hold ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   const events = [];
@@ -393,6 +404,104 @@ for (const [label, variant, prefix] of [['4 Player Chess', 'ffa', 'F'], ['4 Play
 }
 function everHeardFour(socket) {
   return socket.heard.filter((h) => h.event === 'four_seat_update').map((h) => h.args[0].seats);
+}
+
+// --- Bughouse (W2) ----------------------------------------------------------------------------------------------------------------------
+const BUG_TIME = { initialMs: 300000, incrementMs: 0 };
+async function startBug(label) {
+  const sockets = [];
+  for (let i = 0; i < 4; i++) sockets.push(await connect(`${label}${i}`));
+  const found = sockets.map((s) => waitFor(s, 'bug_match_found'));
+  found.forEach((p) => p.catch(() => {}));
+  for (const s of sockets) assert.ok((await ack(s, 'bug_join_queue', { timeControl: BUG_TIME })).ok, 'bug_join_queue');
+  const matches = await Promise.all(found);
+  const players = [];
+  matches.forEach((match, i) => (players[match.seat] = { socket: sockets[i], match }));
+  return { players, sockets, roomId: matches[0].roomId };
+}
+const bugRecord = (match) => ({ kind: 'bughouse', match: { roomId: match.roomId, playerToken: match.playerToken } });
+const bugHeardSeats = (socket) => socket.heard.filter((h) => h.event === 'bug_seat_update').map((h) => h.args[0].seats);
+
+{
+  console.log('\n=== 6. Bughouse: restart as a new process, within the grace ===');
+  const room = await startBug('B');
+  const states = [];
+  room.players.forEach((p) => p.socket.on('bug_state', (s) => states.push(s)));
+  const e4 = await ack(room.players[0].socket, 'bug_move', { roomId: room.roomId, board: 'A', from: 'e2', to: 'e4' });
+  assert.ok(e4.ok, 'bug_move');
+  const d4 = await ack(room.players[2].socket, 'bug_move', { roomId: room.roomId, board: 'B', from: 'd2', to: 'd4' });
+  assert.ok(d4.ok, 'bug_move');
+  const victim = room.players[1]; // seat 1 (Board A, Black): it is on move on board A
+  const tokens = room.players.map((p) => p.match.playerToken);
+  const others = room.players.filter((p) => p !== victim);
+  // Both restarted apps (the real record and one with a forged token) are started and fully warmed BEFORE the kill: only their handshakes happen inside the grace.
+  const restarted = startApp(bugRecord(victim.match), { listen: 800, hold: true });
+  const forgedApp = startApp(bugRecord({ ...victim.match, playerToken: 'not-the-token' }), { listen: 300, hold: true });
+  await Promise.all([restarted.ready, forgedApp.ready]);
+  victim.socket.disconnect(); // the app is killed
+  await sleep(300);
+  const run = await restarted.go();
+  const re = rejoinedOf(run);
+  check(re?.ack?.ok === true && !re.ack.finished && re.ack.state.seat === 1 && re.ack.state.roomId === room.roomId, 'the new process rejoins its seat with only the saved record (room id and token)');
+  check(re.ack.state.seq >= 2 && re.ack.state.state === states.filter((s) => s.seq === re.ack.state.seq)[0]?.state, "...with the match's snapshot at that seq, byte for byte");
+  const restored = deserializeBugMatch(re.ack.state.state);
+  check(restored.ok && restored.match.boards.A.plies === 1 && restored.match.boards.B.plies === 1 && restored.match.clocks.every((c, i) => (c.runningSince !== null) === (i === 1 || i === 3)), '...both boards, all four clocks (seat 1 and seat 3 are on move) and the pockets come back whole');
+  check(Number.isFinite(re.ack.state.serverNowMs) && re.ack.state.log.length === 2 && re.ack.state.log[0].san === 'e4' && re.ack.state.log[1].san === 'd4', '...with the match clock instant and the move log');
+  check(re.ack.state.seats[1].kind === 'human' && re.ack.state.seats[1].connected === true, "...and the seat is the human's (no bot took it)");
+  const forged = await forgedApp.go();
+  check(rejoinedOf(forged)?.ack?.ok === false && rejoinedOf(forged).ack.reason === 'noGame', 'a record with a forged token is refused (noGame)');
+  await sleep(300);
+  check(!others.some((p) => JSON.stringify(bugHeardSeats(p.socket)).includes('"kind":"bot"')), 'the other seats never saw a bot take over');
+  check(others.every((p) => tokens.filter((t) => t !== p.match.playerToken).every((t) => !JSON.stringify(p.socket.heard).includes(t))), "no seat's token appears in anything another seat heard (the restart, the seat updates, the snapshots)");
+  room.sockets.forEach((s) => s.disconnect());
+}
+
+{
+  console.log('\n=== 6b. Bughouse: restart AFTER a bot took the seat (hand-back) ===');
+  const room = await startBug('BT');
+  const states = [];
+  const seatEvents = [];
+  room.players.forEach((p) => {
+    p.socket.on('bug_state', (s) => states.push(s));
+    p.socket.on('bug_seat_update', (u) => seatEvents.push(u));
+  });
+  const victim = room.players[0]; // seat 0 (Board A, White) is on move at the start
+  const away = room.players[3];
+  victim.socket.disconnect();
+  await until(() => seatEvents.some((u) => u.seats[0].kind === 'bot' && u.seats[0].botReason === 'takeover'), 'a bot to take seat 0', 10_000);
+  const takeover = seatEvents.find((u) => u.seats[0].kind === 'bot');
+  check(takeover.seats[0].connected === true && takeover.seats[0].elo === 1200, 'a bot took the seat after the grace');
+  await until(() => states.some((s) => s.events.some((e) => e.kind === 'move' && e.seat === 0)), "the takeover bot's first move", 10_000);
+  const run = await restartApp(bugRecord(victim.match), { listen: 600 });
+  const re = rejoinedOf(run);
+  check(re?.ack?.ok === true && re.ack.state.seat === 0 && re.ack.state.seats[0].kind === 'human' && re.ack.state.seats[0].botReason === undefined, 'the restarted app takes the seat back: it is the human\'s again, with no bot reason left');
+  check(re.ack.state.log.some((e) => e.seat === 0), "...and the bot's move is in the log it receives");
+  await until(() => seatEvents.some((u, i) => i > seatEvents.indexOf(takeover) && u.seats[0].kind === 'human'), 'everyone to hear the hand-back', 5000);
+  // the FIRST update after the takeover that shows a human on the seat (a later one may legitimately say "not connected": the restarted app's socket ends after its listening window)
+  const handedBack = seatEvents.find((u, i) => i > seatEvents.indexOf(takeover) && u.seats[0].kind === 'human').seats[0];
+  check(handedBack.kind === 'human' && handedBack.connected === true && handedBack.botReason === undefined, "the other seats were told the seat is the human's again (the first seat update they heard after the takeover)");
+  void away;
+  room.sockets.forEach((s) => s.disconnect());
+}
+
+{
+  console.log('\n=== 6c. Bughouse: the match ended while the app was away - the restart is told the result (kept for 5 minutes) ===');
+  const room = await startBug('BE');
+  const overs = [];
+  room.players.forEach((p) => p.socket.on('bug_game_over', (o) => overs.push(o)));
+  const victim = room.players[2];
+  const resigner = room.players[1];
+  victim.socket.disconnect();
+  await sleep(100);
+  assert.ok((await ack(resigner.socket, 'bug_resign', { roomId: room.roomId })).ok, 'bug_resign');
+  await until(() => overs.length >= 3, 'the game over to reach the three connected players', 5000);
+  const run = await restartApp(bugRecord(victim.match), { listen: 300 });
+  const re = rejoinedOf(run);
+  check(re?.ack?.ok === true && re.ack.finished === true && JSON.stringify(re.ack.gameOver) === JSON.stringify(overs[0]), 'the restart gets the result of the finished match: the very game over the others received');
+  check(re.ack.gameOver.result.reason === 'resign' && re.ack.gameOver.result.loserSeat === 1, '...a resignation by seat 1');
+  const wrong = await restartApp(bugRecord({ ...victim.match, playerToken: 'not-the-token' }), { listen: 300 });
+  check(rejoinedOf(wrong)?.ack?.ok === false, 'a forged token gets no result');
+  room.sockets.forEach((s) => s.disconnect());
 }
 
 console.log(`\nAll good - ${passed} checks passed.`);

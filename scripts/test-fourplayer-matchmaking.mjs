@@ -210,10 +210,12 @@ console.log('\n=== 2. Time controls never mix, and only live ones are accepted =
 {
   const { matchmaker, updates, join } = setup();
   const bad = [
-    [{ initialSeconds: 0, incrementSeconds: 0 }, 'No time limit'],
-    [{ initialSeconds: 86_400, incrementSeconds: 0 }, 'Daily'],
+    [{ initialSeconds: 0, incrementSeconds: 5 }, 'No time limit with an increment'],
+    [{ initialSeconds: 86_400, incrementSeconds: 5 }, 'Daily with an increment'],
+    [{ initialSeconds: 129_600, incrementSeconds: 0 }, 'a day and a half'],
+    [{ initialSeconds: 15 * 86_400, incrementSeconds: 0 }, 'more than 14 days'],
     [{ initialSeconds: 59, incrementSeconds: 0 }, 'below the range'],
-    [{ initialSeconds: 3601, incrementSeconds: 0 }, 'above the range'],
+    [{ initialSeconds: 3601, incrementSeconds: 0 }, 'above the live range (and not a whole day)'],
     [{ initialSeconds: 600, incrementSeconds: 31 }, 'increment too large'],
     [{ initialSeconds: 600, incrementSeconds: -1 }, 'negative increment'],
     [{ initialSeconds: 600.5, incrementSeconds: 0 }, 'fractional'],
@@ -227,9 +229,16 @@ console.log('\n=== 2. Time controls never mix, and only live ones are accepted =
     assert.ok(typeof res.error === 'string' && res.error.length > 0, `${what}: an error message`);
   }
   passed++;
-  console.log(`  ok  ${bad.length} unacceptable time controls (No time limit, Daily, out of range, bad increments, NaN, junk) are refused with a message`);
+  console.log(`  ok  ${bad.length} unacceptable time controls (an increment on No time limit or Daily, half days, over 14 days, out of range, bad increments, NaN, junk) are refused with a message`);
   check(matchmaker.size() === 0 && updates.length === 0 && liveTimeouts.size === 0, '...and a refusal changes nothing: nobody queued, nothing sent, no timer');
   check(join(1, { initialSeconds: 60, incrementSeconds: 0 }).ok && join(2, { initialSeconds: 3600, incrementSeconds: 30 }).ok, 'the boundaries themselves (60 s + 0, 3600 s + 30) are accepted');
+  // EVERY control of the app's list is accepted (command #35): No time limit, the live ones, the six Daily ones - each in its own lobby
+  const everyControl = [[0, 0], [60, 0], [60, 1], [120, 1], [180, 0], [180, 2], [300, 0], [300, 5], [300, 2], [600, 0], [900, 10], [1800, 0], [600, 5], [1200, 0], [3600, 0], ...[1, 2, 3, 5, 7, 14].map((d) => [d * 86_400, 0])];
+  for (const [index, [initialSeconds, incrementSeconds]] of everyControl.entries()) {
+    assert.ok(join(100 + index, { initialSeconds, incrementSeconds }).ok, `${initialSeconds} | ${incrementSeconds} is accepted`);
+  }
+  passed++;
+  console.log(`  ok  all ${everyControl.length} controls of the app's list are accepted`);
 }
 {
   const { matchmaker, join } = setup();

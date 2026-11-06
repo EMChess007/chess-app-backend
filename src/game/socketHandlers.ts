@@ -50,6 +50,8 @@ export function isValidTimeControl(value: unknown): value is TimeControl {
     typeof tc.initialSeconds === 'number' &&
     Number.isFinite(tc.initialSeconds) &&
     tc.initialSeconds >= 0 &&
+    // 14 days (the longest Daily preset): the clock timer is a setTimeout, and one above 2^31 - 1 ms fires AT ONCE (an unbounded value ended a game on its first move)
+    tc.initialSeconds <= 14 * 86_400 &&
     typeof tc.incrementSeconds === 'number' &&
     Number.isFinite(tc.incrementSeconds) &&
     tc.incrementSeconds >= 0 &&

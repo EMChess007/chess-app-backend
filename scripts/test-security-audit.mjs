@@ -38,7 +38,7 @@ const job = workflow.jobs['security-audit'];
 ok(Object.keys(workflow.jobs).join(',') === 'security-audit', 'the workflow has ONE job and it is called security-audit (the required status check keeps its name)');
 ok(job['runs-on'] === 'ubuntu-latest', 'it runs on ubuntu-latest');
 const runs = job.steps.filter((s) => s.run).map((s) => s.run);
-ok(JSON.stringify(runs) === JSON.stringify(['npm ci', 'npm audit']), 'it installs with npm ci and then runs a bare "npm audit": every severity, production and development');
+ok(JSON.stringify(runs) === JSON.stringify(['npm ci', 'npm run check:cleanInstall', 'npm audit']), 'it installs with npm ci, proves the clean install works (Prisma client + server start, command #33) and ENDS with a bare "npm audit": every severity, production and development');
 ok(job['continue-on-error'] === undefined && job.steps.every((s) => s['continue-on-error'] === undefined && s.if === undefined), 'no continue-on-error and no condition on any step: the check cannot become a warning');
 const code = workflowText
   .split('\n')

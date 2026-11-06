@@ -291,7 +291,8 @@ export class FourRoomManager {
       variant: variant.value,
       status: 'active',
       state: params.startSnapshot === undefined ? initialState(rulesFor(variant.value)) : deserialize(params.startSnapshot, rulesFor(variant.value)),
-      clock: createClock(timeControl.value.initialSeconds, timeControl.value.incrementSeconds, true),
+      // "No time limit" (initialSeconds 0, command #35) is a DISABLED clock: nothing ticks, nobody flags, no timer is armed
+      clock: createClock(timeControl.value.initialSeconds, timeControl.value.incrementSeconds, timeControl.value.initialSeconds > 0),
       turnStartedAt: Date.now(),
       seq: 0,
       seats,
@@ -380,7 +381,7 @@ export class FourRoomManager {
   private armClockTimer(room: FourRoom): void {
     if (room.clockTimer) clearTimeout(room.clockTimer);
     room.clockTimer = null;
-    if (room.status !== 'active' || room.state.result) return;
+    if (room.status !== 'active' || room.state.result || !room.clock.enabled) return;
     const remainingMs = Math.max(0, Math.ceil(room.clock.seconds[room.state.turn] * 1000));
     room.clockTimer = setTimeout(() => this.onClockTimer(room), remainingMs);
   }

@@ -14,7 +14,8 @@
  */
 import assert from 'node:assert/strict';
 import { Matchmaker } from '../src/game/matchmaking.ts';
-import { RoomManager, isUnlimitedTimeControl } from '../src/game/rooms.ts';
+import { RoomManager, isUnlimitedTimeControl, isDailyTimeControl, DAILY_MIN_SECONDS } from '../src/game/rooms.ts';
+import { fourBotThinkMs } from '../src/game/fourPlayerConfig.ts';
 import { isValidTimeControl } from '../src/game/socketHandlers.ts';
 
 let passed = 0;
@@ -120,6 +121,37 @@ console.log('\n=== 4. Live-only: abandonment still applies ===');
   check(room.players.w.abandonTimer !== null, 'a disconnected player in an unlimited game is on the abandonment timer');
   check(io.events.some((e) => e.id === 'B' && e.event === 'opponent_disconnected'), '...and the opponent is told');
   manager.dispose?.();
+}
+
+console.log('\n=== 5. Daily (command #35): no abandonment forfeit, and the limits of a clock ===');
+{
+  const DAY = 86_400;
+  // a Daily game: a disconnect starts NO abandonment timer and tells nobody a grace is running (the clock of days decides)
+  for (const days of [1, 7, 14]) {
+    const { io, manager, created } = newRoom({ initialSeconds: days * DAY, incrementSeconds: 0 });
+    manager.handleDisconnect('W');
+    const room = manager.rooms.get(created.roomId);
+    check(room.players.w.abandonTimer === null && room.players.w.socketId === null && !io.events.some((e) => e.event === 'opponent_disconnected'), `a ${days}-day game: a disconnect starts no abandonment timer and the opponent is not told of a grace`);
+    manager.dispose?.();
+  }
+  // the boundary is exactly one day: a game one second short of it is live play and IS forfeited
+  const live = newRoom({ initialSeconds: DAY - 1, incrementSeconds: 0 });
+  live.manager.handleDisconnect('B');
+  check(live.manager.rooms.get(live.created.roomId).players.b.abandonTimer !== null, 'a clock one second short of a day is live play: the abandonment timer runs');
+  live.manager.dispose?.();
+  const hour = newRoom({ initialSeconds: 3600, incrementSeconds: 0 });
+  hour.manager.handleDisconnect('B');
+  check(hour.manager.rooms.get(hour.created.roomId).players.b.abandonTimer !== null, '...and a 60-minute game too');
+  hour.manager.dispose?.();
+  const exact = newRoom({ initialSeconds: DAY, incrementSeconds: 0 });
+  exact.manager.handleDisconnect('B');
+  check(exact.manager.rooms.get(exact.created.roomId).players.b.abandonTimer === null, 'a clock of exactly one day is Daily: no abandonment timer');
+  exact.manager.dispose?.();
+  check(isDailyTimeControl({ initialSeconds: DAY, incrementSeconds: 0 }) && !isDailyTimeControl({ initialSeconds: DAY - 1, incrementSeconds: 0 }) && DAILY_MIN_SECONDS === 86400, 'isDailyTimeControl: one day and more, not a second less (the limit is the literal 86400)');
+  // the longest clock a timer can wait: 14 days is accepted, one second more is not
+  check(isValidTimeControl({ initialSeconds: 14 * DAY, incrementSeconds: 0 }) && !isValidTimeControl({ initialSeconds: 14 * DAY + 1, incrementSeconds: 0 }) && !isValidTimeControl({ initialSeconds: 15 * DAY, incrementSeconds: 0 }) && !isValidTimeControl({ initialSeconds: 1e12, incrementSeconds: 0 }), 'a clock of 14 days is accepted; 14 days and a second, 15 days and a huge one are refused (a setTimeout above 2^31 - 1 ms fires at once)');
+  // bots do not think at bullet speed for No time limit or Daily
+  check(fourBotThinkMs(0) === 450 && fourBotThinkMs(DAY) === 450 && fourBotThinkMs(60) === 200 && fourBotThinkMs(120) === 200 && fourBotThinkMs(121) === 450, 'the 4-seat bot pace: 450 ms for No time limit and Daily, 200 ms for bullet (1 and 2 minutes)');
 }
 
 console.log(`\nAll good — ${passed} checks passed.`);

@@ -80,7 +80,7 @@ export function bannerFor(relPath) {
  * Returns `text` (a mirrored file's source, LF) with `.js` appended inside every relative module specifier, after checking the closure
  * rule. `mirrored` is the set of manifest paths; `relPath` is this file's own manifest path (specifiers resolve against its directory).
  */
-export function rewriteModule(relPath, text, mirrored) {
+export function rewriteModule(relPath, text, mirrored, { allowedPackages = [] } = {}) {
   const sf = ts.createSourceFile(relPath, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const edits = []; // string positions where '.js' is inserted (just before the closing quote)
   const problems = [];
@@ -91,6 +91,7 @@ export function rewriteModule(relPath, text, mirrored) {
 
   const handleSpecifier = (literal) => {
     const spec = literal.text;
+    if (allowedPackages.includes(spec)) return; // a package the caller has named (the 4 Player mirror names none; the Bughouse mirror names chess.js): left exactly as written
     if (!spec.startsWith('./') && !spec.startsWith('../')) {
       problems.push(`${where(literal)}: imports "${spec}" - only relative imports of mirrored files are allowed (no packages, no node: modules)`);
       return;

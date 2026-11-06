@@ -34,6 +34,7 @@ try {
   for (const item of ['src', 'prisma', 'package.json', 'package-lock.json', 'tsconfig.json']) cpSync(join(backend, item), join(work, item), { recursive: true });
   mkdirSync(join(work, 'scripts'));
   cpSync(join(backend, 'scripts', 'install-hooks.mjs'), join(work, 'scripts', 'install-hooks.mjs')); // the "prepare" script of npm install
+  cpSync(join(backend, 'scripts', 'prisma-generate.mjs'), join(work, 'scripts', 'prisma-generate.mjs')); // the "postinstall" script (command #33): generates the client
   const ok =
     run('npm ci (NODE_ENV=production: devDependencies are skipped)', 'npm', ['ci']) &&
     run('prisma generate', 'npx', ['prisma', 'generate']) &&

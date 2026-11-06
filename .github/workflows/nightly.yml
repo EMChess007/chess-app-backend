@@ -15,6 +15,10 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch: {} # lets a maintainer trigger it manually from the Actions tab too.
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
@@ -46,10 +50,26 @@ jobs:
       PORT: 3000
 
     steps:
+      # (command #35b: the same rule as ci.yml - a paired/X branch of this repo runs against the EM-Chess branch of the same name, so a manual run on paired/bughouse tests the unmerged app)
+      - name: Pick the frontend ref — an EM-Chess branch only when this branch is paired/X and EM-Chess has paired/X, else its default branch
+        id: frontend_ref
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          ref=""
+          case "$BRANCH" in
+            paired/?*)
+              if git ls-remote --exit-code --heads https://github.com/EMChess007/EM-Chess.git "refs/heads/$BRANCH" > /dev/null 2>&1; then ref="$BRANCH"; fi
+              ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Frontend ref::EM-Chess ref '${ref:-default branch}' for '$BRANCH'"
+
       - name: Checkout frontend (EM-Chess) — the logic fuzz imports its chess engine directly
         uses: actions/checkout@v4
         with:
           repository: EMChess007/EM-Chess
+          ref: ${{ steps.frontend_ref.outputs.ref }}
           path: chess-app
 
       - name: Checkout backend (this repo) into chess-app/backend — matches local dev layout
@@ -59,7 +79,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install frontend dependencies
         working-directory: chess-app
@@ -101,14 +121,24 @@ jobs:
           cat chess-app/backend/server.log || true
           exit 1
 
-      - name: Online fuzz (Fog of War, Giveaway, Atomic, Duck Chess, 4 Player Chess, 4 Player Giveaway and Chaturaji through the live server/socket protocol)
+      - name: Online fuzz (Fog of War, Giveaway, Atomic, Duck Chess, 4 Player Chess, 4 Player Giveaway, Chaturaji and Bughouse through the live server/socket protocol)
         id: online_fuzz
         working-directory: chess-app/backend
         # Arguments: fogGames maxPlies giveawayGames atomicGames duckGames fourPlayerGames fourPlayerGiveawayGames. The first five are what an omitted argument used to
         # default to (200 each); 4 Player Chess and 4 Player Giveaway are 40 each because each game has FOUR sockets and is paced under the server's move rate limit (about 5-6 s a
         # game, so about 4 minutes per variant). tsx for the same reason as the logic fuzz above.
         # Chaturaji is the LAST argument (40 games, like the other two 4-seat variants): hordeGames and crazyhouseGames are passed at the 200 an omitted argument gives them, and repetition at its default 3.
-        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40
+        # Bughouse is the very LAST argument (40 matches, four sockets and a spectator each, strict: any deviation fails the run).
+        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40 40
+        continue-on-error: true
+
+      # Bughouse W7: the scripted real-socket scenarios (a resignation from each seat, capture and drop across the boards, a flag on each board with a late mate, a takeover and hand-back on each seat with a
+      # NEW process as the restarted app, a late spectator, every other 4-seat queue at the same time, a whole natural game). About 3 minutes; the same dev server (without FOUR_FILL_MS the lobby
+      # scenario simply waits for the production 30 s fill, inside the test's own bound).
+      - name: Bughouse real-socket scenarios (W7)
+        id: bughouse_sockets
+        working-directory: chess-app/backend
+        run: npm run test:bughouseSockets
         continue-on-error: true
 
       - name: Browser end-to-end (Chaturaji - the REAL app in Chrome against a private copy of this server)
@@ -119,6 +149,17 @@ jobs:
         # (no browser download). Nightly, not per push: it exports the web app (~1 minute), then plays eight scenarios with real clocks (a one-minute game to a flag, bot games to their end),
         # which is several times the per-push budget. Test accounts it registers are deleted again; the database is this job's own Postgres service.
         run: npm run test:e2eBrowser
+        continue-on-error: true
+
+      # Bughouse browser end-to-end (W4 + W8, command #34): the REAL app in Chrome against a private copy of this server. W4 is one game of two humans; W8 is the rest of the flow (FOUR humans on four
+      # pages with every position compared on all of them, orientation, quick messages and team chat that only the partner gets, a reload, a bot takeover and the hand-back, a spectator page,
+      # the friend flow on two pages). Seeded (the suite seeds its own server process; nothing is set here), about 6 minutes; each scenario may repeat once.
+      - name: Browser end-to-end (Bughouse W4 + W8)
+        id: bughouse_browser
+        working-directory: chess-app/backend
+        run: |
+          npm run test:e2eBrowserBughouse
+          npm run test:e2eBrowserBughouseW8
         continue-on-error: true
 
       - name: Upload fuzz reports
@@ -132,7 +173,7 @@ jobs:
           retention-days: 90
 
       - name: Fail the job if either fuzz run or the browser end-to-end failed
-        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.browser_e2e.outcome == 'failure'
+        if: steps.logic_fuzz.outcome == 'failure' || steps.online_fuzz.outcome == 'failure' || steps.bughouse_sockets.outcome == 'failure' || steps.browser_e2e.outcome == 'failure' || steps.bughouse_browser.outcome == 'failure'
         run: exit 1
 
       - name: Open/update a tracking issue on failure

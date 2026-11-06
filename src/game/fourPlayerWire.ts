@@ -29,11 +29,12 @@ import type { FourPlayerResult, FourVariant } from './fourPlayer/state.js';
 
 // --- Limits both sides enforce ------------------------------------------------------------------------------------------------
 
-/** Online 4 Player is live play only (Bullet / Blitz / Rapid presets): the clock is the only guard against an idle seat, so "No time limit"
- * and Daily are refused. */
+/** Online 4 Player takes every control of the app's list (command #35): live 1 - 60 minutes with an increment 0 - 30 s, Daily 1 - 14 whole days, and "No time limit" (0 | 0, no clock at all). */
 export const FOUR_TC_MIN_INITIAL_SECONDS = 60;
 export const FOUR_TC_MAX_INITIAL_SECONDS = 3600;
 export const FOUR_TC_MAX_INCREMENT_SECONDS = 30;
+export const FOUR_TC_MIN_DAILY_SECONDS = 86_400;
+export const FOUR_TC_MAX_DAILY_DAYS = 14;
 /** Same cap as the 2-player chat. Longer text is cut, not refused (also like 2-player). */
 export const FOUR_CHAT_MAX_LENGTH = 500;
 /** A roomId / playerToken is a UUID (36 chars); anything longer than this is not one. */
@@ -286,15 +287,23 @@ export function validateFourId(value: unknown, what = 'id'): FourValidation<stri
   return { ok: true, value };
 }
 
-/** Whole seconds, inside the live range, with a whole-second increment 0..30. "No time limit" (and anything else outside the range) is
- * refused: online it is the only idle guard there is. */
+/**
+ * Every control of the app's list (command #35), all whole seconds: "No time limit" is exactly 0 | 0 (no clock runs); a LIVE control has an initial time of 1 to 60 minutes and an increment 0..30
+ * seconds; a DAILY control is a whole number of days, 1 to 14, with no increment. Anything else - a free-form 7-minute control, 0 with an increment, 2.5 days - is refused.
+ */
 export function validateFourTimeControl(value: unknown): FourValidation<FourTimeControl> {
   if (!isRecord(value)) return fail('Invalid time control.');
   const { initialSeconds, incrementSeconds } = value;
   if (typeof initialSeconds !== 'number' || !Number.isInteger(initialSeconds)) return fail('Invalid time control.');
   if (typeof incrementSeconds !== 'number' || !Number.isInteger(incrementSeconds)) return fail('Invalid time control.');
+  if (initialSeconds === 0) return incrementSeconds === 0 ? { ok: true, value: { initialSeconds, incrementSeconds } } : fail('"No time limit" has no increment.');
+  if (initialSeconds >= FOUR_TC_MIN_DAILY_SECONDS) {
+    const days = initialSeconds / FOUR_TC_MIN_DAILY_SECONDS;
+    if (!Number.isInteger(days) || days > FOUR_TC_MAX_DAILY_DAYS || incrementSeconds !== 0) return fail(`A Daily game is 1 to ${FOUR_TC_MAX_DAILY_DAYS} whole days with no increment.`);
+    return { ok: true, value: { initialSeconds, incrementSeconds } };
+  }
   if (initialSeconds < FOUR_TC_MIN_INITIAL_SECONDS || initialSeconds > FOUR_TC_MAX_INITIAL_SECONDS) {
-    return fail(`Online 4 Player needs a time limit of ${FOUR_TC_MIN_INITIAL_SECONDS / 60} to ${FOUR_TC_MAX_INITIAL_SECONDS / 60} minutes.`);
+    return fail(`A live game needs a time limit of ${FOUR_TC_MIN_INITIAL_SECONDS / 60} to ${FOUR_TC_MAX_INITIAL_SECONDS / 60} minutes.`);
   }
   if (incrementSeconds < 0 || incrementSeconds > FOUR_TC_MAX_INCREMENT_SECONDS) return fail(`The increment must be 0 to ${FOUR_TC_MAX_INCREMENT_SECONDS} seconds.`);
   return { ok: true, value: { initialSeconds, incrementSeconds } };

@@ -139,7 +139,7 @@ async function scenarioB(ctx) {
   await shot(a, 'B-takeover-seen-by-A');
   await playPlies(match, 4);
   needActive(match, [seatA, seatB], 'B returns');
-  ok((await b.page.getByText(/Return to your game/).count()) === 1, 'B\'s Play menu offers "Return to your game" under the Chaturaji card');
+  ok((await b.page.getByText('Return to your Chaturaji game ›').count()) === 1, 'B\'s Play menu offers "Return to your Chaturaji game" in the 4 Player Variations card');
   await shot(b, 'B-return-link');
 
   // ... B returns: the seat is handed back

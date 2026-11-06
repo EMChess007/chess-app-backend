@@ -34,5 +34,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Command #33: the same clean install must leave a working Prisma client and a server that starts (no manual prisma generate) - the lock that installs is also a lock that runs.
+      - name: A bare npm ci leaves a working Prisma client and a server that starts
+        run: npm run check:cleanInstall
+
       - name: Audit every dependency (production and development, every severity)
         run: npm audit

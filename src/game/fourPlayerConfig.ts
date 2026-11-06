@@ -97,7 +97,8 @@ export const FOUR_ACTIVE_GAMES_LIST_MAX = 100;
 
 /** The pause before a bot's move, by time control (the local game's rule: bullet is quicker). */
 export function fourBotThinkMs(initialSeconds: number): number {
-  return initialSeconds <= FOUR_BULLET_MAX_INITIAL_SECONDS ? FOUR_BOT_THINK_BULLET_MS : FOUR_BOT_THINK_MS;
+  // (0 = "No time limit" and Daily are not bullet: the normal pause)
+  return initialSeconds > 0 && initialSeconds <= FOUR_BULLET_MAX_INITIAL_SECONDS ? FOUR_BOT_THINK_BULLET_MS : FOUR_BOT_THINK_MS;
 }
 
 // --- End-to-end testing (W6) ---------------------------------------------------------------------------------------------------------

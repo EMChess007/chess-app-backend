@@ -90,11 +90,11 @@ function boot(extra = {}) {
   return { io, lookups, ...registered, connect: (id, opts) => io.connect(fakeSocket(id, opts)) };
 }
 
-console.log('\n=== 1. Exactly the nine events are wired ===');
+console.log('\n=== 1. Exactly the nine events and the four friend-room events are wired ===');
 {
   const { connect } = boot();
   const s = connect('A');
-  check([...s.listeners.keys()].filter((k) => k !== 'disconnect').sort().join() === [...FOUR_CLIENT_EVENT_NAMES].sort().join(), 'a connected socket listens to exactly the nine four_* client events of the wire contract (and disconnect)');
+  check([...s.listeners.keys()].filter((k) => k !== 'disconnect').sort().join() === [...FOUR_CLIENT_EVENT_NAMES, 'four_room_create', 'four_room_join', 'four_room_leave', 'four_room_start'].sort().join(), 'a connected socket listens to exactly the nine four_* client events of the wire contract and the four friend-room events (and disconnect)');
   check([...s.listeners.keys()].every((k) => k === 'disconnect' || k.startsWith('four_')), '...no event outside the four_* namespace (the 2-player events cannot collide)');
 }
 
@@ -109,17 +109,17 @@ console.log('\n=== 2. Joining the queue ===');
   check(update.length === 1 && update[0].payload.queued === 1 && update[0].payload.fillInMs === null, '...and it receives four_queue_update { queued: 1, fillInMs: null }');
   const again = await a.call('four_join_queue', { timeControl: TC });
   check(again.length === 1 && again[0].ok === false && /already in a queue/.test(again[0].error) && matchmaker.size() === 1, 'joining again is refused ("already in a queue") and changes nothing');
-  const bad = [undefined, null, 5, 'x', [], {}, { timeControl: { initialSeconds: 0, incrementSeconds: 0 } }, { timeControl: { initialSeconds: 86_400, incrementSeconds: 0 } }, { timeControl: { initialSeconds: 59, incrementSeconds: 0 } }, { timeControl: TC, timeControlLabel: 'x'.repeat(41) }];
+  const bad = [undefined, null, 5, 'x', [], {}, { timeControl: { initialSeconds: 0, incrementSeconds: 3 } }, { timeControl: { initialSeconds: 86_400, incrementSeconds: 3 } }, { timeControl: { initialSeconds: 59, incrementSeconds: 0 } }, { timeControl: TC, timeControlLabel: 'x'.repeat(41) }];
   const b = connect('B');
   for (const payload of bad) {
     const r = await b.call('four_join_queue', payload);
     assert.ok(r.length === 1 && r[0].ok === false && typeof r[0].error === 'string' && !/went wrong/.test(r[0].error), `a bad join payload (${JSON.stringify(payload)}) is refused by the VALIDATOR with its own message (not by a crash: "${r[0]?.error}")`);
   }
   passed++;
-  console.log(`  ok  ${bad.length} bad join payloads (no payload, junk, "No time limit", Daily, out of range, long label) are refused with a message...`);
+  console.log(`  ok  ${bad.length} bad join payloads (no payload, junk, an increment on No time limit or Daily, out of range, long label) are refused with a message...`);
   check(!matchmaker.isQueued('B') && matchmaker.size() === 1, '...and none of them queued the socket');
-  const noLimit = await b.call('four_join_queue', { timeControl: { initialSeconds: 0, incrementSeconds: 0 } });
-  check(/time limit/.test(noLimit[0].error), '"No time limit" gets the specific explanation ("Online 4 Player needs a time limit...")');
+  const noLimitIncrement = await b.call('four_join_queue', { timeControl: { initialSeconds: 0, incrementSeconds: 3 } });
+  check(/no increment/.test(noLimitIncrement[0].error), '"No time limit" with an increment gets the specific explanation');
 }
 {
   const { connect, lookups, io } = boot();
@@ -470,7 +470,7 @@ console.log('\n=== 7. The server wiring (source pins) ===');
   const index = read('../src/index.ts');
   const twoPlayer = read('../src/game/socketHandlers.ts');
   const listens = handlers.match(/listen\(socket, '(four_[a-z_]+)'/g) ?? [];
-  check(listens.length === 9 && new Set(listens).size === 9, 'handlers: exactly nine listen() registrations, all distinct');
+  check(listens.length === 13 && new Set(listens).size === 13, 'handlers: exactly thirteen listen() registrations (the nine plus the four friend-room events of command #35), all distinct');
   check((handlers.match(/socket\.on\(/g) ?? []).length === 2, 'handlers: socket.on appears only in listen() and for disconnect (nothing bypasses the safe wrapper)');
   const handlerCode = handlers.split('\n').filter((line) => !/^\s*(\*|\/\*|\/\/)/.test(line)).join('\n'); // code only: the header comment names ack?.() in prose
   check(!/ack\?\.\(/.test(handlerCode), 'handlers: no `ack?.()` (that throws on a non-function ack) anywhere in the code');

@@ -64,6 +64,8 @@ interface Tournament {
   chess960: boolean;
   kingOfTheHill: boolean;
   threeCheck: boolean;
+  /** In memory only (the tournaments table has no column for it and tournaments are never restored from it). */
+  racingKings: boolean;
   creatorUserId: string;
   status: TournamentStatus;
   participants: Map<string, Participant>;
@@ -117,6 +119,7 @@ export class TournamentManager {
     chess960: boolean;
     kingOfTheHill: boolean;
     threeCheck: boolean;
+    racingKings?: boolean;
   }): Promise<Tournament> {
     let code = generateCode();
     while (this.codeToId.has(code)) code = generateCode(); // astronomically rare, cheap to guard
@@ -131,6 +134,7 @@ export class TournamentManager {
       chess960: params.chess960,
       kingOfTheHill: params.kingOfTheHill,
       threeCheck: params.threeCheck,
+      racingKings: params.racingKings === true,
       creatorUserId: params.creatorUserId,
       status: 'lobby',
       participants: new Map([
@@ -299,6 +303,7 @@ export class TournamentManager {
         duckChess: false, // ...nor Duck Chess
         spellChess: false, // ...nor Spell Chess
         horde: false, // ...nor Horde
+        racingKings: tournament.racingKings,
         crazyhouse: false, // ...nor Crazyhouse
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
@@ -315,6 +320,7 @@ export class TournamentManager {
         isChess960: tournament.chess960,
         isKingOfTheHill: tournament.kingOfTheHill,
         isThreeCheck: tournament.threeCheck,
+        isRacingKings: tournament.racingKings,
         fen: created.fen,
         whiteMs: created.whiteMs,
         blackMs: created.blackMs,
@@ -404,6 +410,7 @@ export class TournamentManager {
         isChess960: tournament.chess960,
         isKingOfTheHill: tournament.kingOfTheHill,
         isThreeCheck: tournament.threeCheck,
+        isRacingKings: tournament.racingKings,
         roomId: match.roomId,
         playerToken: isActive ? (isA ? match.aToken : match.bToken) : null,
         color: isActive ? (isA ? match.aColor : match.aColor === 'w' ? 'b' : 'w') : null,
@@ -431,6 +438,7 @@ export class TournamentManager {
       isChess960: tournament.chess960,
       isKingOfTheHill: tournament.kingOfTheHill,
       isThreeCheck: tournament.threeCheck,
+      isRacingKings: tournament.racingKings,
       status: tournament.status,
       creatorUserId: tournament.creatorUserId,
       participants: [...tournament.participants.values()].map((p) => ({ userId: p.userId, username: p.username })),

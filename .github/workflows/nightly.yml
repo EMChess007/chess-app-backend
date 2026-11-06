@@ -129,7 +129,8 @@ jobs:
         # game, so about 4 minutes per variant). tsx for the same reason as the logic fuzz above.
         # Chaturaji is the LAST argument (40 games, like the other two 4-seat variants): hordeGames and crazyhouseGames are passed at the 200 an omitted argument gives them, and repetition at its default 3.
         # Bughouse is the very LAST argument (40 matches, four sockets and a spectator each, strict: any deviation fails the run).
-        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40 40
+        # Racing Kings is the very last argument (200 games, two sockets each).
+        run: npx tsx scripts/nightly-fuzz-online.mjs 200 80 200 200 200 40 40 200 200 3 40 40 200
         continue-on-error: true
 
       # Bughouse W7: the scripted real-socket scenarios (a resignation from each seat, capture and drop across the boards, a flag on each board with a late mate, a takeover and hand-back on each seat with a

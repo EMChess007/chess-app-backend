@@ -1214,6 +1214,88 @@ async function testDuckChessOnline() {
   bob.disconnect();
 }
 
+async function testRacingKingsOnline() {
+  console.log('\n=== Racing Kings: matchmaking, the start position, a checking move is refused, rejoin, resignation ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const RK_FEN = '8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1';
+
+  const rkSeeker = await connect('Rita');
+  const classicSeeker = await connect('Clive');
+  check((await emitAck(rkSeeker, 'join_queue', { timeControl, isRacingKings: true })).ok === true, 'Rita queues for Racing Kings');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Clive queues for a classic game');
+  let wronglyPaired = false;
+  rkSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Racing Kings seeker and a classic seeker are never paired with each other');
+  await emitAck(rkSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  rkSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused5');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isRacingKings: true, isHorde: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Racing Kings + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isRacingKings: true, isAtomic: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  const alice = await connect('Rhea');
+  const bob = await connect('Rory');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isRacingKings: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isRacingKings: true });
+      return matchFound;
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Racing Kings seekers are paired');
+  check(matchA.isRacingKings === true && matchB.isRacingKings === true && matchA.isHorde === false, 'match_found tells both clients isRacingKings: true');
+  check(matchA.fen === RK_FEN && matchB.fen === RK_FEN, 'both start from the standard Racing Kings position');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to) => emitAck(who.socket, 'make_move', { roomId, from, to });
+
+  check((await turn(white, 'e2', 'c1')).ok === false, 'Nxc1 is refused: it would give check to the king on a2');
+  const blackSees = waitFor(black.socket, 'opponent_move');
+  const first = await turn(white, 'e2', 'g3');
+  check(first.ok === true && first.san === 'Ng3', '1.Ng3 is accepted');
+  const seen = await blackSees;
+  check(seen.san === 'Ng3' && seen.fen === '8/8/8/8/8/6N1/krbn1BRK/qrbnNBRQ b - - 1 1', 'Black receives the move and the exact resulting position');
+
+  // A spectator and a rejoin must both be told it is a Racing Kings game.
+  const watcher = await connect('RKWatcher');
+  const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+  check(spectate.ok === true && spectate.state.isRacingKings === true, 'a spectator is told it is a Racing Kings game');
+  watcher.disconnect();
+  const blackMatch = matchA.color === 'b' ? matchA : matchB;
+  const whiteSeesDrop = waitFor(white.socket, 'opponent_disconnected');
+  black.socket.disconnect();
+  await whiteSeesDrop;
+  const back = await connect('RKBlack (reconnected)');
+  const rejoin = await emitAck(back, 'rejoin_game', { roomId, playerToken: blackMatch.playerToken });
+  check(rejoin.ok === true && rejoin.state.isRacingKings === true, 'a rejoin answer says it is a Racing Kings game');
+  black.socket = back;
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  const resign = await emitAck(black.socket, 'resign', { roomId });
+  check(resign.ok === true, 'Black resigns');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'resignation' && wr.winner === 'w' && br.reason === 'resignation', 'both players get game_over {resignation, winner: white}');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function testHordeOnline() {
   console.log('\n=== Horde: matchmaking, the 36-pawn start, a few turns, resignation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -1735,6 +1817,7 @@ async function main() {
   await testDuckChessOnline();
   await testSpellChessOnline();
   await testHordeOnline();
+  await testRacingKingsOnline();
   await testCrazyhouseOnline();
   await testNoTimeLimitOnline();
   await testRejoinAfterGameEnded();

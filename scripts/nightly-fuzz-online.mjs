@@ -42,7 +42,7 @@
  *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
  *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
  *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames] [bughouseGames]
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames] [bughouseGames] [racingKingsGames]
  * (the others default to the same count as fogGames; fourPlayerGiveawayGames, chaturajiGames and bughouseGames default to fourPlayerGames. The Bughouse section is described in
  * nightly-fuzz-bughouse.mjs and uses the same FOUR_GRACE_MS above.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
@@ -63,6 +63,7 @@ import { legalMoves, promotionOf, pseudoMoves } from '../../src/logic/fourPlayer
 import { piecesLeft } from '../../src/logic/fourPlayer/giveaway.ts';
 const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserialize, legalMoves, promotionOf, pseudoMoves, piecesLeft, GIVEAWAY_RULES, CHATURAJI_RULES, geometryOf, PAWN, typeOf };
 import { HORDE_START_FEN, getHordeMoves, getHordeWinnerFromFen } from '../../src/logic/horde.ts';
+import { RACING_KINGS_START_FEN, getRacingKingsMoves, getRacingKingsOutcome } from '../../src/logic/racingKings.ts';
 import { playBughouseGame } from './nightly-fuzz-bughouse.mjs';
 import { getCrazyhouseMoves, initialCrazyhouseState, RESERVE_PIECE_TYPES } from '../../src/logic/crazyhouse.ts';
 
@@ -82,6 +83,8 @@ const REPETITION_GAMES = Number(process.argv[11] ?? 3);
 const CHATURAJI_GAMES = Number(process.argv[12] ?? FOUR_GAMES);
 // Bughouse over four real sockets and a spectator (nightly-fuzz-bughouse.mjs). Last on the command line again.
 const BUGHOUSE_GAMES = Number(process.argv[13] ?? FOUR_GAMES);
+// Racing Kings over two real sockets (playRacingKingsGame). Last on the command line again.
+const RACING_KINGS_GAMES = Number(process.argv[14] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -982,6 +985,123 @@ function until(test, ms = 4000) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * One real Racing Kings game through the server: two socket clients, every move chosen from the mobile app's own
+ * getRacingKingsMoves (no checking move) and MUST be accepted with exactly the position the mobile engine computes; a fraction
+ * of turns first submit a move the mobile engine does not offer (a checking move among them), which the server MUST refuse.
+ * Every game_over must match the mobile app's verdict: a king on rank 8 (racingKings/w|b, or racingKings/null when both made
+ * it), a stalemate or fifty-move draw (stalemate|draw/null); there is no insufficient-material draw. A threefold repetition
+ * ('repetition'/null) is also accepted.
+ */
+async function playRacingKingsGame(gameIndex) {
+  const alice = await connect(`RAlice${gameIndex}`);
+  const bob = await connect(`RBob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isRacingKings: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isRacingKings: true });
+      return matchFound;
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: 0, goalWins: 0 };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  if (matchA.isRacingKings !== true) issues.push({ kind: 'match-found-missing-isRacingKings', game: gameIndex });
+  if (fen !== RACING_KINGS_START_FEN) issues.push({ kind: 'racing-kings-start-position-differs', game: gameIndex, fen });
+
+  const squares = [];
+  for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) squares.push(`${f}${r}`);
+
+  for (; stats.plies < MAX_PLIES * 2; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = new ChessEngine(fen, { racingKings: true });
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const legal = getRacingKingsMoves(engine);
+    if (legal.length === 0) break;
+
+    // Server authority: a move the mobile engine does not offer (including any move that gives check) must bounce.
+    if (Math.random() < 0.25) {
+      const offered = new Set(legal.map((m) => `${m.from}${m.to}`));
+      const from = squares[randInt(64)];
+      const to = squares[randInt(64)];
+      if (from !== to && !offered.has(`${from}${to}`)) {
+        stats.illegalProbes++;
+        const refusal = await emitAck(mover, 'make_move', { roomId, from, to, promotion: 'q' });
+        if (refusal.ok) {
+          issues.push({ kind: 'server-ACCEPTED-illegal-racing-kings-move', game: gameIndex, ply: stats.plies, fen, move: { from, to } });
+          break;
+        }
+      }
+    }
+
+    const pick = legal[randInt(legal.length)];
+    const after = new ChessEngine(fen, { racingKings: true });
+    after.move(pick.from, pick.to, pick.promotion);
+    const opponent = players[turn === 'w' ? 'b' : 'w'];
+    const opponentMove = waitFor(opponent, 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-racing-kings-move', game: gameIndex, ply: stats.plies, fen, pick, error: ack.error });
+      break;
+    }
+    if (ack.fen !== after.getFen()) {
+      issues.push({ kind: 'racing-kings-position-differs-from-mobile', game: gameIndex, ply: stats.plies, fen, pick, server: ack.fen, mobile: after.getFen() });
+      break;
+    }
+    fen = ack.fen;
+    const pushed = await opponentMove;
+    if (pushed && pushed.fen !== ack.fen) {
+      issues.push({ kind: 'opponent-state-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: ack.fen, pushed: pushed.fen });
+      break;
+    }
+
+    const goal = getRacingKingsOutcome(after);
+    const status = after.getStatus();
+    const expected = goal
+      ? { reason: 'racingKings', winner: goal === 'draw' ? null : goal }
+      : status === 'stalemate' || status === 'draw'
+        ? { reason: status, winner: null }
+        : null;
+    if (expected) {
+      stats.finished++;
+      if (goal && goal !== 'draw') stats.goalWins++;
+      await new Promise((r) => setTimeout(r, 150));
+      if (!gameOverPayload || gameOverPayload.reason !== expected.reason || gameOverPayload.winner !== expected.winner) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile', game: gameIndex, ply: stats.plies, fen, expected, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment', 'repetition'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
+/**
  * One real Horde game through the server: two socket clients, every move chosen from the mobile app's own getHordeMoves
  * (including the rank-1 double step) and MUST be accepted with exactly the position the mobile engine computes; a fraction of
  * turns first submit a move the mobile engine does not offer, which the server MUST refuse. Every game_over must match the
@@ -1492,6 +1612,24 @@ async function main() {
   }
   allIssues.push(...hordeStats.issues.map((i) => ({ ...i, variant: 'horde' })));
 
+  // --- Racing Kings ---
+  const rkStats = { games: 0, plies: 0, probes: 0, finished: 0, goalWins: 0, issues: [] };
+  for (let g = 0; g < RACING_KINGS_GAMES; g++) {
+    try {
+      const { stats, issues } = await playRacingKingsGame(g);
+      rkStats.games++;
+      rkStats.plies += stats.plies;
+      rkStats.probes += stats.illegalProbes;
+      rkStats.finished += stats.finished;
+      rkStats.goalWins += stats.goalWins;
+      rkStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${RACING_KINGS_GAMES} Racing Kings games played`);
+    } catch (err) {
+      rkStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...rkStats.issues.map((i) => ({ ...i, variant: 'racingKings' })));
+
   // --- Crazyhouse ---
   const czStats = { games: 0, plies: 0, probes: 0, drops: 0, finished: 0, issues: [] };
   for (let g = 0; g < CRAZYHOUSE_GAMES; g++) {
@@ -1541,6 +1679,7 @@ async function main() {
   console.log(`Chaturaji: ${cjStats.games}/${CHATURAJI_GAMES} games, ${cjStats.plies} plies, ${cjStats.probes} illegal/out-of-turn/double-step moves correctly refused, ${cjStats.rejoins} disconnect/rejoin cycles (${cjStats.takeovers} bot takeovers observed), ${cjStats.resigns} resignations, ${cjStats.finished} games ended (${cjStats.natural} by the engine itself).`);
   console.log(`Bughouse: ${bhStats.games}/${BUGHOUSE_GAMES} games, ${bhStats.plies} plies (${bhStats.drops} drops), ${bhStats.probes} illegal/wrong-board/out-of-turn/bad-drop requests correctly refused, ${bhStats.chats} team chat lines and ${bhStats.quicks} quick messages (recipients checked on five sockets), ${bhStats.rejoins} disconnect/rejoin cycles (${bhStats.takeovers} bot takeovers observed), ${bhStats.resigns} resignations, ${bhStats.finished} matches ended (${bhStats.natural} by the engine itself).`);
   console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
+  console.log(`Racing Kings: ${rkStats.games}/${RACING_KINGS_GAMES} games, ${rkStats.plies} plies, ${rkStats.probes} illegal moves correctly refused, ${rkStats.finished} games ended (${rkStats.goalWins} by a king reaching the 8th rank).`);
   console.log(`Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused, ${czStats.finished} games ended.`);
   console.log(`Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes (${REPETITION_GAMES} each), every one a draw by 'repetition' at exactly the predicted ply.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
@@ -1564,6 +1703,7 @@ async function main() {
     `- Chaturaji: ${cjStats.games}/${CHATURAJI_GAMES} games (four real sockets each, 8 x 8 board), ${cjStats.plies} plies, ${cjStats.probes} illegal / out-of-turn / pawn-double-step moves correctly refused by the server, ${cjStats.rejoins} disconnect/rejoin cycles (${cjStats.takeovers} bot takeovers observed), ${cjStats.resigns} resignations, ${cjStats.finished} games ended (${cjStats.natural} by the engine itself); every seq checked for byte-identical snapshots, the variant named by match-found and rejoin, and the game-over (reason, winners, points) checked against the app engine`,
     `- Bughouse: ${bhStats.games}/${BUGHOUSE_GAMES} games (four real sockets and a spectator each), ${bhStats.plies} plies (${bhStats.drops} drops), ${bhStats.probes} illegal / wrong-board / out-of-turn / bad-drop requests correctly refused by the server, ${bhStats.chats} team chat lines and ${bhStats.quicks} quick messages (the recipients checked on all five sockets), ${bhStats.rejoins} disconnect/rejoin cycles (${bhStats.takeovers} bot takeovers observed), ${bhStats.resigns} resignations, ${bhStats.finished} matches ended (${bhStats.natural} by the engine itself); every seq checked for byte-identical snapshots across the sockets, the conservation invariant on every snapshot, and the game-over checked against the app engine`,
     `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
+    `- Racing Kings: ${rkStats.games}/${RACING_KINGS_GAMES} games, ${rkStats.plies} plies, ${rkStats.probes} illegal moves (checking moves included) correctly refused by the server, ${rkStats.finished} games ended (${rkStats.goalWins} by a king reaching the 8th rank)`,
     `- Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused by the server, ${czStats.finished} games ended`,
     `- Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes, each ended by 'repetition' at exactly the predicted ply on both sockets (Nf3 Nf6 Ng1 Ng8 shuffle)`,
     `- Unexpected issues: ${unexpected.length}`,

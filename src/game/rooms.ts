@@ -95,6 +95,8 @@ interface Room {
   horde: boolean;
   /** Racing Kings -- see racingKings.ts. */
   racingKings: boolean;
+  /** Torpedo -- see torpedo.ts. */
+  torpedo: boolean;
   /** Crazyhouse -- see crazyhouse.ts. The reserves/promoted squares live INSIDE room.engine (it updates them on every move/drop);
    * this flag only says whether to expose them. */
   crazyhouse: boolean;
@@ -152,6 +154,8 @@ export interface CreateRoomParams {
   horde: boolean;
   /** Racing Kings -- see racingKings.ts: the room starts from RACING_KINGS_START_FEN; a checking move is illegal. */
   racingKings: boolean;
+  /** Torpedo -- see torpedo.ts: the ordinary start position; a pawn may step one or two squares from any rank. */
+  torpedo: boolean;
   /** Crazyhouse -- see crazyhouse.ts: an ordinary start position; a turn is a move OR a drop from the capturer's reserve. */
   crazyhouse: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
@@ -205,8 +209,8 @@ function initialClockMs(timeControl: TimeControl): number {
 }
 
 /** The `[Variant]` tag a finished room's PGN carries (undefined for the standard/Chess960-style modes, which replay as ordinary chess). */
-export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'racingKings' | 'crazyhouse'>): string | undefined {
-  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.racingKings ? 'Racing Kings' : room.crazyhouse ? 'Crazyhouse' : undefined;
+export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'racingKings' | 'torpedo' | 'crazyhouse'>): string | undefined {
+  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.racingKings ? 'Racing Kings' : room.torpedo ? 'Torpedo' : room.crazyhouse ? 'Crazyhouse' : undefined;
 }
 
 /**
@@ -253,6 +257,7 @@ export class RoomManager {
       spellChess: params.spellChess,
       horde: params.horde,
       racingKings: params.racingKings,
+      torpedo: params.torpedo,
       crazyhouse: params.crazyhouse,
     });
     const ms = initialClockMs(params.timeControl);
@@ -275,6 +280,7 @@ export class RoomManager {
       spellChess: params.spellChess,
       horde: params.horde,
       racingKings: params.racingKings,
+      torpedo: params.torpedo,
       crazyhouse: params.crazyhouse,
       spellState: initialSpellChessState(),
       repetitionKeys: [],
@@ -727,6 +733,7 @@ export class RoomManager {
         isSpellChess: room.spellChess,
         isHorde: room.horde,
         isRacingKings: room.racingKings,
+        isTorpedo: room.torpedo,
         isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
@@ -895,6 +902,7 @@ export class RoomManager {
         isSpellChess: room.spellChess,
         isHorde: room.horde,
         isRacingKings: room.racingKings,
+        isTorpedo: room.torpedo,
         isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,

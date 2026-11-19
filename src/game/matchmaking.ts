@@ -16,6 +16,7 @@ export interface QueueEntry {
   isSpellChess: boolean;
   isHorde: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   isCrazyhouse: boolean;
   /**
    * Accepted from the client but deliberately unused for pairing right now — matchmaking is
@@ -28,7 +29,7 @@ export interface QueueEntry {
 }
 
 /** In-memory matchmaking queue — one instance per process. Pairing is exact-match only:
- * same isChess960/isKingOfTheHill/isThreeCheck/isSetupChess/isFogOfWar/isGiveaway/isAtomic/isDuckChess/isSpellChess/isHorde/isRacingKings/isCrazyhouse
+ * same isChess960/isKingOfTheHill/isThreeCheck/isSetupChess/isFogOfWar/isGiveaway/isAtomic/isDuckChess/isSpellChess/isHorde/isRacingKings/isTorpedo/isCrazyhouse
  * flags, and identical time control (initial + increment). */
 export class Matchmaker {
   private queue: QueueEntry[] = [];
@@ -51,6 +52,7 @@ export class Matchmaker {
         q.isSpellChess === entry.isSpellChess &&
         q.isHorde === entry.isHorde &&
         q.isRacingKings === entry.isRacingKings &&
+        q.isTorpedo === entry.isTorpedo &&
         q.isCrazyhouse === entry.isCrazyhouse &&
         q.timeControl.initialSeconds === entry.timeControl.initialSeconds &&
         q.timeControl.incrementSeconds === entry.timeControl.incrementSeconds

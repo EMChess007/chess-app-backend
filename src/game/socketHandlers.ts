@@ -77,17 +77,18 @@ interface PairableEntry {
   isSpellChess: boolean;
   isHorde: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   isCrazyhouse: boolean;
 }
 
 /** Giveaway, Atomic, Duck Chess, Spell Chess, Horde and Crazyhouse cannot be combined with any other variant (see game/giveaway.ts,
  * atomic.ts, duckChess.ts, spellChess.ts, horde.ts, crazyhouse.ts) — a client that sends one of them together with another flag is
  * misbehaving, so reject it instead of silently picking one. */
-function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown; isDuckChess?: unknown; isSpellChess?: unknown; isHorde?: unknown; isRacingKings?: unknown; isCrazyhouse?: unknown }): string | null {
-  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic, flags.isDuckChess, flags.isSpellChess, flags.isHorde, flags.isRacingKings, flags.isCrazyhouse];
-  if (!flags.isGiveaway && !flags.isAtomic && !flags.isDuckChess && !flags.isSpellChess && !flags.isHorde && !flags.isRacingKings && !flags.isCrazyhouse) return null;
+function conflictingVariantError(flags: { isChess960?: unknown; isKingOfTheHill?: unknown; isThreeCheck?: unknown; isSetupChess?: unknown; isFogOfWar?: unknown; isGiveaway?: unknown; isAtomic?: unknown; isDuckChess?: unknown; isSpellChess?: unknown; isHorde?: unknown; isRacingKings?: unknown; isTorpedo?: unknown; isCrazyhouse?: unknown }): string | null {
+  const all = [flags.isChess960, flags.isKingOfTheHill, flags.isThreeCheck, flags.isSetupChess, flags.isFogOfWar, flags.isGiveaway, flags.isAtomic, flags.isDuckChess, flags.isSpellChess, flags.isHorde, flags.isRacingKings, flags.isTorpedo, flags.isCrazyhouse];
+  if (!flags.isGiveaway && !flags.isAtomic && !flags.isDuckChess && !flags.isSpellChess && !flags.isHorde && !flags.isRacingKings && !flags.isTorpedo && !flags.isCrazyhouse) return null;
   if (all.filter(Boolean).length < 2) return null;
-  return `${flags.isGiveaway ? 'Giveaway' : flags.isAtomic ? 'Atomic' : flags.isDuckChess ? 'Duck Chess' : flags.isSpellChess ? 'Spell Chess' : flags.isHorde ? 'Horde' : flags.isRacingKings ? 'Racing Kings' : 'Crazyhouse'} cannot be combined with another variant.`;
+  return `${flags.isGiveaway ? 'Giveaway' : flags.isAtomic ? 'Atomic' : flags.isDuckChess ? 'Duck Chess' : flags.isSpellChess ? 'Spell Chess' : flags.isHorde ? 'Horde' : flags.isRacingKings ? 'Racing Kings' : flags.isTorpedo ? 'Torpedo' : 'Crazyhouse'} cannot be combined with another variant.`;
 }
 
 function isValidSetupChessPieces(value: unknown): value is SetupChessPieceWire[] {
@@ -140,6 +141,7 @@ export function registerSocketHandlers(io: Server): void {
       spellChess: a.isSpellChess,
       horde: a.isHorde,
       racingKings: a.isRacingKings,
+      torpedo: a.isTorpedo,
       crazyhouse: a.isCrazyhouse,
     });
 
@@ -157,6 +159,7 @@ export function registerSocketHandlers(io: Server): void {
       isSpellChess: a.isSpellChess,
       isHorde: a.isHorde,
       isRacingKings: a.isRacingKings,
+      isTorpedo: a.isTorpedo,
       isCrazyhouse: a.isCrazyhouse,
       whiteMs: created.whiteMs,
       blackMs: created.blackMs,
@@ -217,6 +220,7 @@ export function registerSocketHandlers(io: Server): void {
         isSpellChess: Boolean(payload.isSpellChess),
         isHorde: Boolean(payload.isHorde),
         isRacingKings: Boolean(payload.isRacingKings),
+        isTorpedo: Boolean(payload.isTorpedo),
         isCrazyhouse: Boolean(payload.isCrazyhouse),
         rating: typeof payload.rating === 'number' ? payload.rating : undefined,
         queuedAt: Date.now(),
@@ -265,6 +269,7 @@ export function registerSocketHandlers(io: Server): void {
         isSpellChess: Boolean(payload.isSpellChess),
         isHorde: Boolean(payload.isHorde),
         isRacingKings: Boolean(payload.isRacingKings),
+        isTorpedo: Boolean(payload.isTorpedo),
         isCrazyhouse: Boolean(payload.isCrazyhouse),
       });
       ack?.({ ok: true, code: challenge.code });
@@ -321,6 +326,7 @@ export function registerSocketHandlers(io: Server): void {
         isSpellChess: challenge.isSpellChess,
         isHorde: challenge.isHorde,
         isRacingKings: challenge.isRacingKings,
+        isTorpedo: challenge.isTorpedo,
         isCrazyhouse: challenge.isCrazyhouse,
       };
       // EQUIVALENT-MUTANT NOTE (Spell Chess mutation set, "the challenge joiner entry forgets the variant"): pairAndCreateRoom reads every variant flag from the
@@ -341,6 +347,7 @@ export function registerSocketHandlers(io: Server): void {
         isSpellChess: challenge.isSpellChess,
         isHorde: challenge.isHorde,
         isRacingKings: challenge.isRacingKings,
+        isTorpedo: challenge.isTorpedo,
         isCrazyhouse: challenge.isCrazyhouse,
       };
       // Same "no room until both blind armies are in" branch as join_queue above.
@@ -424,6 +431,11 @@ export function registerSocketHandlers(io: Server): void {
         ack?.({ ok: false, error: 'Please enter a tournament name.' });
         return;
       }
+      const conflict = conflictingVariantError(payload);
+      if (conflict) {
+        ack?.({ ok: false, error: conflict });
+        return;
+      }
       try {
         const user = await prisma.user.findUnique({ where: { id: userId }, select: { username: true } });
         if (!user) {
@@ -441,6 +453,7 @@ export function registerSocketHandlers(io: Server): void {
           kingOfTheHill: Boolean(payload.isKingOfTheHill),
           threeCheck: Boolean(payload.isThreeCheck),
           racingKings: Boolean(payload.isRacingKings),
+          torpedo: Boolean(payload.isTorpedo),
         });
         ack?.({ ok: true, code: tournament.code, tournamentId: tournament.id });
       } catch (err) {

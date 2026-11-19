@@ -7,6 +7,7 @@ import { JOIN_LIMITER_SWEEP_MS, JOIN_REFUSED_MESSAGE, createJoinChallengeLimiter
 import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
 import { SetupChessPairingManager } from './setupChessPairing.js';
+import { validateFromPositionFen } from './fromPosition.js';
 import { TournamentManager } from './tournaments.js';
 import type {
   Ack,
@@ -79,6 +80,21 @@ interface PairableEntry {
   isRacingKings: boolean;
   isTorpedo: boolean;
   isCrazyhouse: boolean;
+  /** From Position (command #53): a challenge's validated start position. Never set on a queue entry. */
+  initialFen?: string;
+}
+
+const VARIANT_FLAG_KEYS = ['isChess960', 'isKingOfTheHill', 'isThreeCheck', 'isSetupChess', 'isFogOfWar', 'isGiveaway', 'isAtomic', 'isDuckChess', 'isSpellChess', 'isHorde', 'isRacingKings', 'isTorpedo', 'isCrazyhouse'] as const;
+
+const FROM_POSITION_CHALLENGE_ONLY = 'From Position games are only available through a direct challenge.';
+
+/** What a create_challenge payload says about From Position: no `initialFen` -> an ordinary challenge; otherwise the position must be a legal
+ * start (the SAME rules as the app's validateEditorFen forPlay, fromPosition.ts) and the challenge may carry no variant flag. */
+function fromPositionChallenge(payload: CreateChallengePayload): { ok: true; fen: string | undefined } | { ok: false; error: string } {
+  if (payload?.initialFen === undefined || payload.initialFen === null) return { ok: true, fen: undefined };
+  if (VARIANT_FLAG_KEYS.some((key) => Boolean(payload[key]))) return { ok: false, error: 'From Position cannot be combined with a variant.' };
+  const checked = validateFromPositionFen(payload.initialFen);
+  return checked.ok ? { ok: true, fen: checked.fen } : { ok: false, error: checked.error };
 }
 
 /** Giveaway, Atomic, Duck Chess, Spell Chess, Horde and Crazyhouse cannot be combined with any other variant (see game/giveaway.ts,
@@ -134,6 +150,9 @@ export function registerSocketHandlers(io: Server): void {
       kingOfTheHill: a.isKingOfTheHill,
       threeCheck: a.isThreeCheck,
       setupChess: false, // Setup Chess never reaches this path — see the isSetupChess branches below
+      // From Position: only the challenge creator's entry (`a`) can carry a start position - the queue never does.
+      initialFen: a.initialFen,
+      fromPosition: a.initialFen !== undefined,
       fogOfWar: a.isFogOfWar,
       giveaway: a.isGiveaway,
       atomic: a.isAtomic,
@@ -147,6 +166,7 @@ export function registerSocketHandlers(io: Server): void {
 
     const basePayload = {
       roomId: created.roomId,
+      ...(a.initialFen !== undefined ? { isFromPosition: true } : {}),
       timeControl: a.timeControl,
       isChess960: a.isChess960,
       isKingOfTheHill: a.isKingOfTheHill,
@@ -196,6 +216,10 @@ export function registerSocketHandlers(io: Server): void {
     socket.on('join_queue', (payload: JoinQueuePayload, ack?: (res: Ack) => void) => {
       if (!isValidTimeControl(payload?.timeControl)) {
         ack?.({ ok: false, error: 'Invalid time control.' });
+        return;
+      }
+      if (payload?.initialFen !== undefined && payload.initialFen !== null) {
+        ack?.({ ok: false, error: FROM_POSITION_CHALLENGE_ONLY });
         return;
       }
       const conflict = conflictingVariantError(payload);
@@ -253,7 +277,13 @@ export function registerSocketHandlers(io: Server): void {
         ack?.({ ok: false, error: conflict });
         return;
       }
+      const fromPosition = fromPositionChallenge(payload);
+      if (!fromPosition.ok) {
+        ack?.({ ok: false, error: fromPosition.error });
+        return;
+      }
       const challenge = challenges.create({
+        initialFen: fromPosition.fen,
         creatorSocketId: socket.id,
         creatorUserId: userId,
         timeControl: payload.timeControl,
@@ -328,6 +358,7 @@ export function registerSocketHandlers(io: Server): void {
         isRacingKings: challenge.isRacingKings,
         isTorpedo: challenge.isTorpedo,
         isCrazyhouse: challenge.isCrazyhouse,
+        initialFen: challenge.initialFen,
       };
       // EQUIVALENT-MUTANT NOTE (Spell Chess mutation set, "the challenge joiner entry forgets the variant"): pairAndCreateRoom reads every variant flag from the
       // FIRST entry only (the challenge creator's, `a`); the joiner's flags are carried for symmetry only and cannot change a room.
@@ -418,6 +449,11 @@ export function registerSocketHandlers(io: Server): void {
     });
 
     socket.on('create_tournament', async (payload: CreateTournamentPayload, ack?: (res: Ack<{ code: string; tournamentId: string }>) => void) => {
+      // First, whoever asks: a tournament never starts from a custom position (From Position is a direct challenge only).
+      if (payload?.initialFen !== undefined && payload.initialFen !== null) {
+        ack?.({ ok: false, error: FROM_POSITION_CHALLENGE_ONLY });
+        return;
+      }
       if (!userId) {
         ack?.({ ok: false, error: 'You need to be logged in to create a tournament.' });
         return;

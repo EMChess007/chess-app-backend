@@ -80,6 +80,8 @@ interface Room {
   id: string;
   engine: RoomChessEngine;
   initialFen: string;
+  /** From Position room (see CreateRoomParams.fromPosition). */
+  fromPosition: boolean;
   chess960: boolean;
   kingOfTheHill: boolean;
   threeCheck: boolean;
@@ -163,6 +165,9 @@ export interface CreateRoomParams {
    * its own starting position (classical, or a random Chess960 back rank) as before; the regression
    * scripts (e.g. scripts/test-giveaway.mjs) pass one to start a room from a hand-built position. */
   initialFen?: string;
+  /** From Position (command #53): `initialFen` is a challenger-chosen, already validated start (fromPosition.ts). Ordinary chess, unrated; only
+   * marks the room so the wire payloads can say so. Never set together with `setupChess` or any variant flag. */
+  fromPosition?: boolean;
   /** See Room.onFinished. */
   onFinished?: (winner: PieceColor | null) => void;
 }
@@ -268,6 +273,7 @@ export class RoomManager {
       id,
       engine,
       initialFen,
+      fromPosition: params.fromPosition === true,
       chess960: params.chess960,
       kingOfTheHill: params.kingOfTheHill,
       threeCheck: params.threeCheck,
@@ -718,6 +724,7 @@ export class RoomManager {
       ok: true,
       state: {
         fen: room.fogOfWar ? buildRedactedFen(room.engine, color) : room.engine.getFen(),
+        ...(room.fromPosition ? { initialFen: room.initialFen, isFromPosition: true } : {}),
         turn: room.engine.getTurn(),
         color,
         timeControl: room.timeControl,
@@ -888,6 +895,7 @@ export class RoomManager {
         // Spectators always see the full true position, never redacted — see fogOfWar.ts's
         // design notes ("they're not cheating anyone since they're not competing").
         fen: room.engine.getFen(),
+        ...(room.fromPosition ? { initialFen: room.initialFen, isFromPosition: true } : {}),
         turn: room.engine.getTurn(),
         timeControl: room.timeControl,
         isChess960: room.chess960,

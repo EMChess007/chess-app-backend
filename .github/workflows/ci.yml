@@ -221,6 +221,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:torpedo
 
+      - name: Run From Position regression suite (server FEN validator parity with the app, room / rejoin / spectate / PGN keep the start FEN)
+        working-directory: chess-app/backend
+        run: npm run test:fromPosition
+
       - name: Run Crazyhouse regression suite (server rules authority, drops and reserves, no-drift check, parity with the mobile app)
         working-directory: chess-app/backend
         run: npm run test:crazyhouse

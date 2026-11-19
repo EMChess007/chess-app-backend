@@ -115,6 +115,7 @@ export class SetupChessPairingManager {
       spellChess: false, // ...nor Spell Chess
       horde: false, // ...nor Horde
       racingKings: false, // ...nor Racing Kings
+      torpedo: false, // ...nor Torpedo
       crazyhouse: false, // ...nor Crazyhouse
       initialFen: fen,
     });
@@ -133,6 +134,7 @@ export class SetupChessPairingManager {
       isSpellChess: false,
       isHorde: false,
       isRacingKings: false,
+      isTorpedo: false,
       isCrazyhouse: false,
       fen: created.fen,
       whiteMs: created.whiteMs,

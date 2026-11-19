@@ -303,6 +303,43 @@ async function testThreeCheckFlagThreadsThrough() {
   ivoSocket.disconnect();
 }
 
+async function testTorpedoFlagThreadsThrough() {
+  console.log('\n=== 6. Torpedo flag propagates: create -> lobby -> match, and cannot be combined ===');
+  const tess = await registerUser(`tess_${randomUUID().slice(0, 6)}`);
+  const uma = await registerUser(`uma_${randomUUID().slice(0, 6)}`);
+  const vic = await registerUser(`vic_${randomUUID().slice(0, 6)}`);
+  const tessSocket = await connect('Tess', tess.token);
+  const umaSocket = await connect('Uma', uma.token);
+  const vicSocket = await connect('Vic', vic.token);
+
+  const timeControl = { initialSeconds: 180, incrementSeconds: 0 };
+  const mixed = await emitAck(tessSocket, 'create_tournament', { name: 'Mixed Cup', timeControl, isChess960: true, isTorpedo: true });
+  check(mixed.ok === false && /cannot be combined/i.test(mixed.error), 'Torpedo + Chess960 is refused on create_tournament');
+
+  const createAck = await emitAck(tessSocket, 'create_tournament', { name: 'Torpedo Cup', timeControl, isTorpedo: true });
+  check(createAck.ok === true, "Tess's create_tournament ack is ok");
+
+  const umaJoinAck = await emitAck(umaSocket, 'join_tournament', { code: createAck.code });
+  check(umaJoinAck.ok === true, 'Uma joins with the code');
+  check(umaJoinAck.tournament.isTorpedo === true, 'the lobby state Uma receives reports isTorpedo: true');
+
+  const readyPromise = Promise.race([
+    waitFor(tessSocket, 'tournament_match_ready'),
+    waitFor(umaSocket, 'tournament_match_ready'),
+    waitFor(vicSocket, 'tournament_match_ready'),
+  ]);
+  await emitAck(vicSocket, 'join_tournament', { code: createAck.code });
+  const startAck = await emitAck(tessSocket, 'start_tournament', { tournamentId: createAck.tournamentId });
+  check(startAck.ok === true, 'the tournament starts successfully');
+
+  const readyPayload = await readyPromise;
+  check(readyPayload.isTorpedo === true && readyPayload.isRacingKings === false, 'the first tournament_match_ready payload also reports isTorpedo: true');
+
+  tessSocket.disconnect();
+  umaSocket.disconnect();
+  vicSocket.disconnect();
+}
+
 async function run() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testGuestsAreRejected();
@@ -310,6 +347,7 @@ async function run() {
   await testFullRoundRobinProgression();
   await testKingOfTheHillFlagThreadsThrough();
   await testThreeCheckFlagThreadsThrough();
+  await testTorpedoFlagThreadsThrough();
 }
 
 async function main() {

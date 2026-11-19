@@ -217,6 +217,10 @@ jobs:
         working-directory: chess-app/backend
         run: npm run test:horde
 
+      - name: Run Torpedo regression suite (server engine rules, no-drift check, parity with the mobile app)
+        working-directory: chess-app/backend
+        run: npm run test:torpedo
+
       - name: Run Crazyhouse regression suite (server rules authority, drops and reserves, no-drift check, parity with the mobile app)
         working-directory: chess-app/backend
         run: npm run test:crazyhouse

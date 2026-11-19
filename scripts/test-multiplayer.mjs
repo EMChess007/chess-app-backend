@@ -1296,6 +1296,117 @@ async function testRacingKingsOnline() {
   bob.disconnect();
 }
 
+async function testTorpedoOnline() {
+  console.log('\n=== Torpedo: matchmaking, challenge, a pawn steps two squares from any rank, en passant after it, rejoin, resignation ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+  const torpedoSeeker = await connect('Tora');
+  const classicSeeker = await connect('Clea');
+  check((await emitAck(torpedoSeeker, 'join_queue', { timeControl, isTorpedo: true })).ok === true, 'Tora queues for Torpedo');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Clea queues for a classic game');
+  let wronglyPaired = false;
+  torpedoSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Torpedo seeker and a classic seeker are never paired with each other');
+  await emitAck(torpedoSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  torpedoSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused6');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isTorpedo: true, isRacingKings: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Torpedo + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isTorpedo: true, isChess960: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  // A challenge carries the variant to the joiner.
+  const host = await connect('Torhost');
+  const guest = await connect('Torguest');
+  const created = await emitAck(host, 'create_challenge', { timeControl, isTorpedo: true });
+  check(created.ok === true && typeof created.code === 'string', 'a Torpedo challenge is created');
+  const hostMatch = waitFor(host, 'match_found'); // BEFORE the emit that provokes it -- see waitFor's doc comment
+  hostMatch.catch(() => {});
+  const guestMatch = waitFor(guest, 'match_found');
+  guestMatch.catch(() => {});
+  check((await emitAck(guest, 'join_challenge', { code: created.code })).ok === true, 'the guest joins by code');
+  const [hm, gm] = await Promise.all([hostMatch, guestMatch]);
+  check(hm.isTorpedo === true && gm.isTorpedo === true, 'both sides of a challenge are told isTorpedo: true');
+  host.disconnect();
+  guest.disconnect();
+
+  const alice = await connect('Torin');
+  const bob = await connect('Torben');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit -- see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isTorpedo: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isTorpedo: true });
+      return matchFound;
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Torpedo seekers are paired');
+  check(matchA.isTorpedo === true && matchB.isTorpedo === true && matchA.isRacingKings === false && matchA.isHorde === false, 'match_found tells both clients isTorpedo: true');
+  check(matchA.fen === START_FEN && matchB.fen === START_FEN, 'both start from the ordinary chess position');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to) => emitAck(who.socket, 'make_move', { roomId, from, to });
+
+  check((await turn(white, 'd2', 'd3')).ok === true, '1.d3 (an ordinary one-square step)');
+  check((await turn(black, 'd7', 'd5')).ok === true, '1...d5 (the ordinary double step from the home rank)');
+  check((await turn(white, 'd3', 'd5')).ok === false, '2.d3-d5 is refused: a pawn never jumps, and d5 is occupied');
+  check((await turn(white, 'a2', 'a3')).ok === true, '2.a3');
+  check((await turn(black, 'e7', 'e5')).ok === true, '2...e5');
+  check((await turn(white, 'h2', 'h3')).ok === true, '3.h3');
+
+  // THE TORPEDO RULE: Black's pawn on e5 steps to e3 -- two squares from the FIFTH rank.
+  const whiteSees = waitFor(white.socket, 'opponent_move');
+  const torpedoStep = await turn(black, 'e5', 'e3');
+  check(torpedoStep.ok === true, '3...e3: a pawn that is not on its home rank steps two squares');
+  const seen = await whiteSees;
+  check(seen.fen === 'rnbqkbnr/ppp2ppp/8/3p4/8/P2Pp2P/1PP1PPP1/RNBQKBNR w KQkq e4 0 4', 'White receives the exact position, with the en passant square e4 on the FOURTH rank');
+
+  // En passant works after the torpedo step: d3 takes the pawn on e3 as if it had stopped on e4.
+  const blackSees = waitFor(black.socket, 'opponent_move');
+  const enPassant = await turn(white, 'd3', 'e4');
+  check(enPassant.ok === true && enPassant.san === 'dxe4', '4.dxe4 en passant is accepted');
+  const seenEp = await blackSees;
+  check(seenEp.fen === 'rnbqkbnr/ppp2ppp/8/3p4/4P3/P6P/1PP1PPP1/RNBQKBNR b KQkq - 0 4', 'Black receives the position with the torpedo pawn gone from e3');
+
+  // A spectator and a rejoin must both be told it is a Torpedo game.
+  const watcher = await connect('TorpedoWatcher');
+  const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+  check(spectate.ok === true && spectate.state.isTorpedo === true, 'a spectator is told it is a Torpedo game');
+  watcher.disconnect();
+  const blackMatch = matchA.color === 'b' ? matchA : matchB;
+  const whiteSeesDrop = waitFor(white.socket, 'opponent_disconnected');
+  black.socket.disconnect();
+  await whiteSeesDrop;
+  const back = await connect('TorpedoBlack (reconnected)');
+  const rejoin = await emitAck(back, 'rejoin_game', { roomId, playerToken: blackMatch.playerToken });
+  check(rejoin.ok === true && rejoin.state.isTorpedo === true, 'a rejoin answer says it is a Torpedo game');
+  black.socket = back;
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  const resign = await emitAck(black.socket, 'resign', { roomId });
+  check(resign.ok === true, 'Black resigns');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'resignation' && wr.winner === 'w' && br.reason === 'resignation', 'both players get game_over {resignation, winner: white}');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function testHordeOnline() {
   console.log('\n=== Horde: matchmaking, the 36-pawn start, a few turns, resignation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -1818,6 +1929,7 @@ async function main() {
   await testSpellChessOnline();
   await testHordeOnline();
   await testRacingKingsOnline();
+  await testTorpedoOnline();
   await testCrazyhouseOnline();
   await testNoTimeLimitOnline();
   await testRejoinAfterGameEnded();

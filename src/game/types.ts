@@ -57,6 +57,8 @@ export interface JoinQueuePayload {
   isHorde?: boolean;
   /** Racing Kings -- see racingKings.ts. Mutually exclusive with every other variant. */
   isRacingKings?: boolean;
+  /** Torpedo -- see torpedo.ts. Mutually exclusive with every other variant. */
+  isTorpedo?: boolean;
   /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
   isCrazyhouse?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
@@ -127,6 +129,7 @@ export interface MatchFoundPayload {
   isSpellChess: boolean;
   isHorde: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   isCrazyhouse: boolean;
   fen: string;
   whiteMs: number;
@@ -198,6 +201,7 @@ export interface RejoinStatePayload {
   isSpellChess: boolean;
   isHorde: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   isCrazyhouse: boolean;
   /** Spell Chess only — charges/cooldowns/pending effects right now. */
   spellState?: SpellChessState;
@@ -266,6 +270,7 @@ export interface CreateChallengePayload {
   /** Horde -- see horde.ts. Mutually exclusive with every other variant. */
   isHorde?: boolean;
   isRacingKings?: boolean;
+  isTorpedo?: boolean;
   /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
   isCrazyhouse?: boolean;
   timeControlLabel?: string;
@@ -310,6 +315,7 @@ export interface CreateTournamentPayload {
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
   isRacingKings?: boolean;
+  isTorpedo?: boolean;
 }
 
 export interface JoinTournamentPayload {
@@ -334,6 +340,7 @@ export interface TournamentLobbyState {
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   status: TournamentStatus;
   creatorUserId: string;
   participants: TournamentParticipantSummary[];
@@ -359,6 +366,7 @@ export interface TournamentNextMatch {
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   roomId: string | null;
   playerToken: string | null;
   color: PieceColor | null;
@@ -388,6 +396,7 @@ export interface TournamentMatchReadyPayload {
   isKingOfTheHill: boolean;
   isThreeCheck: boolean;
   isRacingKings: boolean;
+  isTorpedo: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;

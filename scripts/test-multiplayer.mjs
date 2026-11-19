@@ -1296,6 +1296,111 @@ async function testRacingKingsOnline() {
   bob.disconnect();
 }
 
+/**
+ * From Position online (command #53): a DIRECT CHALLENGE starts a game from the challenger's FEN; the queue and tournaments refuse a FEN.
+ * Black is to move in the start position (after 1.f3 e5 2.g4 White has weakened the king): Black's first move is the mate Qh4#.
+ */
+async function testFromPositionOnline() {
+  console.log('\n=== From Position: a challenge from a Black-to-move FEN (moves, result, rejoin keeps the FEN); the queue and tournaments refuse it ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const MATE_FEN = 'rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2';
+  const QUIET_FEN = '4k3/pppp4/8/8/8/8/4PPPP/4K3 b - - 0 7';
+
+  const refuser = await connect('FPRefuser');
+  const queued = await emitAck(refuser, 'join_queue', { timeControl, initialFen: MATE_FEN });
+  check(queued.ok === false && /direct challenge/i.test(queued.error), 'join_queue refuses a From Position payload (not in Quick Match)');
+  const tournament = await emitAck(refuser, 'create_tournament', { name: 'FP cup', timeControl, initialFen: MATE_FEN });
+  check(tournament.ok === false && /direct challenge/i.test(tournament.error), 'create_tournament refuses a From Position payload (not in tournaments)');
+  const withVariant = await emitAck(refuser, 'create_challenge', { timeControl, initialFen: MATE_FEN, isAtomic: true });
+  check(withVariant.ok === false && /variant/i.test(withVariant.error), 'a From Position challenge cannot carry a variant flag');
+  for (const [name, bad] of [
+    ['garbage', 'not a fen'],
+    ['a missing king', '8/8/8/8/8/8/8/4K3 w - - 0 1'],
+    ['the side not to move in check', '4k3/8/8/8/8/8/4q3/4K2R b K - 0 1'],
+    ['a castling right without the rook', '4k3/8/8/8/8/8/8/4K3 w K - 0 1'],
+    ['an en passant square with no pawn', '4k3/8/8/8/8/8/8/4K3 w - e6 0 1'],
+    ['an already checkmated position', '7k/6Q1/6K1/8/8/8/8/8 b - - 0 1'],
+    ['an already stalemated position', '7k/5Q2/8/6K1/8/8/8/8 b - - 0 1'],
+    ['bare kings (a draw)', '4k3/8/8/8/8/8/8/4K3 w - - 0 1'],
+    ['a non-string', 42],
+  ]) {
+    const refused = await emitAck(refuser, 'create_challenge', { timeControl, initialFen: bad });
+    check(refused.ok === false && typeof refused.error === 'string' && refused.error.length > 0, `create_challenge refuses ${name} with a message (${refused.error})`);
+  }
+  refuser.disconnect();
+
+  const startGame = async (hostName, guestName, fen) => {
+    const host = await connect(hostName);
+    const guest = await connect(guestName);
+    const created = await emitAck(host, 'create_challenge', { timeControl, initialFen: fen });
+    check(created.ok === true && typeof created.code === 'string', `${hostName} creates a From Position challenge`);
+    const hostMatch = waitFor(host, 'match_found'); // BEFORE the emit that provokes it -- see waitFor's doc comment
+    hostMatch.catch(() => {});
+    const guestMatch = waitFor(guest, 'match_found');
+    guestMatch.catch(() => {});
+    check((await emitAck(guest, 'join_challenge', { code: created.code })).ok === true, `${guestName} joins by code`);
+    const [hm, gm] = await Promise.all([hostMatch, guestMatch]);
+    return { host, guest, hm, gm };
+  };
+
+  // Game 1: the mate. Black moves first.
+  {
+    const { host, guest, hm, gm } = await startGame('FPHost', 'FPGuest', MATE_FEN);
+    check(hm.roomId === gm.roomId && hm.fen === MATE_FEN && gm.fen === MATE_FEN, 'both players start from the challenger\'s FEN');
+    check(hm.isFromPosition === true && gm.isFromPosition === true && hm.isChess960 === false && hm.isSetupChess === false, 'match_found says isFromPosition and no variant');
+    const black = hm.color === 'b' ? { socket: host } : { socket: guest };
+    const white = hm.color === 'b' ? { socket: guest } : { socket: host };
+    const roomId = hm.roomId;
+    check((await emitAck(white.socket, 'make_move', { roomId, from: 'e2', to: 'e4' })).ok === false, 'White cannot move first: it is Black to move');
+    const whiteOver = waitFor(white.socket, 'game_over');
+    const blackOver = waitFor(black.socket, 'game_over');
+    const mate = await emitAck(black.socket, 'make_move', { roomId, from: 'd8', to: 'h4' });
+    check(mate.ok === true && mate.san === 'Qh4#', 'Black plays Qh4#');
+    const [wo, bo] = await Promise.all([whiteOver, blackOver]);
+    check(wo.reason === 'checkmate' && wo.winner === 'b' && bo.winner === 'b', 'both get game_over {checkmate, winner: black}');
+    host.disconnect();
+    guest.disconnect();
+  }
+
+  // Game 2: a quiet position; rejoin and spectate keep the start FEN.
+  {
+    const { host, guest, hm, gm } = await startGame('FPHost2', 'FPGuest2', QUIET_FEN);
+    check(hm.fen === QUIET_FEN && gm.fen === QUIET_FEN, 'a position with a different shape also starts exactly as sent');
+    const blackMatch = hm.color === 'b' ? hm : gm;
+    const black = hm.color === 'b' ? { socket: host } : { socket: guest };
+    const white = hm.color === 'b' ? { socket: guest } : { socket: host };
+    const roomId = hm.roomId;
+    const whiteSees = waitFor(white.socket, 'opponent_move');
+    const first = await emitAck(black.socket, 'make_move', { roomId, from: 'a7', to: 'a5' });
+    check(first.ok === true && first.san === 'a5', 'Black plays a5 first');
+    await whiteSees;
+    const second = await emitAck(white.socket, 'make_move', { roomId, from: 'e2', to: 'e4' });
+    check(second.ok === true, 'White answers e4');
+
+    const watcher = await connect('FPWatcher');
+    const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+    check(spectate.ok === true && spectate.state.initialFen === QUIET_FEN && spectate.state.isFromPosition === true, 'a spectator is told the start FEN and that it is From Position');
+    check(spectate.state.moves.length === 2 && spectate.state.turn === 'b', 'the spectator sees both moves and Black to move');
+    watcher.disconnect();
+
+    const whiteSeesDrop = waitFor(white.socket, 'opponent_disconnected');
+    black.socket.disconnect();
+    await whiteSeesDrop;
+    const back = await connect('FPBlack (reconnected)');
+    const rejoin = await emitAck(back, 'rejoin_game', { roomId, playerToken: blackMatch.playerToken });
+    check(rejoin.ok === true && rejoin.state.initialFen === QUIET_FEN && rejoin.state.isFromPosition === true, 'rejoin keeps the start FEN and the From Position flag');
+    check(rejoin.state.moves.length === 2 && rejoin.state.turn === 'b' && rejoin.state.color === 'b', 'rejoin returns the moves so far and Black to move');
+
+    const whiteOver = waitFor(white.socket, 'game_over');
+    check((await emitAck(back, 'resign', { roomId })).ok === true, 'Black resigns after the rejoin');
+    const wr = await whiteOver;
+    check(wr.reason === 'resignation' && wr.winner === 'w', 'White gets game_over {resignation, winner: white}');
+    host.disconnect();
+    guest.disconnect();
+    back.disconnect();
+  }
+}
+
 async function testTorpedoOnline() {
   console.log('\n=== Torpedo: matchmaking, challenge, a pawn steps two squares from any rank, en passant after it, rejoin, resignation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -1930,6 +2035,7 @@ async function main() {
   await testHordeOnline();
   await testRacingKingsOnline();
   await testTorpedoOnline();
+  await testFromPositionOnline();
   await testCrazyhouseOnline();
   await testNoTimeLimitOnline();
   await testRejoinAfterGameEnded();

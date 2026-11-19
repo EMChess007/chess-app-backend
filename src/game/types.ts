@@ -40,6 +40,8 @@ export type GameOverReason =
 
 export interface JoinQueuePayload {
   timeControl: TimeControl;
+  /** From Position -- a DIRECT CHALLENGE only (create_challenge). The queue and tournaments refuse any payload that carries it. */
+  initialFen?: string;
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
@@ -114,6 +116,8 @@ export interface SendChatPayload {
 
 export interface MatchFoundPayload {
   roomId: string;
+  /** From Position room (a direct challenge from a chosen start): `fen` is that start position; the game is unrated. Absent otherwise. */
+  isFromPosition?: boolean;
   color: PieceColor;
   playerToken: string;
   opponent: { userId: string | null };
@@ -185,6 +189,9 @@ export interface ChatMessagePayload {
 
 export interface RejoinStatePayload {
   fen: string;
+  /** From Position rooms only: the position the game STARTED from (`fen` is the live one). Spectators replay from it. Absent otherwise. */
+  initialFen?: string;
+  isFromPosition?: boolean;
   turn: PieceColor;
   color: PieceColor;
   timeControl: TimeControl;
@@ -258,6 +265,9 @@ export interface ActiveGameSummary {
 
 export interface CreateChallengePayload {
   timeControl: TimeControl;
+  /** From Position (command #53): the starting position the challenger picked (Board Editor / pasted FEN). Validated server-side
+   * (fromPosition.ts); ordinary chess from there, so no other variant flag may accompany it. Unrated. */
+  initialFen?: string;
   isChess960?: boolean;
   isKingOfTheHill?: boolean;
   isThreeCheck?: boolean;
@@ -310,6 +320,8 @@ export type TournamentStatus = 'lobby' | 'active' | 'finished';
 export interface CreateTournamentPayload {
   name: string;
   timeControl: TimeControl;
+  /** Never accepted: a tournament cannot start from a custom position (create_tournament refuses a payload that carries it). */
+  initialFen?: string;
   timeControlLabel?: string;
   isChess960?: boolean;
   isKingOfTheHill?: boolean;

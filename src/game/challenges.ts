@@ -20,6 +20,8 @@ export interface PendingChallenge {
   isRacingKings: boolean;
   isTorpedo: boolean;
   isCrazyhouse: boolean;
+  /** From Position (command #53): the challenger's validated, normalized start position (fromPosition.ts). Only a direct challenge can carry one. */
+  initialFen?: string;
   createdAt: number;
 }
 

@@ -42,7 +42,7 @@
  *   FOUR_GRACE_MS=1500 npm run dev             (in one terminal, from backend/; the override shortens the 4 Player bot-takeover grace from 45 s so the
  *                                               fuzz can watch takeovers - it is ignored when NODE_ENV=production. Without it the 4 Player section
  *                                               still runs, but brings a dropped player back inside the grace instead of waiting for the takeover.)
- *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames] [bughouseGames] [racingKingsGames] [torpedoGames]
+ *   npx tsx scripts/nightly-fuzz-online.mjs [fogGames] [maxPlies] [giveawayGames] [atomicGames] [duckGames] [fourPlayerGames] [fourPlayerGiveawayGames] [hordeGames] [crazyhouseGames] [repetitionGamesPerMode] [chaturajiGames] [bughouseGames] [racingKingsGames] [torpedoGames] [knightmateGames]
  * (the others default to the same count as fogGames; fourPlayerGiveawayGames, chaturajiGames and bughouseGames default to fourPlayerGames. The Bughouse section is described in
  * nightly-fuzz-bughouse.mjs and uses the same FOUR_GRACE_MS above.) BACKEND_URL env var overrides the
  * default http://localhost:3000.
@@ -65,6 +65,8 @@ const FP = { PLAYABLE_SQUARES, squareName, BISHOP, KNIGHT, QUEEN, ROOK, deserial
 import { HORDE_START_FEN, getHordeMoves, getHordeWinnerFromFen } from '../../src/logic/horde.ts';
 import { RACING_KINGS_START_FEN, getRacingKingsMoves, getRacingKingsOutcome } from '../../src/logic/racingKings.ts';
 import { TORPEDO_START_FEN, getTorpedoMoves } from '../../src/logic/torpedo.ts';
+import { KNIGHTMATE_START_FEN } from '../../src/logic/knightmate.ts';
+import { getKnightmateMoves } from '../../src/logic/knightmateGame.ts';
 import { playBughouseGame } from './nightly-fuzz-bughouse.mjs';
 import { getCrazyhouseMoves, initialCrazyhouseState, RESERVE_PIECE_TYPES } from '../../src/logic/crazyhouse.ts';
 
@@ -88,6 +90,8 @@ const BUGHOUSE_GAMES = Number(process.argv[13] ?? FOUR_GAMES);
 const RACING_KINGS_GAMES = Number(process.argv[14] ?? GAMES);
 // Torpedo over two real sockets (playTorpedoGame). Last on the command line again.
 const TORPEDO_GAMES = Number(process.argv[15] ?? GAMES);
+// Knightmate over two real sockets (playKnightmateGame). Last on the command line again.
+const KNIGHTMATE_GAMES = Number(process.argv[16] ?? GAMES);
 
 function connect(name) {
   return new Promise((resolve, reject) => {
@@ -1224,6 +1228,136 @@ async function playTorpedoGame(gameIndex) {
 }
 
 /**
+ * One real Knightmate game through the server: two socket clients, every move chosen from the mobile app's own getKnightmateMoves
+ * (royal knight, commoners, castling, promotion to q/r/b/m) and MUST be accepted with exactly the position, and the notation
+ * (K / M / "=M"), the mobile engine computes; a fraction of turns first submit a move the mobile engine does not offer, and every
+ * promotion first submits the same move promoting to a KNIGHT, which the server MUST refuse. Every game_over must match the
+ * mobile app's verdict (checkmate/mover, stalemate or fifty-move / bare-royal-knights draw); a threefold repetition
+ * ('repetition'/null) is also accepted. The counters prove the games really used the variant: `promotions` (by piece) and `castles`.
+ */
+async function playKnightmateGame(gameIndex) {
+  const alice = await connect(`KAlice${gameIndex}`);
+  const bob = await connect(`KBob${gameIndex}`);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+
+  const [matchA] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit — see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isKnightmate: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isKnightmate: true });
+      return matchFound;
+    })(),
+  ]);
+
+  const roomId = matchA.roomId;
+  const players = { w: matchA.color === 'w' ? alice : bob, b: matchA.color === 'b' ? alice : bob };
+  const issues = [];
+  const stats = { plies: 0, illegalProbes: 0, finished: 0, promotions: 0, commonerPromotions: 0, castles: 0 };
+  let gameOverPayload = null;
+  const onOver = (p) => (gameOverPayload = p);
+  alice.once('game_over', onOver);
+  bob.once('game_over', onOver);
+  let fen = matchA.fen;
+  if (matchA.isKnightmate !== true) issues.push({ kind: 'match-found-missing-isKnightmate', game: gameIndex });
+  if (fen !== KNIGHTMATE_START_FEN) issues.push({ kind: 'knightmate-start-position-differs', game: gameIndex, fen });
+
+  const squares = [];
+  for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) squares.push(`${f}${r}`);
+
+  for (; stats.plies < MAX_PLIES * 2; stats.plies++) {
+    if (gameOverPayload) break;
+    const engine = new ChessEngine(fen, { knightmate: true });
+    const turn = engine.getTurn();
+    const mover = players[turn];
+    const legal = getKnightmateMoves(engine);
+    if (legal.length === 0) break;
+
+    // Server authority: a move the mobile engine does not offer (the royal knight stepping like a king, a move into check...) must bounce.
+    if (Math.random() < 0.25) {
+      const offered = new Set(legal.map((m) => `${m.from}${m.to}`));
+      const from = squares[randInt(64)];
+      const to = squares[randInt(64)];
+      if (from !== to && !offered.has(`${from}${to}`)) {
+        stats.illegalProbes++;
+        const refusal = await emitAck(mover, 'make_move', { roomId, from, to, promotion: 'q' });
+        if (refusal.ok) {
+          issues.push({ kind: 'server-ACCEPTED-illegal-knightmate-move', game: gameIndex, ply: stats.plies, fen, move: { from, to } });
+          break;
+        }
+      }
+    }
+
+    // Prefer a promotion when one is on offer (they are rare in random play), and exercise every choice, the commoner included.
+    const promotions = legal.filter((m) => m.promotion);
+    const pick = promotions.length > 0 && Math.random() < 0.7 ? promotions[randInt(promotions.length)] : legal[randInt(legal.length)];
+    if (pick.promotion) {
+      stats.promotions++;
+      if (pick.promotion === 'm') stats.commonerPromotions++;
+      // The same promotion square with a KNIGHT must bounce: Knightmate has no ordinary knights.
+      stats.illegalProbes++;
+      const knightProbe = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: 'n' });
+      if (knightProbe.ok) {
+        issues.push({ kind: 'server-ACCEPTED-knight-promotion', game: gameIndex, ply: stats.plies, fen, move: pick });
+        break;
+      }
+    }
+    if (pick.san.startsWith('O-O')) stats.castles++;
+    const after = new ChessEngine(fen, { knightmate: true });
+    after.move(pick.from, pick.to, pick.promotion);
+    const opponent = players[turn === 'w' ? 'b' : 'w'];
+    const opponentMove = waitFor(opponent, 'opponent_move', 5000).catch(() => null);
+    const ack = await emitAck(mover, 'make_move', { roomId, from: pick.from, to: pick.to, promotion: pick.promotion });
+    if (!ack.ok) {
+      issues.push({ kind: 'server-rejected-legal-knightmate-move', game: gameIndex, ply: stats.plies, fen, pick, error: ack.error });
+      break;
+    }
+    if (ack.fen !== after.getFen()) {
+      issues.push({ kind: 'knightmate-position-differs-from-mobile', game: gameIndex, ply: stats.plies, fen, pick, server: ack.fen, mobile: after.getFen() });
+      break;
+    }
+    if (ack.san !== pick.san) {
+      issues.push({ kind: 'knightmate-notation-differs-from-mobile', game: gameIndex, ply: stats.plies, fen, pick, server: ack.san, mobile: pick.san });
+      break;
+    }
+    fen = ack.fen;
+    const pushed = await opponentMove;
+    if (pushed && (pushed.fen !== ack.fen || pushed.promotion !== pick.promotion)) {
+      issues.push({ kind: 'opponent-state-differs-from-mover-ack', game: gameIndex, ply: stats.plies, ack: ack.fen, pushed: pushed.fen, promotion: pushed.promotion });
+      break;
+    }
+
+    const status = after.getStatus();
+    const expected = status === 'checkmate' ? { reason: 'checkmate', winner: turn } : status === 'stalemate' || status === 'draw' ? { reason: status, winner: null } : null;
+    if (expected) {
+      stats.finished++;
+      await new Promise((r) => setTimeout(r, 150));
+      const repeated = gameOverPayload && gameOverPayload.reason === 'repetition' && gameOverPayload.winner === null;
+      if (!repeated && (!gameOverPayload || gameOverPayload.reason !== expected.reason || gameOverPayload.winner !== expected.winner)) {
+        issues.push({ kind: 'game-over-disagrees-with-mobile', game: gameIndex, ply: stats.plies, fen, expected, got: gameOverPayload });
+      }
+      break;
+    }
+    if (gameOverPayload && !['timeout', 'abandonment', 'repetition'].includes(gameOverPayload.reason)) {
+      issues.push({ kind: 'unexpected-game-over', game: gameIndex, ply: stats.plies, fen, got: gameOverPayload });
+      break;
+    }
+  }
+
+  const overA = waitFor(alice, 'game_over', 1000).catch(() => null);
+  alice.disconnect();
+  bob.disconnect();
+  await overA;
+  return { stats, issues };
+}
+
+/**
  * One real Horde game through the server: two socket clients, every move chosen from the mobile app's own getHordeMoves
  * (including the rank-1 double step) and MUST be accepted with exactly the position the mobile engine computes; a fraction of
  * turns first submit a move the mobile engine does not offer, which the server MUST refuse. Every game_over must match the
@@ -1771,6 +1905,26 @@ async function main() {
   }
   allIssues.push(...torpedoStats.issues.map((i) => ({ ...i, variant: 'torpedo' })));
 
+  // --- Knightmate ---
+  const kmStats = { games: 0, plies: 0, probes: 0, finished: 0, promotions: 0, commonerPromotions: 0, castles: 0, issues: [] };
+  for (let g = 0; g < KNIGHTMATE_GAMES; g++) {
+    try {
+      const { stats, issues } = await playKnightmateGame(g);
+      kmStats.games++;
+      kmStats.plies += stats.plies;
+      kmStats.probes += stats.illegalProbes;
+      kmStats.finished += stats.finished;
+      kmStats.promotions += stats.promotions;
+      kmStats.commonerPromotions += stats.commonerPromotions;
+      kmStats.castles += stats.castles;
+      kmStats.issues.push(...issues);
+      if ((g + 1) % 10 === 0) console.log(`  ...${g + 1}/${KNIGHTMATE_GAMES} Knightmate games played`);
+    } catch (err) {
+      kmStats.issues.push({ kind: 'exception', game: g, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  allIssues.push(...kmStats.issues.map((i) => ({ ...i, variant: 'knightmate' })));
+
   // --- Crazyhouse ---
   const czStats = { games: 0, plies: 0, probes: 0, drops: 0, finished: 0, issues: [] };
   for (let g = 0; g < CRAZYHOUSE_GAMES; g++) {
@@ -1822,6 +1976,7 @@ async function main() {
   console.log(`Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde).`);
   console.log(`Racing Kings: ${rkStats.games}/${RACING_KINGS_GAMES} games, ${rkStats.plies} plies, ${rkStats.probes} illegal moves correctly refused, ${rkStats.finished} games ended (${rkStats.goalWins} by a king reaching the 8th rank).`);
   console.log(`Torpedo: ${torpedoStats.games}/${TORPEDO_GAMES} games, ${torpedoStats.plies} plies (${torpedoStats.torpedoSteps} double steps outside the home rank, ${torpedoStats.enPassants} en passant captures), ${torpedoStats.probes} illegal moves correctly refused, ${torpedoStats.finished} games ended.`);
+  console.log(`Knightmate: ${kmStats.games}/${KNIGHTMATE_GAMES} games, ${kmStats.plies} plies (${kmStats.promotions} promotions, ${kmStats.commonerPromotions} of them to a commoner; ${kmStats.castles} castlings), ${kmStats.probes} illegal moves (knight promotions included) correctly refused, ${kmStats.finished} games ended.`);
   console.log(`Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused, ${czStats.finished} games ended.`);
   console.log(`Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes (${REPETITION_GAMES} each), every one a draw by 'repetition' at exactly the predicted ply.`);
   console.log(`Unexpected issues: ${unexpected.length}`);
@@ -1847,6 +2002,7 @@ async function main() {
     `- Horde: ${hordeStats.games}/${HORDE_GAMES} games, ${hordeStats.plies} plies, ${hordeStats.probes} illegal moves correctly refused by the server, ${hordeStats.finished} games ended (${hordeStats.blackWins} by Black capturing the horde)`,
     `- Racing Kings: ${rkStats.games}/${RACING_KINGS_GAMES} games, ${rkStats.plies} plies, ${rkStats.probes} illegal moves (checking moves included) correctly refused by the server, ${rkStats.finished} games ended (${rkStats.goalWins} by a king reaching the 8th rank)`,
     `- Torpedo: ${torpedoStats.games}/${TORPEDO_GAMES} games, ${torpedoStats.plies} plies (${torpedoStats.torpedoSteps} double steps outside the home rank, ${torpedoStats.enPassants} en passant captures), ${torpedoStats.probes} illegal moves correctly refused by the server, ${torpedoStats.finished} games ended`,
+    `- Knightmate: ${kmStats.games}/${KNIGHTMATE_GAMES} games, ${kmStats.plies} plies (${kmStats.promotions} promotions, ${kmStats.commonerPromotions} to a commoner; ${kmStats.castles} castlings), ${kmStats.probes} illegal moves (knight promotions included) correctly refused by the server, ${kmStats.finished} games ended`,
     `- Crazyhouse: ${czStats.games}/${CRAZYHOUSE_GAMES} games, ${czStats.plies} turns (${czStats.drops} drops), ${czStats.probes} illegal turns correctly refused by the server, ${czStats.finished} games ended`,
     `- Repetition: ${repStats.games} games over ${REPETITION_MODES.length} modes, each ended by 'repetition' at exactly the predicted ply on both sockets (Nf3 Nf6 Ng1 Ng8 shuffle)`,
     `- Unexpected issues: ${unexpected.length}`,

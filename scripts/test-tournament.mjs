@@ -340,6 +340,44 @@ async function testTorpedoFlagThreadsThrough() {
   vicSocket.disconnect();
 }
 
+async function testKnightmateFlagThreadsThrough() {
+  console.log('\n=== 7. Knightmate flag propagates: create -> lobby -> match, and cannot be combined ===');
+  const kit = await registerUser(`kit_${randomUUID().slice(0, 6)}`);
+  const lea = await registerUser(`lea_${randomUUID().slice(0, 6)}`);
+  const max = await registerUser(`max_${randomUUID().slice(0, 6)}`);
+  const kitSocket = await connect('Kit', kit.token);
+  const leaSocket = await connect('Lea', lea.token);
+  const maxSocket = await connect('Max', max.token);
+
+  const timeControl = { initialSeconds: 180, incrementSeconds: 0 };
+  const mixed = await emitAck(kitSocket, 'create_tournament', { name: 'Mixed Cup 2', timeControl, isChess960: true, isKnightmate: true });
+  check(mixed.ok === false && /cannot be combined/i.test(mixed.error), 'Knightmate + Chess960 is refused on create_tournament');
+
+  const createAck = await emitAck(kitSocket, 'create_tournament', { name: 'Knightmate Cup', timeControl, isKnightmate: true });
+  check(createAck.ok === true, "Kit's create_tournament ack is ok");
+
+  const leaJoinAck = await emitAck(leaSocket, 'join_tournament', { code: createAck.code });
+  check(leaJoinAck.ok === true, 'Lea joins with the code');
+  check(leaJoinAck.tournament.isKnightmate === true, 'the lobby state Lea receives reports isKnightmate: true');
+
+  const readyPromise = Promise.race([
+    waitFor(kitSocket, 'tournament_match_ready'),
+    waitFor(leaSocket, 'tournament_match_ready'),
+    waitFor(maxSocket, 'tournament_match_ready'),
+  ]);
+  await emitAck(maxSocket, 'join_tournament', { code: createAck.code });
+  const startAck = await emitAck(kitSocket, 'start_tournament', { tournamentId: createAck.tournamentId });
+  check(startAck.ok === true, 'the tournament starts successfully');
+
+  const readyPayload = await readyPromise;
+  check(readyPayload.isKnightmate === true && readyPayload.isTorpedo === false, 'the first tournament_match_ready payload also reports isKnightmate: true');
+  check(readyPayload.fen === 'rmbqkbmr/pppppppp/8/8/8/8/PPPPPPPP/RMBQKBMR w KQkq - 0 1', 'and the match starts from the Knightmate position');
+
+  kitSocket.disconnect();
+  leaSocket.disconnect();
+  maxSocket.disconnect();
+}
+
 async function run() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testGuestsAreRejected();
@@ -348,6 +386,7 @@ async function run() {
   await testKingOfTheHillFlagThreadsThrough();
   await testThreeCheckFlagThreadsThrough();
   await testTorpedoFlagThreadsThrough();
+  await testKnightmateFlagThreadsThrough();
 }
 
 async function main() {

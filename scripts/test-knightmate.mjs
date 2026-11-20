@@ -10,13 +10,18 @@
  *     knight), stalemate = draw, bare royal knights = draw, the notation (K royal knight, M commoner, =M) and the timeout rule.
  *  3. PARITY with the mobile app: seeded random games are replayed through BOTH engines and every ply must agree on the legal
  *     targets of EVERY square, the resulting FEN, the notation and the status.
- * Online play (rooms, matchmaking, challenges, tournaments) is PART 2 of the variant and is not tested here.
+ *  4. THE ROOM (RoomManager, stub socket server): wire promotion q / r / b / m (never n; "m" refused outside Knightmate), the notation on
+ *     the wire and in the PGN ("K", "M", "=M"), the [Variant "Knightmate"] tag, spectate / rejoin flags, and the flag-fall rule on the real
+ *     room clock (a draw against a bare royal knight, otherwise a loss).
+ * Queues, challenges and tournaments over real sockets are in test-multiplayer.mjs / test-tournament.mjs.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ChessEngine as ClientEngine } from '../../src/logic/ChessEngine.ts';
 import { getKnightmateMoves } from '../../src/logic/knightmateGame.ts';
 import { RoomChessEngine } from '../src/game/RoomChessEngine.ts';
+import { RoomManager, variantPgnTag } from '../src/game/rooms.ts';
+import { buildPgn } from '../src/game/pgn.ts';
 import { KNIGHTMATE_START_FEN, kmOnlyRoyalKnight, kmParseFen, kmTimeoutResult } from '../src/game/knightmate.ts';
 
 let passed = 0;
@@ -151,4 +156,63 @@ console.log('\n=== 3. The server engine and the mobile engine agree on every ply
   check(a.move('e1', 'e2') === null && b.move('e1', 'e2') === null, 'an illegal move is refused by both engines');
 }
 
+// --- 4. The room: wire promotion, notation, flag falls, PGN tag ---------------------------------------
+console.log('\n=== 4. RoomManager: promotion on the wire (q / r / b / m, never n), "=M" notation, the flag-fall rule, [Variant "Knightmate"] ===');
+{
+  const sent = [];
+  const stubIo = { to: (target) => ({ emit: (event, payload) => sent.push({ target, event, payload }) }) };
+  const rooms = new RoomManager(stubIo);
+  const flags = { chess960: false, kingOfTheHill: false, threeCheck: false, setupChess: false, fogOfWar: false, giveaway: false, atomic: false, duckChess: false, spellChess: false, horde: false, racingKings: false, torpedo: false, knightmate: true, crazyhouse: false };
+  const open = (tag, extra = {}) =>
+    rooms.createRoom({ white: { socketId: `${tag}-w`, userId: null }, black: { socketId: `${tag}-b`, userId: null }, timeControl: { initialSeconds: 300, incrementSeconds: 0 }, ...flags, ...extra });
+
+  const room = open('km');
+  check(room.fen === KNIGHTMATE_START_FEN, 'a Knightmate room starts from the Knightmate position');
+  const play = (id, tag, color, from, to, promotion) => rooms.applyMove(`${tag}-${color}`, { roomId: id, from, to, ...(promotion ? { promotion } : {}) });
+  const line = [['w', 'e1', 'f3'], ['b', 'e8', 'f6'], ['w', 'a2', 'a4'], ['b', 'b7', 'b5'], ['w', 'a4', 'b5'], ['b', 'a7', 'a6'], ['w', 'b5', 'a6'], ['b', 'h7', 'h6'], ['w', 'a6', 'a7'], ['b', 'h6', 'h5']];
+  const sans = line.map(([color, from, to]) => play(room.roomId, 'km', color, from, to).san);
+  checkEqual(sans, ['Kf3', 'Kf6', 'a4', 'b5', 'axb5', 'a6', 'bxa6', 'h6', 'a7', 'h5'], 'the wire notation: Kf3 / Kf6 = the royal knight');
+  check(play(room.roomId, 'km', 'w', 'a7', 'b8', 'n').ok === false, 'a promotion to a KNIGHT is refused (there are no ordinary knights)');
+  check(play(room.roomId, 'km', 'w', 'a7', 'b8', 'k').ok === false, 'a promotion to a king is refused');
+  const promoted = play(room.roomId, 'km', 'w', 'a7', 'b8', 'm');
+  check(promoted.ok === true && promoted.san === 'axb8=M', 'promotion to a COMMONER ("m") is accepted: axb8=M');
+  const toBlack = sent.filter((s) => s.target === 'km-b' && s.event === 'opponent_move').at(-1);
+  check(toBlack && toBlack.payload.promotion === 'm' && toBlack.payload.san === 'axb8=M', 'Black is told promotion "m" and san "axb8=M"');
+  check(toBlack.payload.fen.startsWith('rMbq1bmr/'), 'the FEN carries the new white commoner as "M"');
+  check(variantPgnTag({ ...flags }) === 'Knightmate', 'the saved PGN is tagged [Variant "Knightmate"]');
+  const moves = [...sans, 'axb8=M'].map((san) => ({ san }));
+  const pgn = buildPgn(KNIGHTMATE_START_FEN, moves, '*', 'Knightmate');
+  check(pgn.includes('[Variant "Knightmate"]') && pgn.includes('1.Kf3 Kf6') && pgn.includes('6.axb8=M'), 'the PGN movetext carries K / M notation and "=M"');
+  const spectate = rooms.spectate('watch', room.roomId);
+  check(spectate.ok === true && spectate.state.isKnightmate === true, 'a spectator is told isKnightmate');
+  const rejoin = rooms.rejoin('km-b2', { roomId: room.roomId, playerToken: room.blackPlayerToken });
+  check(rejoin.ok === true && rejoin.state.isKnightmate === true, 'a rejoin answer is told isKnightmate');
+
+  // The Commoner promotion does not exist outside Knightmate, whatever the position.
+  const classic = open('cl', { knightmate: false });
+  check(play(classic.roomId, 'cl', 'w', 'e2', 'e4', 'm').ok === false, 'promotion "m" is refused in an ordinary room');
+  check(play(classic.roomId, 'cl', 'w', 'e2', 'e4').ok === true, '...while the plain move is fine');
+
+  // The flag-fall rule on the real room clock (one second each): the wait ends on the game_over event, never on a fixed time.
+  const gameOver = async (target) => {
+    for (let i = 0; i < 100; i++) {
+      const found = sent.find((s) => s.target === target && s.event === 'game_over');
+      if (found) return found.payload;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return null;
+  };
+  const oneSecond = { initialSeconds: 1, incrementSeconds: 0 };
+  open('t1', { timeControl: oneSecond, initialFen: '4k3/8/8/8/8/8/8/Q3K3 w - - 0 1' });
+  const draw = await gameOver('t1-b');
+  check(draw && draw.reason === 'timeout' && draw.winner === null, 'White flags against a bare royal knight: a DRAW (timeout, no winner)');
+  open('t2', { timeControl: oneSecond, initialFen: '4k3/8/8/8/8/8/8/Q3K3 b - - 0 1' });
+  const loss = await gameOver('t2-w');
+  check(loss && loss.reason === 'timeout' && loss.winner === 'w', 'Black flags against an opponent with a queen: White wins on time');
+  open('t3', { timeControl: oneSecond });
+  const normal = await gameOver('t3-b');
+  check(normal && normal.reason === 'timeout' && normal.winner === 'b', 'from the start position a flag still loses (Black wins on time)');
+}
+
 console.log(`\nAll ${passed} Knightmate server checks passed.`);
+process.exit(0);

@@ -116,6 +116,7 @@ export class SetupChessPairingManager {
       horde: false, // ...nor Horde
       racingKings: false, // ...nor Racing Kings
       torpedo: false, // ...nor Torpedo
+      knightmate: false, // ...nor Knightmate
       crazyhouse: false, // ...nor Crazyhouse
       initialFen: fen,
     });
@@ -135,6 +136,7 @@ export class SetupChessPairingManager {
       isHorde: false,
       isRacingKings: false,
       isTorpedo: false,
+      isKnightmate: false,
       isCrazyhouse: false,
       fen: created.fen,
       whiteMs: created.whiteMs,

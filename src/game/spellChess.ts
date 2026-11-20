@@ -245,7 +245,7 @@ function firstPieceInDirection(
   square: string,
   df: number,
   dr: number
-): { square: string; piece: { type: 'p' | 'n' | 'b' | 'r' | 'q' | 'k'; color: PieceColor } } | null {
+): { square: string; piece: { type: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' | 'm'; color: PieceColor } } | null {
   let f = fileOf2(square) + df;
   let r = rankOf2(square) + dr;
   while (inBounds2(f, r)) {
@@ -268,9 +268,9 @@ export function getJumpAugmentedCaptures(
   engine: RoomChessEngine,
   jumpSquare: string,
   mover: PieceColor
-): { from: string; to: string; captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' }[] {
+): { from: string; to: string; captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' | 'm' }[] {
   if (!engine.getPieceAt(jumpSquare)) return [];
-  const out: { from: string; to: string; captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' }[] = [];
+  const out: { from: string; to: string; captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' | 'm' }[] = [];
   for (const [df, dr] of DIRECTIONS) {
     const near = firstPieceInDirection(engine, jumpSquare, -df, -dr);
     if (!near || near.piece.color !== mover || !isSliding(near.piece.type)) continue;

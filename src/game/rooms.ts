@@ -21,6 +21,7 @@ import {
 } from './spellChess.js';
 import { HORDE_START_FEN, getHordeWinnerFromFen } from './horde.js';
 import { RACING_KINGS_START_FEN, racingKingsOutcome } from './racingKings.js';
+import { KNIGHTMATE_START_FEN, kmParseFen, kmTimeoutResult } from './knightmate.js';
 import { RESERVE_PIECE_TYPES, type CrazyhouseState } from './crazyhouse.js';
 import { describeGiveawayRejection, getGiveawayWinner, isLegalGiveawayMove } from './giveaway.js';
 import { buildPgn } from './pgn.js';
@@ -99,6 +100,8 @@ interface Room {
   racingKings: boolean;
   /** Torpedo -- see torpedo.ts. */
   torpedo: boolean;
+  /** Knightmate -- see knightmate.ts: royal knight + commoners, promotion to q/r/b/m. */
+  knightmate: boolean;
   /** Crazyhouse -- see crazyhouse.ts. The reserves/promoted squares live INSIDE room.engine (it updates them on every move/drop);
    * this flag only says whether to expose them. */
   crazyhouse: boolean;
@@ -158,6 +161,8 @@ export interface CreateRoomParams {
   racingKings: boolean;
   /** Torpedo -- see torpedo.ts: the ordinary start position; a pawn may step one or two squares from any rank. */
   torpedo: boolean;
+  /** Knightmate -- see knightmate.ts: the room starts from KNIGHTMATE_START_FEN; the royal knight is 'k', the commoner 'm' (SAN "K" / "M", promotion "=M"). */
+  knightmate: boolean;
   /** Crazyhouse -- see crazyhouse.ts: an ordinary start position; a turn is a move OR a drop from the capturer's reserve. */
   crazyhouse: boolean;
   /** Required when `setupChess` is true — the merged, already-validated starting position built by
@@ -214,8 +219,8 @@ function initialClockMs(timeControl: TimeControl): number {
 }
 
 /** The `[Variant]` tag a finished room's PGN carries (undefined for the standard/Chess960-style modes, which replay as ordinary chess). */
-export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'racingKings' | 'torpedo' | 'crazyhouse'>): string | undefined {
-  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.racingKings ? 'Racing Kings' : room.torpedo ? 'Torpedo' : room.crazyhouse ? 'Crazyhouse' : undefined;
+export function variantPgnTag(room: Pick<Room, 'giveaway' | 'atomic' | 'duckChess' | 'spellChess' | 'horde' | 'racingKings' | 'torpedo' | 'knightmate' | 'crazyhouse'>): string | undefined {
+  return room.giveaway ? 'Antichess' : room.atomic ? 'Atomic' : room.duckChess ? 'Duck' : room.spellChess ? 'Spell' : room.horde ? 'Horde' : room.racingKings ? 'Racing Kings' : room.torpedo ? 'Torpedo' : room.knightmate ? 'Knightmate' : room.crazyhouse ? 'Crazyhouse' : undefined;
 }
 
 /**
@@ -252,7 +257,7 @@ export class RoomManager {
 
   createRoom(params: CreateRoomParams): CreateRoomResult {
     const id = randomUUID();
-    const initialFen = params.initialFen ?? (params.racingKings ? RACING_KINGS_START_FEN : params.horde ? HORDE_START_FEN : params.chess960 ? generateChess960Position() : START_FEN);
+    const initialFen = params.initialFen ?? (params.knightmate ? KNIGHTMATE_START_FEN : params.racingKings ? RACING_KINGS_START_FEN : params.horde ? HORDE_START_FEN : params.chess960 ? generateChess960Position() : START_FEN);
     const engine = new RoomChessEngine(initialFen, {
       chess960: params.chess960,
       initialFen,
@@ -263,6 +268,7 @@ export class RoomManager {
       horde: params.horde,
       racingKings: params.racingKings,
       torpedo: params.torpedo,
+      knightmate: params.knightmate,
       crazyhouse: params.crazyhouse,
     });
     const ms = initialClockMs(params.timeControl);
@@ -287,6 +293,7 @@ export class RoomManager {
       horde: params.horde,
       racingKings: params.racingKings,
       torpedo: params.torpedo,
+      knightmate: params.knightmate,
       crazyhouse: params.crazyhouse,
       spellState: initialSpellChessState(),
       repetitionKeys: [],
@@ -380,6 +387,11 @@ export class RoomManager {
     // A king promotion only exists in Giveaway; chess.js would refuse it for the other variants too, but
     // rejecting it explicitly keeps the wire type's 'k' from ever reaching move().
     if (!room.giveaway && payload.promotion === 'k') {
+      return { ok: false, error: 'Invalid move.' };
+    }
+    // The Commoner promotion ('m') exists only in Knightmate, and a Knightmate pawn never promotes to a knight (there are no
+    // ordinary knights): refuse both here so neither reaches an engine that does not know the piece.
+    if (payload.promotion === 'm' ? !room.knightmate : room.knightmate && payload.promotion === 'n') {
       return { ok: false, error: 'Invalid move.' };
     }
 
@@ -741,6 +753,7 @@ export class RoomManager {
         isHorde: room.horde,
         isRacingKings: room.racingKings,
         isTorpedo: room.torpedo,
+        isKnightmate: room.knightmate,
         isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
@@ -911,6 +924,7 @@ export class RoomManager {
         isHorde: room.horde,
         isRacingKings: room.racingKings,
         isTorpedo: room.torpedo,
+        isKnightmate: room.knightmate,
         isCrazyhouse: room.crazyhouse,
         spellState: room.spellChess ? room.spellState : undefined,
         crazyhouse: room.crazyhouse ? room.engine.getCrazyhouseState() : undefined,
@@ -980,6 +994,12 @@ export class RoomManager {
     room.clockTimer = setTimeout(() => {
       if (room.status !== 'active' || room.engine.getTurn() !== turn) return;
       const winner: PieceColor = turn === 'w' ? 'b' : 'w';
+      // Knightmate: a flag that falls against an opponent holding ONLY its royal knight is a DRAW (it could never have mated);
+      // kmTimeoutResult is the shared rule the app applies to its own clock (knightmateGame.knightmateTimeoutOutcome).
+      if (room.knightmate && kmTimeoutResult(kmParseFen(room.engine.getFen()), turn) === 'draw') {
+        this.endGame(room, 'timeout', null);
+        return;
+      }
       this.endGame(room, 'timeout', winner);
     }, Math.max(0, remaining));
   }

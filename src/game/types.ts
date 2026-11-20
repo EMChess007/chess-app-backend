@@ -61,6 +61,8 @@ export interface JoinQueuePayload {
   isRacingKings?: boolean;
   /** Torpedo -- see torpedo.ts. Mutually exclusive with every other variant. */
   isTorpedo?: boolean;
+  /** Knightmate -- see knightmate.ts. Mutually exclusive with every other variant. */
+  isKnightmate?: boolean;
   /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
   isCrazyhouse?: boolean;
   /** The client's own display label for `timeControl` (e.g. "10 min", "3 | 2") — carried through
@@ -76,8 +78,8 @@ export interface MakeMovePayload {
   roomId: string;
   from: string;
   to: string;
-  /** 'k' is only ever legal in Giveaway (a pawn may promote to a king there). */
-  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  /** 'k' is only ever legal in Giveaway (a pawn may promote to a king there); 'm' (the Commoner) only in Knightmate. */
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k' | 'm';
   /** Duck Chess only — where the duck goes as the second half of the turn. Required with every move that does not
    * capture a king; the whole turn is refused if it is missing or not a legal placement. */
   duckTo?: string;
@@ -134,6 +136,7 @@ export interface MatchFoundPayload {
   isHorde: boolean;
   isRacingKings: boolean;
   isTorpedo: boolean;
+  isKnightmate: boolean;
   isCrazyhouse: boolean;
   fen: string;
   whiteMs: number;
@@ -151,7 +154,7 @@ export interface OpponentMovePayload {
    * `visibleSquares`, just not what specifically happened. Always present outside Fog of War. */
   from?: string;
   to?: string;
-  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k' | 'm';
   san?: string;
   /** Duck Chess only — the square the duck was just placed on (absent after a king capture) and where it stands now. */
   duck?: string;
@@ -209,6 +212,7 @@ export interface RejoinStatePayload {
   isHorde: boolean;
   isRacingKings: boolean;
   isTorpedo: boolean;
+  isKnightmate: boolean;
   isCrazyhouse: boolean;
   /** Spell Chess only — charges/cooldowns/pending effects right now. */
   spellState?: SpellChessState;
@@ -281,6 +285,7 @@ export interface CreateChallengePayload {
   isHorde?: boolean;
   isRacingKings?: boolean;
   isTorpedo?: boolean;
+  isKnightmate?: boolean;
   /** Crazyhouse -- see crazyhouse.ts. Mutually exclusive with every other variant. */
   isCrazyhouse?: boolean;
   timeControlLabel?: string;
@@ -328,6 +333,7 @@ export interface CreateTournamentPayload {
   isThreeCheck?: boolean;
   isRacingKings?: boolean;
   isTorpedo?: boolean;
+  isKnightmate?: boolean;
 }
 
 export interface JoinTournamentPayload {
@@ -353,6 +359,7 @@ export interface TournamentLobbyState {
   isThreeCheck: boolean;
   isRacingKings: boolean;
   isTorpedo: boolean;
+  isKnightmate: boolean;
   status: TournamentStatus;
   creatorUserId: string;
   participants: TournamentParticipantSummary[];
@@ -379,6 +386,7 @@ export interface TournamentNextMatch {
   isThreeCheck: boolean;
   isRacingKings: boolean;
   isTorpedo: boolean;
+  isKnightmate: boolean;
   roomId: string | null;
   playerToken: string | null;
   color: PieceColor | null;
@@ -409,6 +417,7 @@ export interface TournamentMatchReadyPayload {
   isThreeCheck: boolean;
   isRacingKings: boolean;
   isTorpedo: boolean;
+  isKnightmate: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;

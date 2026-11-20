@@ -1512,6 +1512,120 @@ async function testTorpedoOnline() {
   bob.disconnect();
 }
 
+async function testKnightmateOnline() {
+  console.log('\n=== Knightmate: matchmaking, challenge, royal knight + commoner notation, promotion on the wire (q/r/b/m, never n), rejoin, resignation ===');
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const KNIGHTMATE_FEN = 'rmbqkbmr/pppppppp/8/8/8/8/PPPPPPPP/RMBQKBMR w KQkq - 0 1';
+
+  const kmSeeker = await connect('Kima');
+  const classicSeeker = await connect('Clea7');
+  check((await emitAck(kmSeeker, 'join_queue', { timeControl, isKnightmate: true })).ok === true, 'Kima queues for Knightmate');
+  check((await emitAck(classicSeeker, 'join_queue', { timeControl })).ok === true, 'Clea7 queues for a classic game');
+  let wronglyPaired = false;
+  kmSeeker.once('match_found', () => (wronglyPaired = true));
+  classicSeeker.once('match_found', () => (wronglyPaired = true));
+  await new Promise((r) => setTimeout(r, 600));
+  check(!wronglyPaired, 'a Knightmate seeker and a classic seeker are never paired with each other');
+  await emitAck(kmSeeker, 'leave_queue', {});
+  await emitAck(classicSeeker, 'leave_queue', {});
+  kmSeeker.disconnect();
+  classicSeeker.disconnect();
+
+  const confused = await connect('Confused7');
+  const conflict = await emitAck(confused, 'join_queue', { timeControl, isKnightmate: true, isTorpedo: true });
+  check(conflict.ok === false && /cannot be combined/i.test(conflict.error), 'Knightmate + another variant is rejected on join_queue');
+  check((await emitAck(confused, 'create_challenge', { timeControl, isKnightmate: true, isChess960: true })).ok === false, '...and on create_challenge');
+  confused.disconnect();
+
+  // A challenge carries the variant to the joiner.
+  const host = await connect('Kmhost');
+  const guest = await connect('Kmguest');
+  const created = await emitAck(host, 'create_challenge', { timeControl, isKnightmate: true });
+  check(created.ok === true && typeof created.code === 'string', 'a Knightmate challenge is created');
+  const hostMatch = waitFor(host, 'match_found'); // BEFORE the emit that provokes it -- see waitFor's doc comment
+  hostMatch.catch(() => {});
+  const guestMatch = waitFor(guest, 'match_found');
+  guestMatch.catch(() => {});
+  check((await emitAck(guest, 'join_challenge', { code: created.code })).ok === true, 'the guest joins by code');
+  const [hm, gm] = await Promise.all([hostMatch, guestMatch]);
+  check(hm.isKnightmate === true && gm.isKnightmate === true && hm.fen === KNIGHTMATE_FEN, 'both sides of a challenge are told isKnightmate: true, with the Knightmate position');
+  host.disconnect();
+  guest.disconnect();
+
+  const alice = await connect('Kimon');
+  const bob = await connect('Kimberly');
+  const [matchA, matchB] = await Promise.all([
+    (async () => {
+      const matchFound = waitFor(alice, 'match_found'); // BEFORE the emit -- see waitFor's doc comment
+      matchFound.catch(() => {});
+      await emitAck(alice, 'join_queue', { timeControl, isKnightmate: true });
+      return matchFound;
+    })(),
+    (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const matchFound = waitFor(bob, 'match_found'); // BEFORE the emit
+      matchFound.catch(() => {});
+      await emitAck(bob, 'join_queue', { timeControl, isKnightmate: true });
+      return matchFound;
+    })(),
+  ]);
+  check(matchA.roomId === matchB.roomId, 'two Knightmate seekers are paired');
+  check(matchA.isKnightmate === true && matchB.isKnightmate === true && matchA.isTorpedo === false && matchA.isRacingKings === false && matchA.isHorde === false, 'match_found tells both clients isKnightmate: true');
+  check(matchA.fen === KNIGHTMATE_FEN && matchB.fen === KNIGHTMATE_FEN, 'both start from the Knightmate position');
+
+  const white = matchA.color === 'w' ? { socket: alice } : { socket: bob };
+  const black = matchA.color === 'b' ? { socket: alice } : { socket: bob };
+  const roomId = matchA.roomId;
+  const turn = (who, from, to, promotion) => emitAck(who.socket, 'make_move', { roomId, from, to, ...(promotion ? { promotion } : {}) });
+
+  check((await turn(black, 'e8', 'f6')).ok === false, 'Black cannot move out of turn');
+  check((await turn(white, 'e1', 'e2')).ok === false, 'the royal knight cannot step like a king (e1-e2 is refused)');
+  const kf3 = await turn(white, 'e1', 'f3');
+  check(kf3.ok === true && kf3.san === 'Kf3', '1.Kf3: the royal knight moves like a knight and is written K');
+  check((await turn(black, 'e8', 'f6')).san === 'Kf6', '1...Kf6');
+  check((await turn(white, 'a2', 'a4')).ok === true, '2.a4');
+  check((await turn(black, 'b7', 'b5')).ok === true, '2...b5');
+  check((await turn(white, 'a4', 'b5')).san === 'axb5', '3.axb5');
+  check((await turn(black, 'a7', 'a6')).ok === true, '3...a6');
+  check((await turn(white, 'b5', 'a6')).san === 'bxa6', '4.bxa6');
+  check((await turn(black, 'h7', 'h6')).ok === true, '4...h6');
+  check((await turn(white, 'a6', 'a7')).san === 'a7', '5.a7');
+  check((await turn(black, 'h6', 'h5')).ok === true, '5...h5');
+  const blackSeesPromotion = waitFor(black.socket, 'opponent_move'); // BEFORE the move that provokes it
+
+  // PROMOTION ON THE WIRE: queen / rook / bishop / commoner exist, a knight (or a king) does not.
+  check((await turn(white, 'a7', 'b8', 'n')).ok === false, '6.axb8=N is refused: there are no ordinary knights in Knightmate');
+  check((await turn(white, 'a7', 'b8', 'k')).ok === false, '6.axb8=K is refused');
+  const promoted = await turn(white, 'a7', 'b8', 'm');
+  check(promoted.ok === true && promoted.san === 'axb8=M', '6.axb8=M: promotion to a COMMONER is accepted and written "=M"');
+  const seenPromotion = await blackSeesPromotion;
+  check(seenPromotion.promotion === 'm' && seenPromotion.san === 'axb8=M' && seenPromotion.fen.startsWith('rMbq1bmr/'), 'Black receives opponent_move {promotion: "m", san: "axb8=M"} and the FEN with the white commoner "M"');
+
+  // A spectator and a rejoin must both be told it is a Knightmate game.
+  const watcher = await connect('KnightmateWatcher');
+  const spectate = await emitAck(watcher, 'spectate_game', { roomId });
+  check(spectate.ok === true && spectate.state.isKnightmate === true, 'a spectator is told it is a Knightmate game');
+  check(spectate.state.moves.at(-1).promotion === 'm' && spectate.state.moves.at(-1).san === 'axb8=M', 'the spectator history carries promotion "m" and "axb8=M"');
+  watcher.disconnect();
+  const blackMatch = matchA.color === 'b' ? matchA : matchB;
+  const whiteSeesDrop = waitFor(white.socket, 'opponent_disconnected');
+  black.socket.disconnect();
+  await whiteSeesDrop;
+  const back = await connect('KnightmateBlack (reconnected)');
+  const rejoin = await emitAck(back, 'rejoin_game', { roomId, playerToken: blackMatch.playerToken });
+  check(rejoin.ok === true && rejoin.state.isKnightmate === true, 'a rejoin answer says it is a Knightmate game');
+  black.socket = back;
+
+  const whiteOver = waitFor(white.socket, 'game_over');
+  const blackOver = waitFor(black.socket, 'game_over');
+  const resign = await emitAck(black.socket, 'resign', { roomId });
+  check(resign.ok === true, 'Black resigns');
+  const [wr, br] = await Promise.all([whiteOver, blackOver]);
+  check(wr.reason === 'resignation' && wr.winner === 'w' && br.reason === 'resignation', 'both players get game_over {resignation, winner: white}');
+  alice.disconnect();
+  bob.disconnect();
+}
+
 async function testHordeOnline() {
   console.log('\n=== Horde: matchmaking, the 36-pawn start, a few turns, resignation ===');
   const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
@@ -2035,6 +2149,7 @@ async function main() {
   await testHordeOnline();
   await testRacingKingsOnline();
   await testTorpedoOnline();
+  await testKnightmateOnline();
   await testFromPositionOnline();
   await testCrazyhouseOnline();
   await testNoTimeLimitOnline();

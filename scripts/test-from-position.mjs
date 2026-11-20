@@ -122,6 +122,7 @@ const created = rooms.createRoom({
   horde: false,
   racingKings: false,
   torpedo: false,
+  knightmate: false,
   crazyhouse: false,
   initialFen: checked.fen,
   fromPosition: true,
@@ -141,7 +142,7 @@ const classic = rooms.createRoom({
   black: { socketId: 'cb', userId: null },
   timeControl: { initialSeconds: 300, incrementSeconds: 0 },
   chess960: false, kingOfTheHill: false, threeCheck: false, setupChess: false, fogOfWar: false, giveaway: false, atomic: false,
-  duckChess: false, spellChess: false, horde: false, racingKings: false, torpedo: false, crazyhouse: false,
+  duckChess: false, spellChess: false, horde: false, racingKings: false, torpedo: false, knightmate: false, crazyhouse: false,
 });
 const classicRejoin = rooms.rejoin('cb2', { roomId: classic.roomId, playerToken: classic.blackPlayerToken });
 check(classicRejoin.ok === true && classicRejoin.state.initialFen === undefined && classicRejoin.state.isFromPosition === undefined, 'an ordinary room carries neither field (wire unchanged)');

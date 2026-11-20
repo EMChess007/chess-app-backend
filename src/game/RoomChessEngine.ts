@@ -16,6 +16,20 @@ import { collapseFenRank, expandFenRank, getChess960BackRankFiles } from './ches
 import { isCastleBlockedByDuck, isMoveBlockedByDuck } from './duckChess.js';
 import { racingKingsOutcomeFromFen } from './racingKings.js';
 import { torpedoExtraDoubleStep } from './torpedo.js';
+import {
+  KNIGHTMATE_START_FEN,
+  kmApply,
+  kmFen,
+  kmFindMove,
+  kmLegalMoves,
+  kmParseFen,
+  kmSan,
+  kmSquareIndex,
+  kmSquareName,
+  kmStatus,
+  type KmMove,
+  type KmPosition,
+} from './knightmate.js';
 import { HORDE_FIRST_RANK_DOUBLE_STEP_ALLOWS_EN_PASSANT, getHordeWinnerFromFen, hordeFirstRankDoubleStep } from './horde.js';
 import { castlingRookOrigin, getJumpAugmentedCaptures } from './spellChess.js';
 import {
@@ -122,7 +136,7 @@ export interface AppliedMove {
   from: string;
   to: string;
   /** 'k' only ever appears in Giveaway (Antichess), where a pawn may promote to a king. */
-  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k' | 'm';
   /** Duck Chess only — the square the duck was placed on as the second half of this turn. Absent for every other
    * mode, and for the move that captures a king (the game ends with no placement). */
   duck?: string;
@@ -140,7 +154,7 @@ export interface AppliedMove {
   /** The type of piece captured by this move, if any — only ever populated by movePseudoLegal
    * (Fog of War), which needs it to detect a king capture; the normal move() path has never
    * needed it since every other variant's win conditions don't depend on what was captured. */
-  captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
+  captured?: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' | 'm';
 }
 
 // BEGIN unrestricted-castles (byte-identical in the backend's RoomChessEngine.ts — backend/scripts/test-fogOfWarCastling.mjs checks it)
@@ -258,6 +272,14 @@ export interface RoomChessEngineOptions {
    */
   torpedo?: boolean;
   /**
+   * Knightmate only -- the server-side twin of the mobile app's identical ChessEngine option (see src/logic/knightmate.ts there,
+   * mirrored in ./knightmate.ts). A self-contained engine: knightmate.ts answers every query (board, legal moves, move, status,
+   * FEN) and chess.js is never loaded with the position (it cannot hold a royal knight). Piece type 'k' is the ROYAL KNIGHT and
+   * 'm' the Commoner. Repetition is RoomManager's (repetition.ts); a flag fall against a bare royal knight is knightmate.kmTimeoutResult.
+   * Not combinable with any other variant.
+   */
+  knightmate?: boolean;
+  /**
    * Crazyhouse only -- the server-side twin of the mobile app's identical ChessEngine option (see src/logic/crazyhouse.ts there,
    * mirrored in ./crazyhouse.ts). chess.js stays authoritative for every ordinary move; this adds drop() and keeps the reserve
    * and the promoted-piece set (`crazyhouseState`, passed in because it is NOT part of the FEN, like duckSquare) up to date on
@@ -286,6 +308,10 @@ export class RoomChessEngine {
   private horde: boolean;
   private racingKings: boolean;
   private torpedo: boolean;
+  private knightmate: boolean;
+  /** Knightmate only: the position (the source of truth in that mode) and its legal-move cache. */
+  private kmPosition: KmPosition;
+  private kmLegalCache: KmMove[] | null = null;
   private crazyhouse: boolean;
   private crazyhouseState: CrazyhouseState;
   private frozenSquares: string[];
@@ -310,21 +336,27 @@ export class RoomChessEngine {
     this.frozenSquares = options?.spellChess ? (options.frozenSquares ?? []) : [];
     this.jumpSquare = options?.spellChess ? (options.jumpSquare ?? null) : null;
     this.freezeEscapeActive = options?.spellChess ? (options.freezeEscapeActive ?? false) : false;
-    this.chess = fen ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic || this.duckChess || this.spellChess || this.horde || this.torpedo })) : new Chess();
+    this.knightmate = options?.knightmate ?? false;
+    this.kmPosition = kmParseFen(this.knightmate ? (fen ?? KNIGHTMATE_START_FEN) : KNIGHTMATE_START_FEN);
+    // Knightmate never loads chess.js with its position (a royal knight / commoner is not a chess.js piece): it keeps a default board.
+    this.chess = fen && !this.knightmate ? (this.giveaway ? loadGiveawayFen(fen) : new Chess(fen, { skipValidation: this.atomic || this.duckChess || this.spellChess || this.horde || this.torpedo })) : new Chess();
     this.atomicCurrentFen = fen ?? START_FEN;
     this.chess960 = options?.chess960 ?? false;
-    this.files = getChess960BackRankFiles(options?.initialFen ?? fen ?? START_FEN);
+    this.files = getChess960BackRankFiles(this.knightmate ? START_FEN : (options?.initialFen ?? fen ?? START_FEN));
   }
 
   getTurn(): PieceColor {
+    if (this.knightmate) return this.kmPosition.turn;
     return this.chess.turn();
   }
 
-  move(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q'): AppliedMove | null {
+  move(from: string, to: string, promotion?: 'n' | 'b' | 'r' | 'q' | 'm'): AppliedMove | null {
+    if (this.knightmate) return this.moveKnightmate(from, to, promotion);
     if (this.atomic) return this.moveAtomic(from, to, promotion);
-    if (this.spellChess) return this.moveSpellChess(from, to, promotion);
+    // 'm' (the Knightmate commoner) was dealt with above; every other mode's promotion is one of n / b / r / q.
+    if (this.spellChess) return this.moveSpellChess(from, to, promotion as Exclude<typeof promotion, 'm'>);
     if (this.horde && this.hordeDoubleStepTarget(from) === to) return this.applyHordeDoubleStep(from, to);
-    if (this.torpedo && this.torpedoDoubleStepTarget(from) === to) return this.applyTorpedoDoubleStep(from, to, promotion);
+    if (this.torpedo && this.torpedoDoubleStepTarget(from) === to) return this.applyTorpedoDoubleStep(from, to, promotion as Exclude<typeof promotion, 'm'>);
     if (this.chess960) {
       const side = this.matchChess960CastleAttempt(from, to);
       if (side) {
@@ -363,6 +395,7 @@ export class RoomChessEngine {
   }
 
   getStatus(): GameStatus {
+    if (this.knightmate) return kmStatus(this.kmPosition, this.getKmLegal());
     if (this.atomic) return getAtomicStatus(this.getAtomicPosition(), this.getAtomicLegal());
     if (this.crazyhouse) {
       // A side is only mated/stalemated if it ALSO has no legal drop (a drop can interpose or simply be played), and chess.js's
@@ -400,6 +433,10 @@ export class RoomChessEngine {
   }
 
   isGameOver(): boolean {
+    if (this.knightmate) {
+      const status = this.getStatus();
+      return status === 'checkmate' || status === 'stalemate' || status === 'draw';
+    }
     if (this.atomic) {
       if (getAtomicKingWinner(this.getAtomicPosition())) return true;
       const status = this.getStatus();
@@ -427,6 +464,7 @@ export class RoomChessEngine {
   }
 
   getFen(): string {
+    if (this.knightmate) return kmFen(this.kmPosition);
     if (this.atomic) return this.atomicCurrentFen;
     // forceEnpassantSquare: see the mobile app's identical ChessEngine.getFen() for the full
     // rationale — without this, chess.js's own .fen() can silently drop an en-passant target
@@ -534,9 +572,32 @@ export class RoomChessEngine {
 
   /** The piece on `square`, or null if empty — the server-side twin of the mobile app's identical
    * ChessEngine.getPieceAt, needed by spellChess.ts's getJumpAugmentedCaptures/getCheckingPieceSquares. */
-  getPieceAt(square: string): { type: 'p' | 'n' | 'b' | 'r' | 'q' | 'k'; color: PieceColor } | null {
+  getPieceAt(square: string): { type: 'p' | 'n' | 'b' | 'r' | 'q' | 'k' | 'm'; color: PieceColor } | null {
+    if (this.knightmate) {
+      const cell = this.kmPosition.board[kmSquareIndex(square)];
+      return cell ? { type: cell.type, color: cell.color } : null;
+    }
     const piece = this.chess.get(square as ChessJsSquare);
     return piece ? { type: piece.type, color: piece.color } : null;
+  }
+
+  // --- Knightmate (see knightmate.ts) ------------------------------------
+
+  private getKmLegal(): KmMove[] {
+    this.kmLegalCache ??= kmLegalMoves(this.kmPosition);
+    return this.kmLegalCache;
+  }
+
+  /** Applies a legal Knightmate move (an omitted promotion is a queen); null for an illegal one, like move(). */
+  private moveKnightmate(from: string, to: string, promotion?: string): AppliedMove | null {
+    const legal = this.getKmLegal();
+    const found = kmFindMove(this.kmPosition, from, to, promotion, legal);
+    if (!found) return null;
+    const result = kmApply(this.kmPosition, found);
+    const san = kmSan(this.kmPosition, found, legal, result.position);
+    this.kmPosition = result.position;
+    this.kmLegalCache = null;
+    return { from, to, promotion: found.promotion, san, captured: result.captured };
   }
 
   // --- Atomic (see atomic.ts) --------------------------------------------
@@ -632,6 +693,10 @@ export class RoomChessEngine {
 
   /** Destination squares of the legal moves from `square` (Racing Kings only; used for the rank-8 result). */
   getLegalMoves(square: string): string[] {
+    if (this.knightmate) {
+      const from = kmSquareIndex(square);
+      return [...new Set(this.getKmLegal().filter((m) => m.from === from).map((m) => kmSquareName(m.to)))];
+    }
     if (this.torpedo) {
       const targets = this.chess.moves({ square: square as ChessJsSquare, verbose: true }).map((move) => move.to as string);
       const doubleStep = this.torpedoDoubleStepTarget(square);
@@ -773,7 +838,7 @@ export class RoomChessEngine {
       from: indexFromSquare(from),
       to: indexFromSquare(to),
       piece: piece.type,
-      captured,
+      captured: captured as InternalMove['captured'],
       flags: captured ? 2 /* chess.js's CAPTURE flag */ : 1 /* chess.js's NORMAL flag */,
     };
     const internals = this.chess as unknown as ChessInternals;

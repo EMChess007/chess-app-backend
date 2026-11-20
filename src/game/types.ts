@@ -76,8 +76,8 @@ export interface MakeMovePayload {
   roomId: string;
   from: string;
   to: string;
-  /** 'k' is only ever legal in Giveaway (a pawn may promote to a king there). */
-  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  /** 'k' is only ever legal in Giveaway (a pawn may promote to a king there); 'm' (the Commoner) only in Knightmate. */
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k' | 'm';
   /** Duck Chess only — where the duck goes as the second half of the turn. Required with every move that does not
    * capture a king; the whole turn is refused if it is missing or not a legal placement. */
   duckTo?: string;
@@ -151,7 +151,7 @@ export interface OpponentMovePayload {
    * `visibleSquares`, just not what specifically happened. Always present outside Fog of War. */
   from?: string;
   to?: string;
-  promotion?: 'n' | 'b' | 'r' | 'q' | 'k';
+  promotion?: 'n' | 'b' | 'r' | 'q' | 'k' | 'm';
   san?: string;
   /** Duck Chess only — the square the duck was just placed on (absent after a king capture) and where it stands now. */
   duck?: string;

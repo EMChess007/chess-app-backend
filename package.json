@@ -36,6 +36,7 @@
     "test:horde": "tsx scripts/test-horde.mjs",
     "test:racingKings": "tsx scripts/test-racingKings.mjs",
     "test:torpedo": "tsx scripts/test-torpedo.mjs",
+    "test:knightmate": "tsx scripts/test-knightmate.mjs",
     "test:fromPosition": "tsx scripts/test-from-position.mjs",
     "test:crazyhouse": "tsx scripts/test-crazyhouse.mjs",
     "test:unlimited": "tsx scripts/test-unlimited.mjs",

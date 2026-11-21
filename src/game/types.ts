@@ -322,18 +322,30 @@ export interface SubmitSetupChessPayload {
 
 export type TournamentStatus = 'lobby' | 'active' | 'finished';
 
-export interface CreateTournamentPayload {
+/** Every 2-player variant flag, as the wire carries it (the same keys as JoinQueuePayload; see variantFlags.ts). */
+export interface TournamentVariantWire {
+  isChess960: boolean;
+  isKingOfTheHill: boolean;
+  isThreeCheck: boolean;
+  isSetupChess: boolean;
+  isFogOfWar: boolean;
+  isGiveaway: boolean;
+  isAtomic: boolean;
+  isDuckChess: boolean;
+  isSpellChess: boolean;
+  isHorde: boolean;
+  isRacingKings: boolean;
+  isTorpedo: boolean;
+  isKnightmate: boolean;
+  isCrazyhouse: boolean;
+}
+
+export interface CreateTournamentPayload extends Partial<TournamentVariantWire> {
   name: string;
   timeControl: TimeControl;
   /** Never accepted: a tournament cannot start from a custom position (create_tournament refuses a payload that carries it). */
   initialFen?: string;
   timeControlLabel?: string;
-  isChess960?: boolean;
-  isKingOfTheHill?: boolean;
-  isThreeCheck?: boolean;
-  isRacingKings?: boolean;
-  isTorpedo?: boolean;
-  isKnightmate?: boolean;
 }
 
 export interface JoinTournamentPayload {
@@ -349,17 +361,11 @@ export interface TournamentParticipantSummary {
   username: string;
 }
 
-export interface TournamentLobbyState {
+export interface TournamentLobbyState extends TournamentVariantWire {
   id: string;
   code: string;
   name: string;
   timeControl: TimeControl;
-  isChess960: boolean;
-  isKingOfTheHill: boolean;
-  isThreeCheck: boolean;
-  isRacingKings: boolean;
-  isTorpedo: boolean;
-  isKnightmate: boolean;
   status: TournamentStatus;
   creatorUserId: string;
   participants: TournamentParticipantSummary[];
@@ -377,16 +383,10 @@ export interface TournamentStandingRow {
  * it's never broadcast to anyone else. `status` is the match's status ('pending' until an
  * opponent is also free, 'active' once a room exists), and roomId/playerToken/color are only
  * populated once it's 'active'. */
-export interface TournamentNextMatch {
+export interface TournamentNextMatch extends TournamentVariantWire {
   status: 'pending' | 'active';
   opponentUsername: string;
   timeControl: TimeControl;
-  isChess960: boolean;
-  isKingOfTheHill: boolean;
-  isThreeCheck: boolean;
-  isRacingKings: boolean;
-  isTorpedo: boolean;
-  isKnightmate: boolean;
   roomId: string | null;
   playerToken: string | null;
   color: PieceColor | null;
@@ -396,9 +396,12 @@ export interface TournamentNextMatch {
   fen: string | null;
   whiteMs: number | null;
   blackMs: number | null;
+  /** Fog of War only: this player's own visible squares at the start (`fen` is their redacted view). */
+  visibleSquares?: string[];
 }
 
-export interface TournamentStandingsPayload {
+/** Carries the tournament's own variant flags too (every standings push), so the Standings screen can name the variant without the lobby state. */
+export interface TournamentStandingsPayload extends TournamentVariantWire {
   standings: TournamentStandingRow[];
   status: TournamentStatus;
   yourNextMatch: TournamentNextMatch | null;
@@ -406,21 +409,17 @@ export interface TournamentStandingsPayload {
 
 /** Same shape as MatchFoundPayload (see below) — a tournament match is an ordinary game room in
  * every respect once it starts, so the client reuses the exact same "enter the game" flow. */
-export interface TournamentMatchReadyPayload {
+export interface TournamentMatchReadyPayload extends TournamentVariantWire {
   roomId: string;
   color: PieceColor;
   playerToken: string;
   opponent: { userId: string; username: string };
   timeControl: TimeControl;
-  isChess960: boolean;
-  isKingOfTheHill: boolean;
-  isThreeCheck: boolean;
-  isRacingKings: boolean;
-  isTorpedo: boolean;
-  isKnightmate: boolean;
   fen: string;
   whiteMs: number;
   blackMs: number;
+  /** Fog of War only: this recipient's own visible squares (the fen is their redacted view). */
+  visibleSquares?: string[];
 }
 
 // Generic acknowledgement shape used by every request/response-style client event

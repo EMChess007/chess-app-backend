@@ -378,6 +378,118 @@ async function testKnightmateFlagThreadsThrough() {
   maxSocket.disconnect();
 }
 
+// --- Command #65: a tournament for EVERY 2-player variant (From Position and Setup Chess excepted) ----------------------------------
+const ALL_VARIANT_KEYS = ['isChess960', 'isKingOfTheHill', 'isThreeCheck', 'isSetupChess', 'isFogOfWar', 'isGiveaway', 'isAtomic', 'isDuckChess', 'isSpellChess', 'isHorde', 'isRacingKings', 'isTorpedo', 'isKnightmate', 'isCrazyhouse'];
+const PLAIN_PLIES = [{ from: 'e2', to: 'e4' }, { from: 'e7', to: 'e5' }];
+// One entry per variant a tournament accepts. `plies` alternate White, Black, ... and are legal in that variant's own rules; the
+// literal start FENs are the ones a normal online room of that variant starts from (no start FEN = random / redacted start).
+const VARIANT_TOURNAMENT_CASES = [
+  { key: 'isFogOfWar', label: 'Fog of War', plies: PLAIN_PLIES },
+  { key: 'isGiveaway', label: 'Giveaway', plies: PLAIN_PLIES },
+  { key: 'isAtomic', label: 'Atomic', plies: PLAIN_PLIES },
+  { key: 'isDuckChess', label: 'Duck Chess', plies: [{ from: 'e2', to: 'e4', duckTo: 'a3' }, { from: 'e7', to: 'e5', duckTo: 'a6' }] },
+  { key: 'isSpellChess', label: 'Spell Chess', plies: PLAIN_PLIES },
+  { key: 'isHorde', label: 'Horde', startFen: 'rnbqkbnr/pppppppp/8/1PP2PP1/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP w kq - 0 1', plies: [{ from: 'c5', to: 'c6' }, { from: 'e7', to: 'e5' }] },
+  { key: 'isRacingKings', label: 'Racing Kings', startFen: '8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1', plies: [{ from: 'e2', to: 'f4' }, { from: 'd2', to: 'c4' }] },
+  { key: 'isTorpedo', label: 'Torpedo', plies: PLAIN_PLIES },
+  { key: 'isKnightmate', label: 'Knightmate', startFen: 'rmbqkbmr/pppppppp/8/8/8/8/PPPPPPPP/RMBQKBMR w KQkq - 0 1', plies: PLAIN_PLIES },
+  { key: 'isCrazyhouse', label: 'Crazyhouse', plies: [{ from: 'e2', to: 'e4' }, { from: 'd7', to: 'd5' }, { from: 'e4', to: 'd5' }] },
+];
+
+let sharedTrio = null;
+/** Three accounts for the whole variant section (register is rate limited per address, so they are made once and reused with fresh sockets). */
+async function variantTrio() {
+  if (!sharedTrio) {
+    const tag = randomUUID().slice(0, 6);
+    sharedTrio = [await registerUser(`vta_${tag}`), await registerUser(`vtb_${tag}`), await registerUser(`vtc_${tag}`)];
+  }
+  return sharedTrio;
+}
+
+async function playVariantTournament(variantCase) {
+  console.log(`\n=== Tournament: ${variantCase.label} (create, join, play legal moves, result recorded) ===`);
+  const [creator, second, third] = await variantTrio();
+  const sockets = [await connect('P1', creator.token), await connect('P2', second.token), await connect('P3', third.token)];
+  const userNameById = { [creator.userId]: 'P1', [second.userId]: 'P2', [third.userId]: 'P3' };
+  const ready = [];
+  sockets.forEach((socket, index) => socket.on('tournament_match_ready', (payload) => ready.push({ who: index, payload })));
+
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const createAck = await emitAck(sockets[0], 'create_tournament', { name: `${variantCase.label} Cup`, timeControl, [variantCase.key]: true });
+  check(createAck.ok === true, `${variantCase.label}: create_tournament is accepted`);
+  const joinAck = await emitAck(sockets[1], 'join_tournament', { code: createAck.code });
+  check(joinAck.ok === true && joinAck.tournament[variantCase.key] === true, `${variantCase.label}: the lobby state reports ${variantCase.key}: true`);
+  check(ALL_VARIANT_KEYS.filter((k) => k !== variantCase.key).every((k) => joinAck.tournament[k] === false), `${variantCase.label}: the lobby state reports every other variant flag false`);
+  await emitAck(sockets[2], 'join_tournament', { code: createAck.code });
+  const startAck = await emitAck(sockets[0], 'start_tournament', { tournamentId: createAck.tournamentId });
+  check(startAck.ok === true, `${variantCase.label}: the tournament starts with 3 players`);
+
+  const deadline = Date.now() + 5000;
+  while (ready.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+  check(ready.length === 2 && ready[0].payload.roomId === ready[1].payload.roomId, `${variantCase.label}: one pair got the same tournament_match_ready room`);
+  check(ready.every((e) => e.payload[variantCase.key] === true), `${variantCase.label}: tournament_match_ready carries ${variantCase.key}: true`);
+  check(ready.every((e) => ALL_VARIANT_KEYS.filter((k) => k !== variantCase.key).every((k) => e.payload[k] === false)), `${variantCase.label}: tournament_match_ready carries every other flag false`);
+  if (variantCase.startFen) check(ready.every((e) => e.payload.fen === variantCase.startFen), `${variantCase.label}: the match starts from the variant's own position`);
+
+  const white = ready.find((e) => e.payload.color === 'w');
+  const black = ready.find((e) => e.payload.color === 'b');
+  const roomId = white.payload.roomId;
+  for (let i = 0; i < variantCase.plies.length; i++) {
+    const mover = i % 2 === 0 ? white : black;
+    const ack = await emitAck(sockets[mover.who], 'make_move', { roomId, ...variantCase.plies[i] });
+    check(ack.ok === true, `${variantCase.label}: ply ${i + 1} (${variantCase.plies[i].from}-${variantCase.plies[i].to}) is accepted${ack.ok ? '' : ` (${ack.error})`}`);
+  }
+
+  const blackUserId = white.payload.opponent.userId;
+  const gameOvers = [waitFor(sockets[white.who], 'game_over'), waitFor(sockets[black.who], 'game_over')];
+  await emitAck(sockets[white.who], 'resign', { roomId });
+  const [whiteResult] = await Promise.all(gameOvers);
+  check(whiteResult.reason === 'resignation', `${variantCase.label}: the game ends by resignation`);
+
+  let blackRow = null;
+  const standingsDeadline = Date.now() + 5000;
+  while (Date.now() < standingsDeadline) {
+    const res = await emitAck(sockets[0], 'get_tournament_standings', { tournamentId: createAck.tournamentId });
+    blackRow = res.standings.standings.find((r) => r.userId === blackUserId);
+    if (blackRow && blackRow.played === 1) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  check(blackRow && blackRow.points === 1 && blackRow.played === 1, `${variantCase.label}: the result is recorded - ${userNameById[blackUserId]} (Black, the resigner's opponent) has 1 point after 1 game`);
+  sockets.forEach((s) => s.disconnect());
+}
+
+async function testEveryVariantHasATournament() {
+  for (const variantCase of VARIANT_TOURNAMENT_CASES) await playVariantTournament(variantCase);
+}
+
+async function testImpossibleTournamentsAreRefused() {
+  console.log('\n=== Tournament creation refuses From Position, Setup Chess and combined variants ===');
+  const [creator] = await variantTrio();
+  const socket = await connect('Creator', creator.token);
+  const timeControl = { initialSeconds: 300, incrementSeconds: 0 };
+  const create = (extra) => emitAck(socket, 'create_tournament', { name: 'Refused Cup', timeControl, ...extra });
+
+  const fromPosition = await create({ initialFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' });
+  check(fromPosition.ok === false && /From Position/i.test(fromPosition.error), 'From Position (initialFen) is refused: challenge only');
+  const setupChess = await create({ isSetupChess: true });
+  check(setupChess.ok === false && /Setup Chess/i.test(setupChess.error), 'Setup Chess is refused with its own message');
+  const combos = [
+    { isAtomic: true, isHorde: true },
+    { isCrazyhouse: true, isKingOfTheHill: true },
+    { isDuckChess: true, isChess960: true },
+    { isFogOfWar: true, isThreeCheck: true },
+    { isGiveaway: true, isSpellChess: true },
+    { isRacingKings: true, isTorpedo: true },
+  ];
+  for (const flags of combos) {
+    const res = await create(flags);
+    check(res.ok === false && /cannot be combined/i.test(res.error), `${Object.keys(flags).join(' + ')} is refused as a combined variant`);
+  }
+  const classicCombo = await create({ isChess960: true, isKingOfTheHill: true });
+  check(classicCombo.ok === true, 'Chess960 + King of the Hill (the classic combinations) is still accepted');
+  socket.disconnect();
+}
+
 async function run() {
   console.log(`Connecting to ${SERVER_URL} ...`);
   await testGuestsAreRejected();
@@ -387,6 +499,8 @@ async function run() {
   await testThreeCheckFlagThreadsThrough();
   await testTorpedoFlagThreadsThrough();
   await testKnightmateFlagThreadsThrough();
+  await testEveryVariantHasATournament();
+  await testImpossibleTournamentsAreRefused();
 }
 
 async function main() {

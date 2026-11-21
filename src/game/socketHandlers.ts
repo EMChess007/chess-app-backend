@@ -8,7 +8,8 @@ import { Matchmaker } from './matchmaking.js';
 import { RoomManager } from './rooms.js';
 import { SetupChessPairingManager } from './setupChessPairing.js';
 import { validateFromPositionFen } from './fromPosition.js';
-import { TournamentManager } from './tournaments.js';
+import { TournamentManager, tournamentUnsupportedError } from './tournaments.js';
+import { variantConflictError, variantWireFlagsFrom } from './variantFlags.js';
 import type {
   Ack,
   CreateChallengePayload,
@@ -474,7 +475,9 @@ export function registerSocketHandlers(io: Server): void {
         ack?.({ ok: false, error: 'Please enter a tournament name.' });
         return;
       }
-      const conflict = conflictingVariantError(payload);
+      // The same flag record a normal online game of that variant uses (variantFlags.ts); every exclusive variant refuses any other flag.
+      const variant = variantWireFlagsFrom(payload);
+      const conflict = variantConflictError(variant) ?? tournamentUnsupportedError(variant);
       if (conflict) {
         ack?.({ ok: false, error: conflict });
         return;
@@ -492,12 +495,7 @@ export function registerSocketHandlers(io: Server): void {
           creatorUsername: user.username,
           timeControl: payload.timeControl,
           timeControlLabel: typeof payload.timeControlLabel === 'string' ? payload.timeControlLabel : undefined,
-          chess960: Boolean(payload.isChess960),
-          kingOfTheHill: Boolean(payload.isKingOfTheHill),
-          threeCheck: Boolean(payload.isThreeCheck),
-          racingKings: Boolean(payload.isRacingKings),
-          torpedo: Boolean(payload.isTorpedo),
-          knightmate: Boolean(payload.isKnightmate),
+          variant,
         });
         ack?.({ ok: true, code: tournament.code, tournamentId: tournament.id });
       } catch (err) {

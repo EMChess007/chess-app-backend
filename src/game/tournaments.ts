@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { prisma } from '../lib/prisma.js';
 import type { PieceColor } from './RoomChessEngine.js';
 import type { RoomManager } from './rooms.js';
+import { roomFlagsFrom, type VariantWireFlags } from './variantFlags.js';
 import type {
   TimeControl,
   TournamentLobbyState,
@@ -51,6 +52,9 @@ interface Match {
   fen: string | null;
   whiteMs: number | null;
   blackMs: number | null;
+  /** Fog of War only: each color's redacted start view (null for every other variant). */
+  whiteView: { fen: string; visibleSquares: string[] } | null;
+  blackView: { fen: string; visibleSquares: string[] } | null;
   /** The winner's userId, or null for a draw — only meaningful once status is 'finished'. */
   winner: string | null;
 }
@@ -61,18 +65,21 @@ interface Tournament {
   name: string;
   timeControl: TimeControl;
   timeControlLabel?: string;
-  chess960: boolean;
-  kingOfTheHill: boolean;
-  threeCheck: boolean;
-  /** In memory only (the tournaments table has no column for it and tournaments are never restored from it). */
-  racingKings: boolean;
-  /** In memory only, like racingKings. */
-  torpedo: boolean;
-  knightmate: boolean;
+  /** Every variant flag, as one record (variantFlags.ts). Only Chess960 / King of the Hill / 3-check have table columns (persistCreate);
+   * the rest live in memory only - tournaments are never restored from the table. */
+  variant: VariantWireFlags;
   creatorUserId: string;
   status: TournamentStatus;
   participants: Map<string, Participant>;
   matches: Match[];
+}
+
+/** null when a tournament can run this variant. Setup Chess has no start position until both players have built a blind army (a pairing
+ * phase with no room yet, setupChessPairing.ts) and a tournament match is room-based end to end, so it stays out. From Position is refused
+ * earlier (initialFen) and 4-seat / Bughouse have their own engines and sockets. */
+export function tournamentUnsupportedError(variant: VariantWireFlags): string | null {
+  if (variant.isSetupChess) return 'Setup Chess cannot be played in a tournament.';
+  return null;
 }
 
 function allPairs<T>(items: T[]): [T, T][] {
@@ -119,12 +126,7 @@ export class TournamentManager {
     creatorUsername: string;
     timeControl: TimeControl;
     timeControlLabel?: string;
-    chess960: boolean;
-    kingOfTheHill: boolean;
-    threeCheck: boolean;
-    racingKings?: boolean;
-    torpedo?: boolean;
-    knightmate?: boolean;
+    variant: VariantWireFlags;
   }): Promise<Tournament> {
     let code = generateCode();
     while (this.codeToId.has(code)) code = generateCode(); // astronomically rare, cheap to guard
@@ -136,12 +138,7 @@ export class TournamentManager {
       name: params.name,
       timeControl: params.timeControl,
       timeControlLabel: params.timeControlLabel,
-      chess960: params.chess960,
-      kingOfTheHill: params.kingOfTheHill,
-      threeCheck: params.threeCheck,
-      racingKings: params.racingKings === true,
-      torpedo: params.torpedo === true,
-      knightmate: params.knightmate === true,
+      variant: { ...params.variant },
       creatorUserId: params.creatorUserId,
       status: 'lobby',
       participants: new Map([
@@ -254,6 +251,8 @@ export class TournamentManager {
       fen: null,
       whiteMs: null,
       blackMs: null,
+      whiteView: null,
+      blackView: null,
       winner: null,
     }));
 
@@ -300,20 +299,7 @@ export class TournamentManager {
         black: { socketId: black.socketId!, userId: black.userId },
         timeControl: tournament.timeControl,
         timeControlLabel: tournament.timeControlLabel,
-        chess960: tournament.chess960,
-        kingOfTheHill: tournament.kingOfTheHill,
-        threeCheck: tournament.threeCheck,
-        setupChess: false, // Tournaments don't support Setup Chess yet — see VariantSelector's excludeVariants on TournamentScreen
-        fogOfWar: false, // Tournaments don't support Fog of War either — same exclusion
-        giveaway: false, // ...nor Giveaway (1v1 Online only)
-        atomic: false, // ...nor Atomic
-        duckChess: false, // ...nor Duck Chess
-        spellChess: false, // ...nor Spell Chess
-        horde: false, // ...nor Horde
-        racingKings: tournament.racingKings,
-        torpedo: tournament.torpedo,
-        knightmate: tournament.knightmate,
-        crazyhouse: false, // ...nor Crazyhouse
+        ...roomFlagsFrom(tournament.variant),
         onFinished: (winnerColor) => this.handleMatchFinished(tournament.id, match, white.userId, black.userId, winnerColor),
       });
       match.roomId = created.roomId;
@@ -322,28 +308,29 @@ export class TournamentManager {
       match.fen = created.fen;
       match.whiteMs = created.whiteMs;
       match.blackMs = created.blackMs;
+      // Fog of War: each color gets its OWN redacted view of the start (same as match_found), never the true position.
+      match.whiteView = created.whiteView ?? null;
+      match.blackView = created.blackView ?? null;
 
       const basePayload = {
         roomId: created.roomId,
         timeControl: tournament.timeControl,
-        isChess960: tournament.chess960,
-        isKingOfTheHill: tournament.kingOfTheHill,
-        isThreeCheck: tournament.threeCheck,
-        isRacingKings: tournament.racingKings,
-        isTorpedo: tournament.torpedo,
-        isKnightmate: tournament.knightmate,
-        fen: created.fen,
+        ...tournament.variant,
         whiteMs: created.whiteMs,
         blackMs: created.blackMs,
       };
       const whitePayload: TournamentMatchReadyPayload = {
         ...basePayload,
+        fen: created.whiteView?.fen ?? created.fen,
+        visibleSquares: created.whiteView?.visibleSquares,
         color: 'w',
         playerToken: created.whitePlayerToken,
         opponent: { userId: black.userId, username: black.username },
       };
       const blackPayload: TournamentMatchReadyPayload = {
         ...basePayload,
+        fen: created.blackView?.fen ?? created.fen,
+        visibleSquares: created.blackView?.visibleSquares,
         color: 'b',
         playerToken: created.blackPlayerToken,
         opponent: { userId: white.userId, username: white.username },
@@ -414,25 +401,24 @@ export class TournamentManager {
       const opponentUserId = isA ? match.b : match.a;
       const opponent = tournament.participants.get(opponentUserId);
       const isActive = match.status === 'active';
+      const myColor = isA ? match.aColor : match.aColor === 'w' ? 'b' : match.aColor === 'b' ? 'w' : null;
       yourNextMatch = {
         status: isActive ? 'active' : 'pending',
         opponentUsername: opponent?.username ?? 'Player',
         timeControl: tournament.timeControl,
-        isChess960: tournament.chess960,
-        isKingOfTheHill: tournament.kingOfTheHill,
-        isThreeCheck: tournament.threeCheck,
-        isRacingKings: tournament.racingKings,
-        isTorpedo: tournament.torpedo,
-        isKnightmate: tournament.knightmate,
+        ...tournament.variant,
         roomId: match.roomId,
         playerToken: isActive ? (isA ? match.aToken : match.bToken) : null,
         color: isActive ? (isA ? match.aColor : match.aColor === 'w' ? 'b' : 'w') : null,
-        fen: isActive ? match.fen : null,
+        fen: isActive ? (myColor === 'w' ? match.whiteView?.fen : myColor === 'b' ? match.blackView?.fen : undefined) ?? match.fen : null,
         whiteMs: isActive ? match.whiteMs : null,
         blackMs: isActive ? match.blackMs : null,
+        ...(isActive && (myColor === 'w' ? match.whiteView : myColor === 'b' ? match.blackView : null)
+          ? { visibleSquares: (myColor === 'w' ? match.whiteView : match.blackView)!.visibleSquares }
+          : {}),
       };
     }
-    return { standings: this.computeStandings(tournament), status: tournament.status, yourNextMatch };
+    return { standings: this.computeStandings(tournament), status: tournament.status, yourNextMatch, ...tournament.variant };
   }
 
   private broadcastStandings(tournament: Tournament): void {
@@ -448,12 +434,7 @@ export class TournamentManager {
       code: tournament.code,
       name: tournament.name,
       timeControl: tournament.timeControl,
-      isChess960: tournament.chess960,
-      isKingOfTheHill: tournament.kingOfTheHill,
-      isThreeCheck: tournament.threeCheck,
-      isRacingKings: tournament.racingKings,
-      isTorpedo: tournament.torpedo,
-      isKnightmate: tournament.knightmate,
+      ...tournament.variant,
       status: tournament.status,
       creatorUserId: tournament.creatorUserId,
       participants: [...tournament.participants.values()].map((p) => ({ userId: p.userId, username: p.username })),
@@ -499,9 +480,9 @@ export class TournamentManager {
         code: tournament.code,
         initialSeconds: tournament.timeControl.initialSeconds,
         incrementSeconds: tournament.timeControl.incrementSeconds,
-        isChess960: tournament.chess960,
-        isKingOfTheHill: tournament.kingOfTheHill,
-        isThreeCheck: tournament.threeCheck,
+        isChess960: tournament.variant.isChess960,
+        isKingOfTheHill: tournament.variant.isKingOfTheHill,
+        isThreeCheck: tournament.variant.isThreeCheck,
         creatorId: tournament.creatorUserId,
         participants: { create: { userId: tournament.creatorUserId, points: 0 } },
       },
